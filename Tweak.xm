@@ -91,6 +91,7 @@ static BOOL gV54CapturedOriginalFrames = NO;
 static __weak UIView *gV55MapsPlatter = nil;
 static __weak UIView *gV55DashboardRootView = nil;
 static BOOL gV55Detached = NO;
+static void DPV55ApplyDetachedMapsSplit(UIWindowScene *ws);
 static void DPV54ApplyGeometry(UIWindowScene *ws);
 
 static NSString *gLeftApp  = nil;
@@ -1112,7 +1113,7 @@ static void DPTick(void) {
         if (!DPIsCarPlay()) return;
 
         DPLoadPrefs();
-        DPLog(@"CTOR V5.5 bundle=%@ ratio=%.2f",
+        DPLog(@"CTOR V5.5.1 bundle=%@ ratio=%.2f",
               NSBundle.mainBundle.bundleIdentifier ?: @"nil", gRatio);
 
         dispatch_async(dispatch_get_main_queue(), ^{ DPTick(); });
