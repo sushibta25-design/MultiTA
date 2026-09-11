@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.5.0-v5
+Version: 0.7.2
 Architecture: iphoneos-arm64e
-Description: CarPlay split screen with draggable divider and per-pane app picker
+Description: DuoPhone V5.2 searches the live CarPlay Dashboard for UIKit scene-presentation host views and CALayerHost/CAContext details needed for real app hosting.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

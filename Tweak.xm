@@ -80,6 +80,7 @@ static BOOL      gDragging      = NO;
 static CGFloat   gDragStartX    = 0.0;
 static BOOL      gProbeDone     = NO;
 static BOOL      gV51HostProbeDone = NO;
+static BOOL      gV52SceneHostProbeDone = NO;
 
 static NSString *gLeftApp  = nil;
 static NSString *gRightApp = nil;
@@ -566,6 +567,154 @@ static void DPV51ProbeDashboardHost(void) {
     DPLog(@"========== V5.1 DASHBOARD HOST PROBE END ==========");
 }
 
+
+#pragma mark - V5.2 Scene presentation host probe
+
+static BOOL DPV52IsTargetViewClassName(NSString *cn) {
+    if (!cn.length) return NO;
+    return [cn containsString:@"_UIScenePresentationView"] ||
+           [cn containsString:@"_UISceneLayerHostContainerView"] ||
+           [cn containsString:@"_UIContextLayerHostView"] ||
+           [cn containsString:@"_UISceneLayerHostView"] ||
+           [cn containsString:@"CPUIPassthroughView"];
+}
+
+static void DPV52DumpLayerTree(CALayer *layer, NSInteger depth) {
+    if (!layer || depth > 10) return;
+
+    NSString *cn = NSStringFromClass([layer class]);
+    BOOL hit = [cn containsString:@"CALayerHost"] ||
+               [cn containsString:@"CAContext"] ||
+               [cn containsString:@"Host"];
+
+    if (hit) {
+        DPLog(@"V5.2 LAYER depth=%ld class=%@ frame=%@ super=%@ sub=%lu",
+              (long)depth,
+              cn,
+              NSStringFromCGRect(layer.frame),
+              layer.superlayer ? NSStringFromClass([layer.superlayer class]) : @"nil",
+              (unsigned long)layer.sublayers.count);
+
+        for (NSString *key in @[@"contextId", @"context", @"hostId", @"sceneLayer"]) {
+            id value = nil;
+            @try { value = [layer valueForKey:key]; } @catch (__unused NSException *e) {}
+            if (value) {
+                DPLog(@"V5.2 LAYER KVC %@ => %@ class=%@",
+                      key, value, NSStringFromClass([value class]));
+            }
+        }
+    }
+
+    for (CALayer *sub in layer.sublayers)
+        DPV52DumpLayerTree(sub, depth + 1);
+}
+
+static void DPV52DumpViewTarget(UIView *v, NSInteger depth) {
+    if (!v) return;
+
+    NSString *cn = NSStringFromClass([v class]);
+
+    DPLog(@"========== V5.2 TARGET VIEW ==========");
+    DPLog(@"V5.2 TARGET depth=%ld class=%@ frame=%@ hidden=%d alpha=%.2f",
+          (long)depth,
+          cn,
+          NSStringFromCGRect(v.frame),
+          v.hidden,
+          v.alpha);
+
+    for (NSString *key in @[
+        @"scene",
+        @"sceneLayer",
+        @"presentationContext",
+        @"currentPresentationContext",
+        @"hostContainerView",
+        @"context",
+        @"contextId"
+    ]) {
+        id value = nil;
+        @try { value = [v valueForKey:key]; } @catch (__unused NSException *e) {}
+        if (value) {
+            DPLog(@"V5.2 TARGET KVC %@ => %@ class=%@",
+                  key, value, NSStringFromClass([value class]));
+        }
+    }
+
+    DPLog(@"V5.2 TARGET layer=%@ class=%@",
+          v.layer,
+          NSStringFromClass([v.layer class]));
+
+    DPV52DumpLayerTree(v.layer, 0);
+
+    UIView *cur = v.superview;
+    NSInteger up = 0;
+    while (cur && up < 8) {
+        DPLog(@"V5.2 SUPER[%ld] class=%@ frame=%@",
+              (long)up,
+              NSStringFromClass([cur class]),
+              NSStringFromCGRect(cur.frame));
+        cur = cur.superview;
+        up++;
+    }
+
+    UIResponder *r = v.nextResponder;
+    NSInteger rr = 0;
+    while (r && rr < 8) {
+        DPLog(@"V5.2 RESPONDER[%ld] class=%@ obj=%@",
+              (long)rr,
+              NSStringFromClass([r class]),
+              r);
+        r = r.nextResponder;
+        rr++;
+    }
+
+    DPLog(@"========== V5.2 TARGET VIEW END ==========");
+}
+
+static void DPV52WalkViewTree(UIView *v, NSInteger depth) {
+    if (!v || depth > 16) return;
+
+    NSString *cn = NSStringFromClass([v class]);
+    if (DPV52IsTargetViewClassName(cn)) {
+        DPV52DumpViewTarget(v, depth);
+    }
+
+    for (UIView *sub in v.subviews)
+        DPV52WalkViewTree(sub, depth + 1);
+}
+
+static void DPV52ProbeScenePresentationHost(void) {
+    if (gV52SceneHostProbeDone) return;
+    gV52SceneHostProbeDone = YES;
+
+    DPLog(@"========== V5.2 SCENE PRESENTATION HOST PROBE ==========");
+
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        NSString *pid = ws.session.persistentIdentifier ?: @"";
+
+        if (![pid containsString:@"DBDashboard-Car"]) continue;
+
+        DPLog(@"V5.2 SCENE pid=%@ windows=%lu",
+              pid,
+              (unsigned long)ws.windows.count);
+
+        for (UIWindow *w in ws.windows) {
+            DPLog(@"V5.2 WINDOW class=%@ level=%.1f frame=%@ root=%@",
+                  NSStringFromClass([w class]),
+                  w.windowLevel,
+                  NSStringFromCGRect(w.frame),
+                  w.rootViewController ? NSStringFromClass([w.rootViewController class]) : @"nil");
+
+            DPV52WalkViewTree(w, 0);
+            DPV52DumpLayerTree(w.layer, 0);
+        }
+    }
+
+    DPLog(@"========== V5.2 SCENE PRESENTATION HOST PROBE END ==========");
+}
+
 #pragma mark - Vòng lặp
 
 static void DPTick(void) {
@@ -579,6 +728,7 @@ static void DPTick(void) {
         if (++ticks >= 4) {
             DPProbeDashboard();
             DPV51ProbeDashboardHost();
+            DPV52ProbeScenePresentationHost();
         }
     }
 
@@ -591,7 +741,7 @@ static void DPTick(void) {
         if (!DPIsCarPlay()) return;
 
         DPLoadPrefs();
-        DPLog(@"CTOR V5.1 bundle=%@ ratio=%.2f",
+        DPLog(@"CTOR V5.2 bundle=%@ ratio=%.2f",
               NSBundle.mainBundle.bundleIdentifier ?: @"nil", gRatio);
 
         dispatch_async(dispatch_get_main_queue(), ^{ DPTick(); });
