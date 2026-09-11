@@ -79,6 +79,7 @@ static CGFloat   gRatio         = 0.60;
 static BOOL      gDragging      = NO;
 static CGFloat   gDragStartX    = 0.0;
 static BOOL      gProbeDone     = NO;
+static BOOL      gV51HostProbeDone = NO;
 
 static NSString *gLeftApp  = nil;
 static NSString *gRightApp = nil;
@@ -461,6 +462,110 @@ static void DPProbeDashboard(void) {
     DPLog(@"========== V5.0 DASHBOARD PROBE END ==========");
 }
 
+
+#pragma mark - V5.1 Dashboard host probe
+
+static BOOL DPV51InterestingName(NSString *name) {
+    if (!name.length) return NO;
+    NSString *l = name.lowercaseString;
+    return [l containsString:@"scene"] ||
+           [l containsString:@"host"] ||
+           [l containsString:@"content"] ||
+           [l containsString:@"application"] ||
+           [l containsString:@"dashboard"] ||
+           [l containsString:@"presentation"] ||
+           [l containsString:@"container"] ||
+           [l containsString:@"context"];
+}
+
+static void DPV51DumpRuntime(id obj, NSString *tag) {
+    if (!obj) return;
+    DPLog(@"========== V5.1 RUNTIME %@ ==========", tag);
+    DPLog(@"V5.1 %@ obj=%@ class=%@", tag, obj, NSStringFromClass([obj class]));
+
+    Class cls=[obj class];
+    for (NSUInteger d=0; cls && d<8; d++, cls=class_getSuperclass(cls)) {
+        unsigned int mc=0; Method *ms=class_copyMethodList(cls,&mc);
+        for (unsigned int i=0;i<mc;i++) {
+            NSString *n=NSStringFromSelector(method_getName(ms[i]));
+            if (DPV51InterestingName(n))
+                DPLog(@"V5.1 %@ METHOD %@.%@ types=%s",
+                      tag,NSStringFromClass(cls),n,method_getTypeEncoding(ms[i]) ?: "?");
+        }
+        if(ms) free(ms);
+
+        unsigned int ic=0; Ivar *ivs=class_copyIvarList(cls,&ic);
+        for(unsigned int i=0;i<ic;i++){
+            const char *rn=ivar_getName(ivs[i]), *rt=ivar_getTypeEncoding(ivs[i]);
+            NSString *n=rn ? [NSString stringWithUTF8String:rn] : nil;
+            if(n && DPV51InterestingName(n)) {
+                id value=nil;
+                if(rt && rt[0]=='@') {
+                    @try { value=object_getIvar(obj,ivs[i]); } @catch(__unused NSException *e){}
+                }
+                DPLog(@"V5.1 %@ IVAR %@.%@ type=%s value=%@ valueClass=%@",
+                      tag,NSStringFromClass(cls),n,rt ?: "?",
+                      value ?: @"nil",value ? NSStringFromClass([value class]) : @"nil");
+            }
+        }
+        if(ivs) free(ivs);
+    }
+    DPLog(@"========== V5.1 RUNTIME %@ END ==========", tag);
+}
+
+static void DPV51WalkViews(UIView *v, NSInteger depth) {
+    if(!v || depth>12) return;
+    NSString *cn=NSStringFromClass([v class]);
+    NSString *l=cn.lowercaseString;
+    BOOL hit=[l containsString:@"scene"] ||
+             [l containsString:@"host"] ||
+             [l containsString:@"presentation"] ||
+             [l containsString:@"context"] ||
+             [l containsString:@"dashboard"];
+    if(hit) {
+        DPLog(@"V5.1 HOSTVIEW depth=%ld %@ frame=%@ window=%@",
+              (long)depth,cn,NSStringFromCGRect(v.frame),
+              v.window ? NSStringFromClass([v.window class]) : @"nil");
+        DPV51DumpRuntime(v,[NSString stringWithFormat:@"VIEW_%@",cn]);
+    }
+    for(UIView *c in v.subviews) DPV51WalkViews(c,depth+1);
+}
+
+static void DPV51ProbeDashboardHost(void) {
+    if(gV51HostProbeDone) return;
+    gV51HostProbeDone=YES;
+
+    DPLog(@"========== V5.1 DASHBOARD HOST PROBE ==========");
+    for(UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if(![s isKindOfClass:UIWindowScene.class]) continue;
+        NSString *pid=s.session.persistentIdentifier ?: @"";
+        if(![pid containsString:@"DBDashboard-Car"]) continue;
+        UIWindowScene *ws=(UIWindowScene *)s;
+
+        for(UIWindow *w in ws.windows) {
+            UIViewController *root=w.rootViewController;
+            if(!root) continue;
+
+            if([NSStringFromClass([root class]) containsString:@"DBDashboardRootViewController"]) {
+                DPLog(@"V5.1 DASH ROOT=%@ view=%@ frame=%@",
+                      root,NSStringFromClass([root.view class]),NSStringFromCGRect(root.view.frame));
+                DPV51DumpRuntime(root,@"DASH_ROOT");
+
+                for(UIViewController *child in root.childViewControllers) {
+                    DPLog(@"V5.1 DASH CHILD=%@ class=%@ view=%@ frame=%@",
+                          child,NSStringFromClass([child class]),
+                          NSStringFromClass([child.view class]),NSStringFromCGRect(child.view.frame));
+                    DPV51DumpRuntime(child,
+                        [NSString stringWithFormat:@"CHILD_%@",NSStringFromClass([child class])]);
+                }
+
+                DPV51WalkViews(root.view,0);
+            }
+        }
+    }
+    DPLog(@"========== V5.1 DASHBOARD HOST PROBE END ==========");
+}
+
 #pragma mark - Vòng lặp
 
 static void DPTick(void) {
@@ -471,7 +576,10 @@ static void DPTick(void) {
 
     if (gDividerWindow && !gProbeDone) {
         static NSUInteger ticks = 0;
-        if (++ticks >= 4) DPProbeDashboard();
+        if (++ticks >= 4) {
+            DPProbeDashboard();
+            DPV51ProbeDashboardHost();
+        }
     }
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1000 * NSEC_PER_MSEC),
@@ -483,7 +591,7 @@ static void DPTick(void) {
         if (!DPIsCarPlay()) return;
 
         DPLoadPrefs();
-        DPLog(@"CTOR V5.0 bundle=%@ ratio=%.2f",
+        DPLog(@"CTOR V5.1 bundle=%@ ratio=%.2f",
               NSBundle.mainBundle.bundleIdentifier ?: @"nil", gRatio);
 
         dispatch_async(dispatch_get_main_queue(), ^{ DPTick(); });
