@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.7.5-1
+Version: 0.7.5-2
 Architecture: iphoneos-arm64e
-Description: DuoPhone V5.5.1 build fix for Maps platter detach split; adds the missing forward declaration.
+Description: DuoPhone V5.5.2 removes obsolete V5.4 geometry code so the V5.5 detached Maps platter split builds cleanly with -Werror.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
