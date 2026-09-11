@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.7.2
+Version: 0.7.3
 Architecture: iphoneos-arm64e
-Description: DuoPhone V5.2 searches the live CarPlay Dashboard for UIKit scene-presentation host views and CALayerHost/CAContext details needed for real app hosting.
+Description: DuoPhone V5.3 experimental live split using the real com.apple.Maps _UIScenePresentationView and existing CarPlay scene host instead of cloning CALayerHost contexts.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

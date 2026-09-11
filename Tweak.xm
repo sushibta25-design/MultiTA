@@ -81,6 +81,10 @@ static CGFloat   gDragStartX    = 0.0;
 static BOOL      gProbeDone     = NO;
 static BOOL      gV51HostProbeDone = NO;
 static BOOL      gV52SceneHostProbeDone = NO;
+static __weak UIView *gV53MapsPresentationView = nil;
+static __weak UIView *gV53MapsHostContainer = nil;
+static __weak UIView *gV53DashboardHomeView = nil;
+static BOOL gV53Applied = NO;
 
 static NSString *gLeftApp  = nil;
 static NSString *gRightApp = nil;
@@ -715,6 +719,166 @@ static void DPV52ProbeScenePresentationHost(void) {
     DPLog(@"========== V5.2 SCENE PRESENTATION HOST PROBE END ==========");
 }
 
+
+#pragma mark - V5.3 EXPERIMENTAL live Maps host split
+
+static id DPV53SafeKVC(id obj, NSString *key) {
+    if (!obj || !key) return nil;
+    @try { return [obj valueForKey:key]; }
+    @catch (__unused NSException *e) { return nil; }
+}
+
+static BOOL DPV53SceneLooksLikeMaps(id scene) {
+    if (!scene) return NO;
+    NSString *d = nil;
+    @try { d = [scene description]; } @catch (__unused NSException *e) {}
+    if (!d.length) return NO;
+    return [d containsString:@"com.apple.Maps"];
+}
+
+static void DPV53FindMapsHostInView(UIView *v) {
+    if (!v || gV53MapsPresentationView) return;
+
+    NSString *cn = NSStringFromClass([v class]);
+
+    if ([cn isEqualToString:@"_UIScenePresentationView"]) {
+        id scene = DPV53SafeKVC(v, @"scene");
+
+        if (DPV53SceneLooksLikeMaps(scene)) {
+            gV53MapsPresentationView = v;
+
+            id host = DPV53SafeKVC(v, @"hostContainerView");
+            if ([host isKindOfClass:UIView.class])
+                gV53MapsHostContainer = (UIView *)host;
+
+            DPLog(@"========== V5.3 MAPS HOST FOUND ==========");
+            DPLog(@"V5.3 presentation=%@ frame=%@ scene=%@",
+                  v, NSStringFromCGRect(v.frame), scene);
+            DPLog(@"V5.3 host=%@ class=%@ frame=%@",
+                  gV53MapsHostContainer ?: @"nil",
+                  gV53MapsHostContainer ? NSStringFromClass([gV53MapsHostContainer class]) : @"nil",
+                  gV53MapsHostContainer ? NSStringFromCGRect(gV53MapsHostContainer.frame) : @"nil");
+            DPLog(@"========== V5.3 MAPS HOST FOUND END ==========");
+            return;
+        }
+    }
+
+    for (UIView *sub in v.subviews)
+        DPV53FindMapsHostInView(sub);
+}
+
+static UIWindowScene *DPV53DashboardScene(void) {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        NSString *pid = ws.session.persistentIdentifier ?: @"";
+
+        if ([pid containsString:@"DBDashboard-Car"])
+            return ws;
+    }
+    return nil;
+}
+
+static void DPV53FindDashboardHomeView(UIWindowScene *ws) {
+    if (!ws || gV53DashboardHomeView) return;
+
+    for (UIWindow *w in ws.windows) {
+        UIViewController *root = w.rootViewController;
+        if (!root) continue;
+
+        if (![NSStringFromClass([root class]) containsString:@"DBDashboardRootViewController"])
+            continue;
+
+        for (UIViewController *child in root.childViewControllers) {
+            if ([NSStringFromClass([child class]) containsString:@"DBDashboardHomeViewController"]) {
+                gV53DashboardHomeView = child.view;
+                DPLog(@"V5.3 dashboardHome=%@ frame=%@",
+                      gV53DashboardHomeView,
+                      NSStringFromCGRect(gV53DashboardHomeView.frame));
+                return;
+            }
+        }
+    }
+}
+
+static void DPV53ScanForMapsHost(UIWindowScene *ws) {
+    if (!ws || gV53MapsPresentationView) return;
+
+    for (UIWindow *w in ws.windows) {
+        DPV53FindMapsHostInView(w);
+        if (gV53MapsPresentationView) return;
+
+        if (w.rootViewController)
+            DPV53FindMapsHostInView(w.rootViewController.view);
+
+        if (gV53MapsPresentationView) return;
+    }
+}
+
+static void DPV53ApplySplit(void) {
+    UIWindowScene *ws = DPV53DashboardScene();
+    if (!ws) return;
+
+    DPV53FindDashboardHomeView(ws);
+    DPV53ScanForMapsHost(ws);
+
+    UIView *mapsPresentation = gV53MapsPresentationView;
+    UIView *mapsHost = gV53MapsHostContainer;
+    UIView *dash = gV53DashboardHomeView;
+
+    if (!mapsPresentation || !dash) {
+        static NSUInteger miss = 0;
+        if ((miss++ % 4) == 0)
+            DPLog(@"V5.3 waiting maps=%@ dash=%@", mapsPresentation ?: @"nil", dash ?: @"nil");
+        return;
+    }
+
+    CGRect bounds = ws.coordinateSpace.bounds;
+    CGFloat W = CGRectGetWidth(bounds);
+    CGFloat H = CGRectGetHeight(bounds);
+
+    CGFloat dock = 45.0;
+    CGFloat splitX = MAX(dock + 70.0, MIN(W - 70.0, W * gRatio));
+    CGFloat gap = 2.0;
+
+    CGRect left = CGRectMake(dock, 0,
+                             MAX(1.0, splitX - dock - gap),
+                             H);
+
+    CGRect right = CGRectMake(splitX + gap, 0,
+                              MAX(1.0, W - splitX - gap),
+                              H);
+
+    [UIView performWithoutAnimation:^{
+        dash.clipsToBounds = YES;
+        dash.frame = left;
+
+        mapsPresentation.clipsToBounds = YES;
+        mapsPresentation.frame = right;
+
+        if (mapsHost) {
+            mapsHost.clipsToBounds = YES;
+            mapsHost.frame = mapsPresentation.bounds;
+        }
+    }];
+
+    if (!gV53Applied) {
+        gV53Applied = YES;
+        DPLog(@"========== V5.3 LIVE SPLIT APPLIED ==========");
+        DPLog(@"V5.3 left=%@ right=%@",
+              NSStringFromCGRect(left), NSStringFromCGRect(right));
+        DPLog(@"V5.3 mapsPresentation=%@ super=%@",
+              mapsPresentation,
+              mapsPresentation.superview ? NSStringFromClass([mapsPresentation.superview class]) : @"nil");
+        DPLog(@"V5.3 mapsHost=%@ super=%@",
+              mapsHost ?: @"nil",
+              mapsHost.superview ? NSStringFromClass([mapsHost.superview class]) : @"nil");
+        DPLog(@"========== V5.3 LIVE SPLIT APPLIED END ==========");
+    }
+}
+
+
 #pragma mark - Vòng lặp
 
 static void DPTick(void) {
@@ -722,6 +886,8 @@ static void DPTick(void) {
 
     if (!gDividerWindow) DPCreateDivider();
     if (gDividerWindow && !gDragging) DPLayoutDivider();
+
+    DPV53ApplySplit();
 
     if (gDividerWindow && !gProbeDone) {
         static NSUInteger ticks = 0;
@@ -741,7 +907,7 @@ static void DPTick(void) {
         if (!DPIsCarPlay()) return;
 
         DPLoadPrefs();
-        DPLog(@"CTOR V5.2 bundle=%@ ratio=%.2f",
+        DPLog(@"CTOR V5.3 bundle=%@ ratio=%.2f",
               NSBundle.mainBundle.bundleIdentifier ?: @"nil", gRatio);
 
         dispatch_async(dispatch_get_main_queue(), ^{ DPTick(); });
