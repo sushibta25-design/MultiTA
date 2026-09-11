@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.7.3
+Version: 0.7.4
 Architecture: iphoneos-arm64e
-Description: DuoPhone V5.3 experimental live split using the real com.apple.Maps _UIScenePresentationView and existing CarPlay scene host instead of cloning CALayerHost contexts.
+Description: DuoPhone V5.4 fixes live split geometry around the actual draggable divider while keeping the real Maps dashboard scene host live.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

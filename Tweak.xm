@@ -85,6 +85,9 @@ static __weak UIView *gV53MapsPresentationView = nil;
 static __weak UIView *gV53MapsHostContainer = nil;
 static __weak UIView *gV53DashboardHomeView = nil;
 static BOOL gV53Applied = NO;
+static CGRect gV54OriginalDashFrame = {{0,0},{0,0}};
+static CGRect gV54OriginalMapsFrame = {{0,0},{0,0}};
+static BOOL gV54CapturedOriginalFrames = NO;
 
 static NSString *gLeftApp  = nil;
 static NSString *gRightApp = nil;
@@ -834,34 +837,7 @@ static void DPV53ApplySplit(void) {
         return;
     }
 
-    CGRect bounds = ws.coordinateSpace.bounds;
-    CGFloat W = CGRectGetWidth(bounds);
-    CGFloat H = CGRectGetHeight(bounds);
-
-    CGFloat dock = 45.0;
-    CGFloat splitX = MAX(dock + 70.0, MIN(W - 70.0, W * gRatio));
-    CGFloat gap = 2.0;
-
-    CGRect left = CGRectMake(dock, 0,
-                             MAX(1.0, splitX - dock - gap),
-                             H);
-
-    CGRect right = CGRectMake(splitX + gap, 0,
-                              MAX(1.0, W - splitX - gap),
-                              H);
-
-    [UIView performWithoutAnimation:^{
-        dash.clipsToBounds = YES;
-        dash.frame = left;
-
-        mapsPresentation.clipsToBounds = YES;
-        mapsPresentation.frame = right;
-
-        if (mapsHost) {
-            mapsHost.clipsToBounds = YES;
-            mapsHost.frame = mapsPresentation.bounds;
-        }
-    }];
+    DPV54ApplyGeometry(ws);
 
     if (!gV53Applied) {
         gV53Applied = YES;
@@ -875,6 +851,83 @@ static void DPV53ApplySplit(void) {
               mapsHost ?: @"nil",
               mapsHost.superview ? NSStringFromClass([mapsHost.superview class]) : @"nil");
         DPLog(@"========== V5.3 LIVE SPLIT APPLIED END ==========");
+    }
+}
+
+
+
+#pragma mark - V5.4 live split geometry fix
+
+static void DPV54CaptureOriginalFrames(void) {
+    if (gV54CapturedOriginalFrames) return;
+    if (!gV53DashboardHomeView || !gV53MapsPresentationView) return;
+
+    gV54OriginalDashFrame = gV53DashboardHomeView.frame;
+    gV54OriginalMapsFrame = gV53MapsPresentationView.frame;
+    gV54CapturedOriginalFrames = YES;
+
+    DPLog(@"V5.4 original dash=%@ maps=%@",
+          NSStringFromCGRect(gV54OriginalDashFrame),
+          NSStringFromCGRect(gV54OriginalMapsFrame));
+}
+
+static void DPV54ApplyGeometry(UIWindowScene *ws) {
+    if (!ws || !gV53DashboardHomeView || !gV53MapsPresentationView) return;
+
+    DPV54CaptureOriginalFrames();
+
+    CGRect bounds = ws.coordinateSpace.bounds;
+    CGFloat W = CGRectGetWidth(bounds);
+    CGFloat H = CGRectGetHeight(bounds);
+
+    CGFloat dock = 45.0;
+    CGFloat dividerCenter = CGRectGetMidX(gDividerWindow.frame);
+    if (dividerCenter <= dock + 40.0 || dividerCenter >= W - 40.0) {
+        dividerCenter = MAX(dock + 80.0, MIN(W - 80.0, W * gRatio));
+    }
+
+    CGFloat gap = 2.0;
+
+    CGRect left = CGRectMake(dock,
+                             0,
+                             MAX(1.0, dividerCenter - dock - gap),
+                             H);
+
+    CGRect right = CGRectMake(dividerCenter + gap,
+                              0,
+                              MAX(1.0, W - dividerCenter - gap),
+                              H);
+
+    [UIView performWithoutAnimation:^{
+        gV53DashboardHomeView.frame = left;
+        gV53DashboardHomeView.clipsToBounds = YES;
+
+        gV53MapsPresentationView.frame = right;
+        gV53MapsPresentationView.clipsToBounds = YES;
+
+        if (gV53MapsHostContainer) {
+            gV53MapsHostContainer.frame = gV53MapsPresentationView.bounds;
+            gV53MapsHostContainer.clipsToBounds = YES;
+        }
+    }];
+
+    static CGRect lastLeft = {{0,0},{0,0}};
+    static CGRect lastRight = {{0,0},{0,0}};
+
+    if (!CGRectEqualToRect(lastLeft, left) || !CGRectEqualToRect(lastRight, right)) {
+        lastLeft = left;
+        lastRight = right;
+
+        DPLog(@"========== V5.4 GEOMETRY ==========");
+        DPLog(@"V5.4 divider=%@ left=%@ right=%@",
+              gDividerWindow ? NSStringFromCGRect(gDividerWindow.frame) : @"nil",
+              NSStringFromCGRect(left),
+              NSStringFromCGRect(right));
+        DPLog(@"V5.4 dashNow=%@ mapsNow=%@ hostNow=%@",
+              NSStringFromCGRect(gV53DashboardHomeView.frame),
+              NSStringFromCGRect(gV53MapsPresentationView.frame),
+              gV53MapsHostContainer ? NSStringFromCGRect(gV53MapsHostContainer.frame) : @"nil");
+        DPLog(@"========== V5.4 GEOMETRY END ==========");
     }
 }
 
@@ -907,7 +960,7 @@ static void DPTick(void) {
         if (!DPIsCarPlay()) return;
 
         DPLoadPrefs();
-        DPLog(@"CTOR V5.3 bundle=%@ ratio=%.2f",
+        DPLog(@"CTOR V5.4 bundle=%@ ratio=%.2f",
               NSBundle.mainBundle.bundleIdentifier ?: @"nil", gRatio);
 
         dispatch_async(dispatch_get_main_queue(), ^{ DPTick(); });
