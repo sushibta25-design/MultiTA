@@ -88,6 +88,7 @@ static BOOL gV53Applied = NO;
 static CGRect gV54OriginalDashFrame = {{0,0},{0,0}};
 static CGRect gV54OriginalMapsFrame = {{0,0},{0,0}};
 static BOOL gV54CapturedOriginalFrames = NO;
+static void DPV54ApplyGeometry(UIWindowScene *ws);
 
 static NSString *gLeftApp  = nil;
 static NSString *gRightApp = nil;
@@ -842,8 +843,9 @@ static void DPV53ApplySplit(void) {
     if (!gV53Applied) {
         gV53Applied = YES;
         DPLog(@"========== V5.3 LIVE SPLIT APPLIED ==========");
-        DPLog(@"V5.3 left=%@ right=%@",
-              NSStringFromCGRect(left), NSStringFromCGRect(right));
+        DPLog(@"V5.3 dashFrame=%@ mapsFrame=%@",
+              NSStringFromCGRect(dash.frame),
+              NSStringFromCGRect(mapsPresentation.frame));
         DPLog(@"V5.3 mapsPresentation=%@ super=%@",
               mapsPresentation,
               mapsPresentation.superview ? NSStringFromClass([mapsPresentation.superview class]) : @"nil");
@@ -960,7 +962,7 @@ static void DPTick(void) {
         if (!DPIsCarPlay()) return;
 
         DPLoadPrefs();
-        DPLog(@"CTOR V5.4 bundle=%@ ratio=%.2f",
+        DPLog(@"CTOR V5.4.1 bundle=%@ ratio=%.2f",
               NSBundle.mainBundle.bundleIdentifier ?: @"nil", gRatio);
 
         dispatch_async(dispatch_get_main_queue(), ^{ DPTick(); });

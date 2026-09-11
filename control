@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.7.4
+Version: 0.7.4-1
 Architecture: iphoneos-arm64e
-Description: DuoPhone V5.4 fixes live split geometry around the actual draggable divider while keeping the real Maps dashboard scene host live.
+Description: DuoPhone V5.4.1 build fix for live split geometry; adds forward declaration and removes stale left/right references.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
