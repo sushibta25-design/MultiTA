@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.7.4-1
+Version: 0.7.5
 Architecture: iphoneos-arm64e
-Description: DuoPhone V5.4.1 build fix for live split geometry; adds forward declaration and removes stale left/right references.
+Description: DuoPhone V5.5 experimental split detaches the live Maps dashboard platter from its original dashboard container and mounts that real live scene host directly in the right pane.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

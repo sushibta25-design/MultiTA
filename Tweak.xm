@@ -88,6 +88,9 @@ static BOOL gV53Applied = NO;
 static CGRect gV54OriginalDashFrame = {{0,0},{0,0}};
 static CGRect gV54OriginalMapsFrame = {{0,0},{0,0}};
 static BOOL gV54CapturedOriginalFrames = NO;
+static __weak UIView *gV55MapsPlatter = nil;
+static __weak UIView *gV55DashboardRootView = nil;
+static BOOL gV55Detached = NO;
 static void DPV54ApplyGeometry(UIWindowScene *ws);
 
 static NSString *gLeftApp  = nil;
@@ -838,7 +841,7 @@ static void DPV53ApplySplit(void) {
         return;
     }
 
-    DPV54ApplyGeometry(ws);
+    DPV55ApplyDetachedMapsSplit(ws);
 
     if (!gV53Applied) {
         gV53Applied = YES;
@@ -934,6 +937,153 @@ static void DPV54ApplyGeometry(UIWindowScene *ws) {
 }
 
 
+
+#pragma mark - V5.5 EXPERIMENTAL detach Maps platter into right pane
+
+static UIView *DPV55NearestMapsPlatter(UIView *view) {
+    UIView *cur = view;
+    NSInteger depth = 0;
+
+    while (cur && depth < 12) {
+        NSString *cn = NSStringFromClass([cur class]);
+
+        if ([cn containsString:@"DBDashboardPlatterView"])
+            return cur;
+
+        cur = cur.superview;
+        depth++;
+    }
+
+    return nil;
+}
+
+static UIView *DPV55DashboardRootView(UIWindowScene *ws) {
+    if (gV55DashboardRootView)
+        return gV55DashboardRootView;
+
+    for (UIWindow *w in ws.windows) {
+        UIViewController *root = w.rootViewController;
+
+        if (!root)
+            continue;
+
+        if ([NSStringFromClass([root class]) containsString:@"DBDashboardRootViewController"]) {
+            gV55DashboardRootView = root.view;
+            return gV55DashboardRootView;
+        }
+    }
+
+    return nil;
+}
+
+static void DPV55ApplyDetachedMapsSplit(UIWindowScene *ws) {
+    if (!ws || !gV53MapsPresentationView || !gV53DashboardHomeView)
+        return;
+
+    UIView *rootView = DPV55DashboardRootView(ws);
+
+    if (!rootView)
+        return;
+
+    if (!gV55MapsPlatter)
+        gV55MapsPlatter = DPV55NearestMapsPlatter(gV53MapsPresentationView);
+
+    if (!gV55MapsPlatter) {
+        static NSUInteger miss = 0;
+
+        if ((miss++ % 8) == 0)
+            DPLog(@"V5.5 no Maps platter ancestor yet");
+
+        return;
+    }
+
+    if (!gV55Detached) {
+        UIView *oldSuper = gV55MapsPlatter.superview;
+        CGRect oldFrame = gV55MapsPlatter.frame;
+
+        DPLog(@"========== V5.5 DETACH MAPS PLATTER ==========");
+        DPLog(@"V5.5 platter=%@ class=%@ oldSuper=%@ oldFrame=%@",
+              gV55MapsPlatter,
+              NSStringFromClass([gV55MapsPlatter class]),
+              oldSuper ? NSStringFromClass([oldSuper class]) : @"nil",
+              NSStringFromCGRect(oldFrame));
+
+        [gV55MapsPlatter removeFromSuperview];
+        [rootView addSubview:gV55MapsPlatter];
+        [rootView bringSubviewToFront:gV55MapsPlatter];
+
+        gV55Detached = YES;
+
+        DPLog(@"V5.5 newSuper=%@",
+              gV55MapsPlatter.superview
+                  ? NSStringFromClass([gV55MapsPlatter.superview class])
+                  : @"nil");
+        DPLog(@"========== V5.5 DETACH MAPS PLATTER END ==========");
+    }
+
+    CGFloat W = CGRectGetWidth(ws.coordinateSpace.bounds);
+    CGFloat H = CGRectGetHeight(ws.coordinateSpace.bounds);
+    CGFloat dock = 45.0;
+
+    CGFloat dividerCenter = CGRectGetMidX(gDividerWindow.frame);
+
+    if (dividerCenter <= dock + 40.0 || dividerCenter >= W - 40.0)
+        dividerCenter = MAX(dock + 80.0, MIN(W - 80.0, W * gRatio));
+
+    CGFloat gap = 2.0;
+
+    CGRect left = CGRectMake(dock,
+                             0,
+                             MAX(1.0, dividerCenter - dock - gap),
+                             H);
+
+    CGRect right = CGRectMake(dividerCenter + gap,
+                              0,
+                              MAX(1.0, W - dividerCenter - gap),
+                              H);
+
+    [UIView performWithoutAnimation:^{
+        gV53DashboardHomeView.frame = left;
+        gV53DashboardHomeView.clipsToBounds = YES;
+
+        gV55MapsPlatter.hidden = NO;
+        gV55MapsPlatter.alpha = 1.0;
+        gV55MapsPlatter.clipsToBounds = YES;
+        gV55MapsPlatter.frame = right;
+
+        gV53MapsPresentationView.hidden = NO;
+        gV53MapsPresentationView.alpha = 1.0;
+        gV53MapsPresentationView.frame = gV55MapsPlatter.bounds;
+        gV53MapsPresentationView.clipsToBounds = YES;
+
+        if (gV53MapsHostContainer) {
+            gV53MapsHostContainer.frame = gV53MapsPresentationView.bounds;
+            gV53MapsHostContainer.clipsToBounds = YES;
+        }
+
+        [rootView bringSubviewToFront:gV55MapsPlatter];
+    }];
+
+    static CGRect lastRight = {{0,0},{0,0}};
+
+    if (!CGRectEqualToRect(lastRight, right)) {
+        lastRight = right;
+
+        DPLog(@"========== V5.5 SPLIT ==========");
+        DPLog(@"V5.5 left=%@ right=%@",
+              NSStringFromCGRect(left),
+              NSStringFromCGRect(right));
+        DPLog(@"V5.5 platterNow=%@ presentationNow=%@ hostNow=%@",
+              NSStringFromCGRect(gV55MapsPlatter.frame),
+              NSStringFromCGRect(gV53MapsPresentationView.frame),
+              gV53MapsHostContainer
+                  ? NSStringFromCGRect(gV53MapsHostContainer.frame)
+                  : @"nil");
+        DPLog(@"========== V5.5 SPLIT END ==========");
+    }
+}
+
+
 #pragma mark - Vòng lặp
 
 static void DPTick(void) {
@@ -962,7 +1112,7 @@ static void DPTick(void) {
         if (!DPIsCarPlay()) return;
 
         DPLoadPrefs();
-        DPLog(@"CTOR V5.4.1 bundle=%@ ratio=%.2f",
+        DPLog(@"CTOR V5.5 bundle=%@ ratio=%.2f",
               NSBundle.mainBundle.bundleIdentifier ?: @"nil", gRatio);
 
         dispatch_async(dispatch_get_main_queue(), ^{ DPTick(); });
