@@ -1,0 +1,9 @@
+Package: com.sushibta.duophone
+Name: DuoPhone
+Version: 0.6.9-11
+Architecture: iphoneos-arm64e
+Description: DuoPhone V3.9.11 follows SpringBoard's live FBSDisplayMonitor and inspects the source mapped to the connected CarPlay display.
+Maintainer: sushibta25-design
+Author: sushibta25-design
+Section: Tweaks
+Depends: mobilesubstrate

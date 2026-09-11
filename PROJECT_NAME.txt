@@ -1,0 +1,2 @@
+DuoPhone V1
+Package: com.sushibta.duophone
