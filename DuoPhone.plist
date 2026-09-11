@@ -1,9 +1,7 @@
 {
     Filter = {
         Bundles = (
-            "com.apple.CarPlayApp",
-            "com.apple.springboard"
+            "com.apple.CarPlayApp"
         );
-        Mode = "Any";
     };
 }

@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.6.9-11
+Version: 0.5.0-v5
 Architecture: iphoneos-arm64e
-Description: DuoPhone V3.9.11 follows SpringBoard's live FBSDisplayMonitor and inspects the source mapped to the connected CarPlay display.
+Description: CarPlay split screen with draggable divider and per-pane app picker
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
