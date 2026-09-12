@@ -1,4 +1,4 @@
-// DuoPhone V6.8 — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.8-rootless — scene-frame resize experiment on uploaded V6.7.
 // Requests FBScene settings.frame per pane; no nonuniform image stretching.
 // Saves/restores only the scene frame. Keeps picker, floating exit and app probes.
 // Runtime guards verify method signatures. Device-side redraw/touch still needs testing.
@@ -21,7 +21,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.8 %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.8-rootless %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
