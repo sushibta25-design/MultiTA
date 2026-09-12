@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.9.10-v6.17
+Version: 0.9.11-v6.17b
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.17 - removes _updateSceneUI and invalidate (confirmed to destroy the scene, caused the crash); switches to read-only inspection of the FBSDisplayLayoutElement found via layoutElementAssertion.
+Description: DuoPhone V6.17b - build fix: removed unused DPTryZeroArgVoid left over after dropping the crash-causing trigger calls (project uses -Werror).
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

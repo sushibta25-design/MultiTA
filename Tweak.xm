@@ -1,4 +1,4 @@
-// DuoPhone V6.17-safe-readonly — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.17b-safe-readonly-buildfix — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.17-safe-readonly %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.17b-safe-readonly-buildfix %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -99,7 +99,6 @@ static void DPInspect(NSUInteger generation);
 static void DPDumpConnectedScenes(NSString *tag);
 static void DPProbeTemplateSurface(DPRecord *record);
 static void DPTryPokeSceneUI(DPRecord *record);
-static void DPTryZeroArgVoid(id target, NSString *tag, NSString *selName);
 static void DPPeekZeroArgObject(id target, NSString *tag, NSString *selName);
 static NSString *DPName(DPRecord *record) {
     if ([record.bundle isEqualToString:@"com.apple.Maps"]) return @"Maps";
@@ -608,35 +607,9 @@ static void DPProbeClassSurface(Class cls, NSString *tag) {
     }
     if (methods) free(methods);
 }
-// Thử nghiệm có kiểm soát: gọi _updateSceneUI trên controller sau khi resize
-// xong, với ĐIỀU KIỆN chữ ký phải đúng "0 tham số, trả về void" mới gọi —
-// nếu không khớp thì bỏ qua, không đoán liều gây crash. Tên hàm gợi ý đây là
-// lệnh yêu cầu host Template tính lại layout (tab bar, list...) cho scene
-// hiện tại — ứng viên hàng đầu để sửa lỗi chồng chữ ở app kiểu Template
-// thuần (không có content view riêng như bản đồ).
-// Hàm dùng chung: thử gọi 1 selector KHÔNG tham số, trả về void, có kiểm tra
-// chữ ký trước — dùng cho mọi ứng viên "trigger" tiếp theo (invalidate...).
-static void DPTryZeroArgVoid(id target, NSString *tag, NSString *selName) {
-    if (!target) return;
-    SEL sel = NSSelectorFromString(selName);
-    if (![target respondsToSelector:sel]) {
-        DPLog(@"POKE %@.%@ SKIP not respond", tag, selName);
-        return;
-    }
-    NSMethodSignature *sig = [target methodSignatureForSelector:sel];
-    if (!sig || sig.numberOfArguments != 2 || strcmp(sig.methodReturnType, @encode(void)) != 0) {
-        DPLog(@"POKE %@.%@ SKIP unexpected signature argc=%lu returnType=%s",
-              tag, selName, sig ? (unsigned long)sig.numberOfArguments : 0,
-              sig ? sig.methodReturnType : "?");
-        return;
-    }
-    @try {
-        ((void (*)(id, SEL))objc_msgSend)(target, sel);
-        DPLog(@"POKE %@.%@ CALLED OK", tag, selName);
-    } @catch (NSException *e) {
-        DPLog(@"POKE %@.%@ EXCEPTION %@ %@", tag, selName, e.name, e.reason);
-    }
-}
+// GHI CHÚ: đã bỏ hàm gọi trigger "0 tham số trả về void" (DPTryZeroArgVoid)
+// dùng cho _updateSceneUI/invalidate — cả 2 đã xác nhận gây huỷ scene/crash,
+// không dùng nữa. Chỉ giữ lại hàm ĐỌC bên dưới.
 // Chỉ ĐỌC — gọi 1 getter không tham số trả về object, để xem giá trị hiện
 // tại (currentSceneUpdate, layoutElementAssertion...), không tự ý thay đổi
 // gì. Giúp hiểu cấu trúc dữ liệu trước khi dám set lại nó.
