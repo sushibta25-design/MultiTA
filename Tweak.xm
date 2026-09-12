@@ -1,23 +1,9 @@
-// DuoPhone V6.7 — dựa trên V6.3.2 (đã chạy được: 2 app scene thật song song
-// qua presentationViewWithIdentifier:), chỉ vá UI + thêm picker chọn app.
-//
-// Lịch sử các lần vá UI trên nền V6.3.2:
-//  V6.4: bỏ dải 30pt đen trên cùng, divider chỉ còn vạch mảnh, status/exit
-//        thành pill nổi — nhưng đổi DPFit sang scale "fit" (giữ tỉ lệ) làm
-//        lộ viền đen letterbox trên/dưới mỗi pane.
-//  V6.5: đổi "fit" sang "cover" (MAX scale) để lấp kín, hết viền đen — nhưng
-//        vì chiều cao pane không đổi khi kéo divider, cover-scale gần như
-//        cố định, nên kéo chỉ dịch vùng crop chứ ảnh không co giãn.
-//  V6.7: đổi hẳn sang stretch ĐỘC LẬP X/Y (scaleX theo chiều rộng pane,
-//        scaleY theo chiều cao pane) — lấp kín pane VÀ co giãn đúng theo cả
-//        2 chiều khi kéo divider. Đánh đổi: hình có thể hơi méo tỉ lệ.
-//        Thêm picker: nhớ tối đa 6 app đã mở trong phiên, nút "Chia" mở
-//        danh sách chọn 2 app bất kỳ thay vì luôn lấy 2 app mở gần nhất.
-//
-// LƯU Ý CHƯA XỬ LÝ: "bubble tốc độ" (nút tròn nổi của Maps) nếu bị cắt là do
-// nó là 1 overlay/layer RIÊNG của app, không nằm trong _UIScenePresentationView
-// (layers=1) mà presentationViewWithIdentifier: trả về — cần probe thêm.
-//
+// DuoPhone V6.8 — scene-frame resize experiment on uploaded V6.7.
+// Requests FBScene settings.frame per pane; no nonuniform image stretching.
+// Saves/restores only the scene frame. Keeps picker, floating exit and app probes.
+// Runtime guards verify method signatures. Device-side redraw/touch still needs testing.
+// Inspect RESIZE REQUEST / OBSERVED / RESTORE in DuoPhoneV6Trace.txt.
+// Replace only Tweak.xm; existing package metadata is unchanged.
 // Observed device APIs: foregroundSceneWithSettings:completion:,
 // presentationViewWithIdentifier:, invalidatePresentationViewForIdentifier:.
 // Never reuse native animation identifiers or suppress native lifecycle callbacks.
@@ -27,6 +13,7 @@
 #import <unistd.h>
 #import <stdarg.h>
 #import <math.h>
+#import <string.h>
 
 static NSString *const DPTrace = @"/var/mobile/DuoPhoneV6Trace.txt";
 static NSString *const DPRatioKey = @"DuoPhoneManualSplitRatio";
@@ -34,7 +21,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.7 %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.8 %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -77,6 +64,14 @@ static NSString *DPBundle(NSString *sid) {
 @property(nonatomic) BOOL nativeBackgrounded;
 @property(nonatomic) BOOL restoreBackground;
 @property(nonatomic) BOOL valid;
+@property(nonatomic,strong) id resizeScene;
+@property(nonatomic) CGRect originalFrame;
+@property(nonatomic) CGSize requestedSize;
+@property(nonatomic) CGSize submittedSize;
+@property(nonatomic) BOOL resizeQueued;
+@property(nonatomic) BOOL geometryChanged;
+@property(nonatomic) NSInteger resizeState; // 0 untested, 1 setter accepted, -1 unsupported
+@property(nonatomic) NSUInteger resizeAttempts;
 @end
 @implementation DPRecord
 @end
@@ -132,24 +127,118 @@ static NSUInteger DPLayers(UIView *view, NSUInteger depth) {
     for (UIView *child in view.subviews) count += DPLayers(child, depth + 1);
     return count;
 }
-static void DPFit(UIView *view, UIView *pane) {
-    if (!view) return;
-    CGFloat paneW = pane.bounds.size.width, paneH = pane.bounds.size.height;
-    if (gNativeSize.width <= 0 || gNativeSize.height <= 0 || paneW <= 0 || paneH <= 0) return;
-
+static BOOL DPReadFrame(id scene, CGRect *frame) {
+    id value = DPValue(DPValue(scene, @"settings"), @"frame");
+    if (![value isKindOfClass:NSValue.class] || strcmp([value objCType], @encode(CGRect))) return NO;
+    *frame = [value CGRectValue];
+    return isfinite(frame->size.width) && isfinite(frame->size.height) &&
+           frame->size.width > 0 && frame->size.height > 0;
+}
+static BOOL DPFrameSetter(id settings, CGRect frame) {
+    SEL setter = NSSelectorFromString(@"setFrame:");
+    NSMethodSignature *sig = [settings methodSignatureForSelector:setter];
+    if (!sig || sig.numberOfArguments != 3 || strcmp(sig.methodReturnType, @encode(void)) ||
+        strcmp([sig getArgumentTypeAtIndex:2], @encode(CGRect))) return NO;
+    ((void(*)(id,SEL,CGRect))objc_msgSend)(settings, setter, frame);
+    return YES;
+}
+static BOOL DPHasFrameUpdater(id scene) {
+    NSMethodSignature *sig = [scene methodSignatureForSelector:NSSelectorFromString(@"updateSettingsWithBlock:")];
+    return sig && sig.numberOfArguments == 3 && !strcmp(sig.methodReturnType, @encode(void)) &&
+           !strcmp([sig getArgumentTypeAtIndex:2], "@?");
+}
+static void DPRestoreFrame(DPRecord *record) {
+    if (!record.geometryChanged || !record.valid || !record.resizeScene) return;
+    id scene = record.resizeScene;
+    CGRect frame = record.originalFrame;
+    NSUInteger generation = gGeneration;
+    if (DPValue(record.controller, @"scene") != scene || !DPHasFrameUpdater(scene)) return;
+    void (^change)(id) = ^(id mutableSettings) {
+        if (generation != gGeneration) return;
+        @try {
+            BOOL restored = DPFrameSetter(mutableSettings, frame);
+            DPLog(@"RESIZE RESTORE bundle=%@ setter=%d frame=%@", record.bundle, restored, NSStringFromCGRect(frame));
+        } @catch (NSException *e) { DPLog(@"RESIZE RESTORE ERROR %@ %@", record.bundle, e.name); }
+    };
+    @try {
+        ((void(*)(id,SEL,id))objc_msgSend)(scene, NSSelectorFromString(@"updateSettingsWithBlock:"), change);
+    } @catch (NSException *e) { DPLog(@"RESIZE RESTORE ERROR %@ %@", record.bundle, e.name); }
+}
+static void DPQueueResize(DPRecord *record, CGSize size) {
+    if (!record.presentation || !record.valid || record.resizeState < 0) return;
+    record.requestedSize = size;
+    if (record.resizeQueued || CGSizeEqualToSize(size, record.submittedSize)) return;
+    record.resizeQueued = YES;
+    NSUInteger generation = gGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (!gRunning || generation != gGeneration || !record.valid) return;
+        record.resizeQueued = NO;
+        if (record.resizeState == 0 && ++record.resizeAttempts > 3) {
+            record.resizeState = -1;
+            DPLog(@"RESIZE NO CALLBACK bundle=%@", record.bundle);
+            return;
+        }
+        id scene = DPValue(record.controller, @"scene");
+        if (!record.resizeScene) {
+            CGRect original;
+            if (!scene || !DPHasFrameUpdater(scene) || !DPReadFrame(scene, &original)) {
+                record.resizeState = -1;
+                DPLog(@"RESIZE UNSUPPORTED bundle=%@ sceneClass=%@", record.bundle, NSStringFromClass([scene class]));
+                DPLayout(); return;
+            }
+            record.resizeScene = scene; record.originalFrame = original;
+        }
+        if (record.resizeScene != scene) { DPStop(@"resize scene replaced"); return; }
+        CGSize target = record.requestedSize;
+        CGRect frame = (CGRect){CGPointZero, target};
+        void (^change)(id) = ^(id mutableSettings) {
+            if (![NSThread isMainThread]) { DPLog(@"RESIZE CALLBACK OFF MAIN — skipped"); return; }
+            if (!gRunning || generation != gGeneration || !record.valid) return;
+            @try {
+                record.geometryChanged = YES; // Restore even if the setter throws part-way through.
+                if (!DPFrameSetter(mutableSettings, frame)) {
+                    record.resizeState = -1;
+                    DPLog(@"RESIZE NO FRAME SETTER bundle=%@ settings=%@", record.bundle, NSStringFromClass([mutableSettings class]));
+                    return;
+                }
+                record.resizeState = 1; record.submittedSize = target;
+                DPLog(@"RESIZE REQUEST bundle=%@ frame=%@", record.bundle, NSStringFromCGRect(frame));
+            } @catch (NSException *e) {
+                record.resizeState = -1;
+                DPLog(@"RESIZE ERROR %@ %@", record.bundle, e.name);
+            }
+        };
+        @try {
+            ((void(*)(id,SEL,id))objc_msgSend)(scene, NSSelectorFromString(@"updateSettingsWithBlock:"), change);
+        } @catch (NSException *e) { record.resizeState = -1; DPLog(@"RESIZE UPDATE ERROR %@ %@", record.bundle, e.name); }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            if (!gRunning || generation != gGeneration || !record.valid) return;
+            CGRect actual = CGRectZero;
+            BOOL readable = DPReadFrame(scene, &actual);
+            DPLog(@"RESIZE OBSERVED bundle=%@ requested=%@ actual=%@ readable=%d setterState=%ld",
+                  record.bundle, NSStringFromCGSize(target), NSStringFromCGRect(actual), readable, (long)record.resizeState);
+            // Observed settings are not proof that the remote application has redrawn.
+            DPLayout();
+        });
+    });
+}
+static void DPFit(DPRecord *record, UIView *pane) {
+    UIView *view = record.presentation;
+    if (!view || pane.bounds.size.width <= 0 || pane.bounds.size.height <= 0) return;
+    DPQueueResize(record, pane.bounds.size);
     view.transform = CGAffineTransformIdentity;
-    view.bounds = (CGRect){CGPointZero, gNativeSize};
-
-    // Stretch ĐỘC LẬP theo X và Y: lấp kín pane hoàn toàn (không viền đen)
-    // và co giãn theo CẢ chiều rộng lẫn chiều cao khi kéo divider — cover-scale
-    // (đều X=Y) không làm được việc này vì chiều cao pane không đổi khi kéo,
-    // nên hệ số scale gần như cố định. Đánh đổi: hình có thể hơi méo tỉ lệ.
-    CGFloat scaleX = paneW / gNativeSize.width;
-    CGFloat scaleY = paneH / gNativeSize.height;
-    if (!isfinite(scaleX) || !isfinite(scaleY) || scaleX <= 0 || scaleY <= 0) return;
-
-    view.center = CGPointMake(CGRectGetMidX(pane.bounds), CGRectGetMidY(pane.bounds));
-    view.transform = CGAffineTransformMakeScale(scaleX, scaleY);
+    if (record.resizeState == 1) {
+        view.frame = pane.bounds; // 1 point in the app = 1 point in the pane; no X/Y stretch.
+    } else {
+        // Temporary/unsupported fallback is aspect-fit and explicitly logged.
+        // Never disguise a rejected scene resize by stretching the image.
+        CGSize source = record.resizeScene ? record.originalFrame.size : gNativeSize;
+        if (source.width <= 0 || source.height <= 0) return;
+        view.bounds = (CGRect){CGPointZero, source};
+        view.center = CGPointMake(CGRectGetMidX(pane.bounds), CGRectGetMidY(pane.bounds));
+        CGFloat scale = MIN(pane.bounds.size.width/source.width, pane.bounds.size.height/source.height);
+        view.transform = CGAffineTransformMakeScale(scale, scale);
+    }
 }
 static const CGFloat kDividerGrabWidth = 28.0;   // vùng chạm (không hiển thị hết)
 static const CGFloat kDividerVisualWidth = 5.0;  // vạch mảnh thực sự nhìn thấy
@@ -178,8 +267,8 @@ static void DPLayout(void) {
     exitButton.frame = CGRectMake(width - 68, 6, 60, pillH);
 
     if (gPair.count == 2) {
-        DPFit(gPair[0].presentation, gLeftPane);
-        DPFit(gPair[1].presentation, gRightPane);
+        DPFit(gPair[0], gLeftPane);
+        DPFit(gPair[1], gRightPane);
     }
 }
 static void DPStop(NSString *reason) {
@@ -192,6 +281,13 @@ static void DPStop(NSString *reason) {
     BOOL previousOwnCall = gOwnCall;
     gOwnCall = YES;
     for (DPRecord *record in gPair) {
+        DPRestoreFrame(record);
+        record.resizeQueued = NO;
+        record.resizeScene = nil;
+        record.geometryChanged = NO;
+        record.resizeState = 0;
+        record.resizeAttempts = 0;
+        record.submittedSize = CGSizeZero;
         [record.presentation removeFromSuperview];
         record.presentation = nil;
         if (!record.valid) { record.presentationID = nil; continue; }
