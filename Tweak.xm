@@ -1,4 +1,4 @@
-// DuoPhone V6.19-metaclass-probe — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.20-layoutelement-hook — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.19-metaclass-probe %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.20-layoutelement-hook %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -892,6 +892,40 @@ static void DPTick(void) {
 }
 - (void)deactivateSceneWithReasonMask:(NSUInteger)mask {
     if (gRunning) DPLog(@"NATIVE DEACTIVATE id=%@ mask=%lu", DPValue(self,@"sceneID"),(unsigned long)mask);
+    %orig;
+}
+%end
+
+// Chỉ QUAN SÁT — không sửa gì (luôn gọi %orig y nguyên trước/sau). Mục
+// đích: bắt sống mọi lần hệ thống tự tạo/đổi frame cho 1
+// FBSDisplayLayoutElement trong quá trình app hoạt động bình thường, để
+// biết nó được tạo lúc nào, ai tạo, giá trị frame mặc định là gì — vì class
+// này không có factory/lookup ở cấp class (đã xác nhận qua probe metaclass:
+// không có method nào bắt đầu bằng dấu +).
+%hook FBSDisplayLayoutElement
+- (id)initWithXPCDictionary:(id)dict {
+    id result = %orig;
+    @try {
+        DPLog(@"LAYOUTELEM-INIT identifier=%@ bundle=%@ frame=%@ fillsDisplayBounds=%d",
+              DPValue(result, @"identifier") ?: @"nil",
+              DPValue(result, @"bundleIdentifier") ?: @"nil",
+              NSStringFromCGRect([result respondsToSelector:@selector(frame)]
+                                  ? ((CGRect(*)(id,SEL))objc_msgSend)(result, @selector(frame))
+                                  : CGRectZero),
+              [result respondsToSelector:@selector(fillsDisplayBounds)]
+                  ? ((BOOL(*)(id,SEL))objc_msgSend)(result, @selector(fillsDisplayBounds))
+                  : -1);
+    } @catch (__unused NSException *e) {}
+    return result;
+}
+- (void)setFrame:(CGRect)frame {
+    @try {
+        DPLog(@"LAYOUTELEM-SETFRAME identifier=%@ bundle=%@ newFrame=%@ oldFrame=%@",
+              DPValue(self, @"identifier") ?: @"nil",
+              DPValue(self, @"bundleIdentifier") ?: @"nil",
+              NSStringFromCGRect(frame),
+              NSStringFromCGRect(((CGRect(*)(id,SEL))objc_msgSend)(self, @selector(frame))));
+    } @catch (__unused NSException *e) {}
     %orig;
 }
 %end

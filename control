@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.9.13-v6.19
+Version: 0.9.14-v6.20
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.19 - FBSDisplayLayoutElement has frame/setFrame:/fillsDisplayBounds - huge lead. Now probing its metaclass (class methods) read-only to find a factory/lookup API before risking calling initWithIdentifier:.
+Description: DuoPhone V6.20 - no class-level factory found on FBSDisplayLayoutElement; now observes (read-only, always calls %orig) every init and setFrame: on that class to see how the system naturally sizes it.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
