@@ -1,7 +1,7 @@
-// DuoPhone V6.11-rootless — scene-frame resize experiment on uploaded V6.7.
-// Maps use pane geometry. YouTube Music retains native geometry and aspect-fit.
-// No artificial tall viewport or unequal scaling; music may have empty margins.
-// Native music template layout is not modified. Device QA required.
+// DuoPhone V6.12-fixed-rootless — scene-frame resize experiment on uploaded V6.7.
+// Fixed equal panes; divider is visual only. No presentation scaling.
+// Every app requests its pane width and full content height.
+// Native template layout still requires device validation.
 // Saves/restores only the scene frame. Keeps picker, floating exit and app probes.
 // Runtime guards verify method signatures. Device-side redraw/touch still needs testing.
 // Inspect RESIZE REQUEST / OBSERVED / RESTORE in DuoPhoneV6Trace.txt.
@@ -18,12 +18,11 @@
 #import <string.h>
 
 static NSString *const DPTrace = @"/var/mobile/DuoPhoneV6Trace.txt";
-static NSString *const DPRatioKey = @"DuoPhoneManualSplitRatio";
 static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.11-rootless %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.12-fixed-rootless %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -91,7 +90,6 @@ static __weak UIWindowScene *gSession;
 static BOOL gRunning, gOwnCall;
 static NSUInteger gGeneration;
 static NSUInteger gSessionEpoch;
-static CGFloat gRatio = 0.5, gStartRatio;
 static CGSize gNativeSize;
 static BOOL gAppProbeEnabled = NO;
 static void DPStop(NSString *reason);
@@ -99,12 +97,6 @@ static void DPLayout(void);
 static void DPRefreshButton(void);
 static void DPInspect(NSUInteger generation);
 static void DPDumpConnectedScenes(NSString *tag);
-static CGFloat DPValidRatio(CGFloat ratio) {
-    return isfinite(ratio) ? MAX(0.30, MIN(0.70, ratio)) : 0.5;
-}
-static void DPSaveRatio(void) {
-    [NSUserDefaults.standardUserDefaults setDouble:DPValidRatio(gRatio) forKey:DPRatioKey];
-}
 static NSString *DPName(DPRecord *record) {
     if ([record.bundle isEqualToString:@"com.apple.Maps"]) return @"Maps";
     if ([record.bundle isEqualToString:@"com.google.ios.youtubemusic"]) return @"YouTube Music";
@@ -226,51 +218,20 @@ static void DPQueueResize(DPRecord *record, CGSize size) {
 }
 static void DPFit(DPRecord *record, UIView *pane) {
     UIView *view = record.presentation;
-    if (!view || pane.bounds.size.width <= 0 || pane.bounds.size.height <= 0) return;
-    // Music templates visibly compress individual artwork at narrow scene widths.
-    // Keep the original scene geometry, including its original height, and fit it.
-    // Do not claim this fills the pane: preserving its aspect leaves margins.
-    if ([record.bundle isEqualToString:@"com.google.ios.youtubemusic"]) {
-        CGSize nativeSize = record.resizeScene ? record.originalFrame.size : gNativeSize;
-        if (nativeSize.width <= 0 || nativeSize.height <= 0) return;
-        DPQueueResize(record, nativeSize);
-        view.transform = CGAffineTransformIdentity;
-        CGRect observed = CGRectZero;
-        CGSize source = nativeSize;
-        if (record.resizeScene && DPReadFrame(record.resizeScene, &observed))
-            source = observed.size;
-        view.bounds = (CGRect){CGPointZero, source};
-        view.center = CGPointMake(CGRectGetMidX(pane.bounds), CGRectGetMidY(pane.bounds));
-        CGFloat scale = MIN(pane.bounds.size.width / source.width,
-                            pane.bounds.size.height / source.height);
-        view.transform = CGAffineTransformMakeScale(scale, scale);
-        return;
-    }
-    CGSize logicalSize = pane.bounds.size;
-    DPQueueResize(record, logicalSize);
+    CGSize target = pane.bounds.size;
+    if (!view || target.width <= 0 || target.height <= 0) return;
+    DPQueueResize(record, target); // Identical submitted sizes are deduplicated.
     view.transform = CGAffineTransformIdentity;
-    if (record.resizeState == 1) {
-        // Do not stretch the previous scene into the newest drag target.
-        // Until the scene update lands, retain its observed size at 1:1.
-        // The pane clips any temporary overflow; the settled frame fills it.
-        CGRect observed = CGRectZero;
-        CGSize source = record.submittedSize;
-        if (record.resizeScene && DPReadFrame(record.resizeScene, &observed))
-            source = observed.size;
-        if (source.width <= 0 || source.height <= 0) return;
-        view.bounds = (CGRect){CGPointZero, source};
-        view.center = CGPointMake(CGRectGetMinX(pane.bounds) + source.width * 0.5,
-                                  CGRectGetMinY(pane.bounds) + source.height * 0.5);
-    } else {
-        // Temporary/unsupported fallback is aspect-fit and explicitly logged.
-        // Never disguise a rejected scene resize by stretching the image.
-        CGSize source = record.resizeScene ? record.originalFrame.size : gNativeSize;
-        if (source.width <= 0 || source.height <= 0) return;
-        view.bounds = (CGRect){CGPointZero, source};
-        view.center = CGPointMake(CGRectGetMidX(pane.bounds), CGRectGetMidY(pane.bounds));
-        CGFloat scale = MIN(pane.bounds.size.width/source.width, pane.bounds.size.height/source.height);
-        view.transform = CGAffineTransformMakeScale(scale, scale);
-    }
+    CGRect observed = CGRectZero;
+    CGSize source = record.resizeScene ? record.originalFrame.size : gNativeSize;
+    if (record.resizeScene && DPReadFrame(record.resizeScene, &observed))
+        source = observed.size;
+    if (source.width <= 0 || source.height <= 0) return;
+    // Retain observed geometry until the scene accepts the fixed target.
+    // Unsupported resize stays unscaled and clipped, not disguised by scaling.
+    view.bounds = (CGRect){CGPointZero, source};
+    view.center = CGPointMake(CGRectGetMinX(pane.bounds) + source.width * 0.5,
+                              CGRectGetMinY(pane.bounds) + source.height * 0.5);
 }
 static const CGFloat kDividerGrabWidth = 28.0;   // vùng chạm (không hiển thị hết)
 static const CGFloat kDividerVisualWidth = 5.0;  // vạch mảnh thực sự nhìn thấy
@@ -281,7 +242,7 @@ static const CGFloat kPaneCornerRadius = 14.0;   // bo góc kiểu iPhone
 static void DPLayout(void) {
     if (!gSplitWindow) return;
     CGFloat width = gSplitWindow.bounds.size.width, height = gSplitWindow.bounds.size.height;
-    CGFloat split = floor(width * gRatio);
+    CGFloat split = width * 0.5;
 
     // Không còn chừa dải trên cùng: 2 pane chiếm full chiều cao CarPlay.
     gLeftPane.frame = CGRectMake(0, 0, MAX(1, split - kPaneGap), height);
@@ -307,7 +268,6 @@ static void DPStop(NSString *reason) {
     if (!gRunning) return;
     gRunning = NO;
     ++gGeneration; // Cancel delayed creation and inspection from this attempt.
-    DPSaveRatio();
     DPLog(@"STOP %@", reason);
     gSplitWindow.hidden = YES;
     BOOL previousOwnCall = gOwnCall;
@@ -352,7 +312,6 @@ static void DPStop(NSString *reason) {
 - (void)pickerTap:(UIButton *)sender;
 - (void)startWithLeftBundle:(NSString *)leftBundle rightBundle:(NSString *)rightBundle;
 - (void)stop;
-- (void)pan:(UIPanGestureRecognizer *)gesture;
 - (void)swap;
 @end
 static DPControls *gControls;
@@ -465,19 +424,6 @@ static void DPInspect(NSUInteger generation) {
     [self startWithLeftBundle:left rightBundle:right];
 }
 
-- (void)pan:(UIPanGestureRecognizer *)gesture {
-    if (!gRunning) return;
-    if (gesture.state == UIGestureRecognizerStateBegan) gStartRatio = gRatio;
-    CGFloat dx = [gesture translationInView:gSplitWindow].x;
-    gRatio = MAX(0.30, MIN(0.70, gStartRatio + dx / MAX(1, gSplitWindow.bounds.size.width)));
-    DPLayout();
-    if (gesture.state == UIGestureRecognizerStateEnded ||
-        gesture.state == UIGestureRecognizerStateCancelled ||
-        gesture.state == UIGestureRecognizerStateFailed) {
-        DPSaveRatio();
-        DPLog(@"RATIO %.3f", gRatio);
-    }
-}
 - (void)swap {
     if (gPair.count != 2 || !gPair[0].presentation || !gPair[1].presentation) return;
     gPair = @[gPair[1], gPair[0]];
@@ -553,12 +499,10 @@ static void DPInspect(NSUInteger generation) {
     dividerBar.layer.cornerRadius = kDividerVisualWidth * 0.5;
     dividerBar.userInteractionEnabled = NO;
     [gDivider addSubview:dividerBar];
-    [gDivider addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)]];
-    UITapGestureRecognizer *swap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(swap)];
-    swap.numberOfTapsRequired = 2; [gDivider addGestureRecognizer:swap];
+    gDivider.userInteractionEnabled = NO; // Fixed separator, no pan or swap gestures.
     [root addSubview:gDivider];
     DPLayout(); gSplitWindow.hidden = NO; DPRefreshButton();
-    DPLog(@"START left=%@ right=%@ — captured foreground settings, one call per scene", left.bundle, right.bundle);
+    DPLog(@"START FIXED 50/50 left=%@ right=%@ — unscaled scene resize", left.bundle, right.bundle);
     gOwnCall = YES;
     @try {
         for (DPRecord *record in gPair) {
@@ -788,8 +732,6 @@ static void DPTick(void) {
         }
         if (![proc isEqualToString:@"com.apple.CarPlayApp"]) return;
         gRecords = [NSMutableDictionary dictionary]; gOrder = [NSMutableArray array];
-        if ([NSUserDefaults.standardUserDefaults objectForKey:DPRatioKey])
-            gRatio = DPValidRatio([NSUserDefaults.standardUserDefaults doubleForKey:DPRatioKey]);
         gControls = [DPControls new];
         dispatch_async(dispatch_get_main_queue(), ^{
             DPLog(@"CTOR MANUAL EXPERIMENT — open two apps, tap Chia; no automatic split");
