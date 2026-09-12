@@ -1,7 +1,7 @@
-// DuoPhone V6.10-rootless — scene-frame resize experiment on uploaded V6.7.
-// Requests the actual pane size for every app; no artificial tall viewport.
-// Presentation bounds follow observed scene settings at 1:1 scale.
-// Narrow template tab layout remains app-owned. Device QA required.
+// DuoPhone V6.11-rootless — scene-frame resize experiment on uploaded V6.7.
+// Maps use pane geometry. YouTube Music retains native geometry and aspect-fit.
+// No artificial tall viewport or unequal scaling; music may have empty margins.
+// Native music template layout is not modified. Device QA required.
 // Saves/restores only the scene frame. Keeps picker, floating exit and app probes.
 // Runtime guards verify method signatures. Device-side redraw/touch still needs testing.
 // Inspect RESIZE REQUEST / OBSERVED / RESTORE in DuoPhoneV6Trace.txt.
@@ -23,7 +23,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.10-rootless %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.11-rootless %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -227,6 +227,25 @@ static void DPQueueResize(DPRecord *record, CGSize size) {
 static void DPFit(DPRecord *record, UIView *pane) {
     UIView *view = record.presentation;
     if (!view || pane.bounds.size.width <= 0 || pane.bounds.size.height <= 0) return;
+    // Music templates visibly compress individual artwork at narrow scene widths.
+    // Keep the original scene geometry, including its original height, and fit it.
+    // Do not claim this fills the pane: preserving its aspect leaves margins.
+    if ([record.bundle isEqualToString:@"com.google.ios.youtubemusic"]) {
+        CGSize nativeSize = record.resizeScene ? record.originalFrame.size : gNativeSize;
+        if (nativeSize.width <= 0 || nativeSize.height <= 0) return;
+        DPQueueResize(record, nativeSize);
+        view.transform = CGAffineTransformIdentity;
+        CGRect observed = CGRectZero;
+        CGSize source = nativeSize;
+        if (record.resizeScene && DPReadFrame(record.resizeScene, &observed))
+            source = observed.size;
+        view.bounds = (CGRect){CGPointZero, source};
+        view.center = CGPointMake(CGRectGetMidX(pane.bounds), CGRectGetMidY(pane.bounds));
+        CGFloat scale = MIN(pane.bounds.size.width / source.width,
+                            pane.bounds.size.height / source.height);
+        view.transform = CGAffineTransformMakeScale(scale, scale);
+        return;
+    }
     CGSize logicalSize = pane.bounds.size;
     DPQueueResize(record, logicalSize);
     view.transform = CGAffineTransformIdentity;
