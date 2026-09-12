@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.9.4-v6.13
+Version: 0.9.5-v6.13
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.13 - guaranteed-fill scale fallback on top of native scene resize, plus restored draggable divider ratio.
+Description: DuoPhone V6.13 - fixes DPFit initial-size bug so both panes fill correctly from the first frame instead of a full-size crop during the async resize round-trip.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

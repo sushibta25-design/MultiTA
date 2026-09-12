@@ -1,12 +1,4 @@
-// V6.13 patch trên nền V6.12-fixed-rootless (bản test resize thô của bạn):
-// 1) DPFit giờ LUON kem scale bao hiem: neu app THAT SU tu ve lai dung
-//    kich thuoc da xin (observed == target) thi scale=1, sac net tuyet doi.
-//    Neu khong (chi xac nhan metadata, chua chac da render lai), van scale
-//    de dam bao LAP KIN pane, khong bi crop/tran ra ngoai nhu truoc.
-// 2) Khoi phuc keo divider doi ti le (ban 6.12 da tat han de test rieng
-//    co che resize) — gRatio + pan gesture + luu lai qua NSUserDefaults.
-
-// DuoPhone V6.12-fixed-rootless — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.13-fit-fix — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -30,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.12-fixed-rootless %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.13-fit-fix %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -228,57 +220,48 @@ static void DPFit(DPRecord *record, UIView *pane) {
     UIView *view = record.presentation;
     CGSize target = pane.bounds.size;
     if (!view || target.width <= 0 || target.height <= 0) return;
+    DPQueueResize(record, target); // Identical submitted sizes are deduplicated.
+    view.transform = CGAffineTransformIdentity;
 
-    DPQueueResize(record, target); // vẫn thử xin app tự vẽ lại đúng kích thước — tốt nhất nếu thành công
+    // TRƯỚC ĐÂY: trong lúc chờ vòng resize round-trip hoàn tất (~300ms),
+    // source rơi về gNativeSize (kích thước FULL màn hình gốc của app,
+    // ví dụ 426.67x240) — khiến view.bounds bị đặt to hơn hẳn pane (chỉ
+    // ~188.83x240), rồi bị pane.clipsToBounds cắt bớt, hiện ra như đang
+    // xem một PHẦN app full-size bị crop, không phải app đã resize đúng.
+    //
+    // GIỜ: mặc định dùng luôn kích thước PANE làm bounds ngay từ đầu (lạc
+    // quan là app sẽ tự vẽ lại vừa khít) — đảm bảo hình luôn full kín pane,
+    // không tràn/không hở, kể cả trước khi resize round-trip xác nhận xong.
+    CGSize source = target;
 
-    // Nguồn kích thước THẬT để scale: ưu tiên frame app vừa xác nhận qua
-    // resize, nếu chưa có thì dùng frame gốc ban đầu. LUÔN scale để LẤP KÍN
-    // pane, không phụ thuộc việc app có thật sự vẽ lại theo frame mới hay
-    // không — "observed" chỉ là app xác nhận đã NHẬN frame mới qua metadata,
-    // không phải bằng chứng nội dung đã render lại đúng kích thước đó. Nếu
-    // app thật sự tự vẽ lại (observed == target) thì scale=1, sắc nét tuyệt
-    // đối; nếu không, vẫn đảm bảo lấp kín pane thay vì bị crop/tràn ra ngoài.
-    CGSize source = record.resizeScene ? record.originalFrame.size : gNativeSize;
+    // Chỉ đổi sang kích thước THỰC TẾ mà hệ thống đã xác nhận (actual quan
+    // sát được qua DPReadFrame) khi nó khác đáng kể so với target — nghĩa là
+    // OS/app đã tự điều chỉnh về 1 kích thước khác thay vì chấp nhận nguyên
+    // yêu cầu. Trường hợp đó ưu tiên khớp với cái THẬT để không bị lệch.
     CGRect observed = CGRectZero;
     if (record.resizeScene && DPReadFrame(record.resizeScene, &observed) &&
-        observed.size.width > 0 && observed.size.height > 0)
+        (fabs(observed.size.width - target.width) > 0.5 ||
+         fabs(observed.size.height - target.height) > 0.5)) {
         source = observed.size;
+        DPLog(@"FIT MISMATCH bundle=%@ target=%@ actualObserved=%@ — dùng kích thước thật",
+              record.bundle, NSStringFromCGSize(target), NSStringFromCGSize(observed.size));
+    }
 
     if (source.width <= 0 || source.height <= 0) return;
-
-    view.transform = CGAffineTransformIdentity;
     view.bounds = (CGRect){CGPointZero, source};
-
-    CGFloat scaleX = target.width / source.width;
-    CGFloat scaleY = target.height / source.height;
-    if (!isfinite(scaleX) || !isfinite(scaleY) || scaleX <= 0 || scaleY <= 0) return;
-
-    view.center = CGPointMake(CGRectGetMidX(pane.bounds), CGRectGetMidY(pane.bounds));
-    view.transform = CGAffineTransformMakeScale(scaleX, scaleY);
+    view.center = CGPointMake(CGRectGetMinX(pane.bounds) + source.width * 0.5,
+                              CGRectGetMinY(pane.bounds) + source.height * 0.5);
 }
 static const CGFloat kDividerGrabWidth = 28.0;   // vùng chạm (không hiển thị hết)
 static const CGFloat kDividerVisualWidth = 5.0;  // vạch mảnh thực sự nhìn thấy
 static const CGFloat kPaneGap = 2.0;
 static const NSUInteger kMaxCachedApps = 6;      // nhớ tối đa 6 app đã mở trong phiên
 static const CGFloat kPaneCornerRadius = 14.0;   // bo góc kiểu iPhone
-static const CGFloat kMinRatio = 0.30, kMaxRatio = 0.70;
-static NSString *const kRatioKey = @"DuoPhoneSplitRatio";
-static CGFloat gRatio = 0.50;
-static CGFloat gStartRatio = 0.50;
-
-static void DPLoadRatio(void) {
-    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
-    if ([d objectForKey:kRatioKey])
-        gRatio = MAX(kMinRatio, MIN(kMaxRatio, [d doubleForKey:kRatioKey]));
-}
-static void DPSaveRatio(void) {
-    [NSUserDefaults.standardUserDefaults setDouble:gRatio forKey:kRatioKey];
-}
 
 static void DPLayout(void) {
     if (!gSplitWindow) return;
     CGFloat width = gSplitWindow.bounds.size.width, height = gSplitWindow.bounds.size.height;
-    CGFloat split = width * gRatio;
+    CGFloat split = width * 0.5;
 
     // Không còn chừa dải trên cùng: 2 pane chiếm full chiều cao CarPlay.
     gLeftPane.frame = CGRectMake(0, 0, MAX(1, split - kPaneGap), height);
@@ -348,7 +331,6 @@ static void DPStop(NSString *reason) {
 - (void)pickerTap:(UIButton *)sender;
 - (void)startWithLeftBundle:(NSString *)leftBundle rightBundle:(NSString *)rightBundle;
 - (void)stop;
-- (void)pan:(UIPanGestureRecognizer *)gesture;
 - (void)swap;
 @end
 static DPControls *gControls;
@@ -374,19 +356,6 @@ static void DPInspect(NSUInteger generation) {
 }
 @implementation DPControls
 - (void)stop { DPStop(@"user exit"); }
-- (void)pan:(UIPanGestureRecognizer *)gesture {
-    if (!gRunning) return;
-    if (gesture.state == UIGestureRecognizerStateBegan) gStartRatio = gRatio;
-    CGFloat dx = [gesture translationInView:gSplitWindow].x;
-    gRatio = MAX(kMinRatio, MIN(kMaxRatio, gStartRatio + dx / MAX(1, gSplitWindow.bounds.size.width)));
-    DPLayout();
-    if (gesture.state == UIGestureRecognizerStateEnded ||
-        gesture.state == UIGestureRecognizerStateCancelled ||
-        gesture.state == UIGestureRecognizerStateFailed) {
-        DPSaveRatio();
-        DPLog(@"RATIO %.3f", gRatio);
-    }
-}
 
 - (void)closePicker {
     gPickerWindow.hidden = YES;
@@ -549,14 +518,10 @@ static void DPInspect(NSUInteger generation) {
     dividerBar.layer.cornerRadius = kDividerVisualWidth * 0.5;
     dividerBar.userInteractionEnabled = NO;
     [gDivider addSubview:dividerBar];
-    gDivider.userInteractionEnabled = YES;
-    [gDivider addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)]];
-    UITapGestureRecognizer *swapTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(swap)];
-    swapTap.numberOfTapsRequired = 2;
-    [gDivider addGestureRecognizer:swapTap];
+    gDivider.userInteractionEnabled = NO; // Fixed separator, no pan or swap gestures.
     [root addSubview:gDivider];
     DPLayout(); gSplitWindow.hidden = NO; DPRefreshButton();
-    DPLog(@"START ratio=%.2f left=%@ right=%@ — scene resize + guaranteed-fill scale", gRatio, left.bundle, right.bundle);
+    DPLog(@"START FIXED 50/50 left=%@ right=%@ — unscaled scene resize", left.bundle, right.bundle);
     gOwnCall = YES;
     @try {
         for (DPRecord *record in gPair) {
@@ -787,9 +752,8 @@ static void DPTick(void) {
         if (![proc isEqualToString:@"com.apple.CarPlayApp"]) return;
         gRecords = [NSMutableDictionary dictionary]; gOrder = [NSMutableArray array];
         gControls = [DPControls new];
-        DPLoadRatio();
         dispatch_async(dispatch_get_main_queue(), ^{
-            DPLog(@"CTOR MANUAL EXPERIMENT — open two apps, tap Chia; ratio=%.2f", gRatio);
+            DPLog(@"CTOR MANUAL EXPERIMENT — open two apps, tap Chia; no automatic split");
             DPTick();
         });
     }
