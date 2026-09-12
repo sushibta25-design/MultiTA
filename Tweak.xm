@@ -1,4 +1,4 @@
-// DuoPhone V6.15b-poke-sceneui-buildfix — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.16-more-triggers — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.15b-poke-sceneui-buildfix %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.16-more-triggers %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -99,6 +99,8 @@ static void DPInspect(NSUInteger generation);
 static void DPDumpConnectedScenes(NSString *tag);
 static void DPProbeTemplateSurface(DPRecord *record);
 static void DPTryPokeSceneUI(DPRecord *record);
+static void DPTryZeroArgVoid(id target, NSString *tag, NSString *selName);
+static void DPPeekZeroArgObject(id target, NSString *tag, NSString *selName);
 static NSString *DPName(DPRecord *record) {
     if ([record.bundle isEqualToString:@"com.apple.Maps"]) return @"Maps";
     if ([record.bundle isEqualToString:@"com.google.ios.youtubemusic"]) return @"YouTube Music";
@@ -612,6 +614,54 @@ static void DPProbeClassSurface(Class cls, NSString *tag) {
 // lệnh yêu cầu host Template tính lại layout (tab bar, list...) cho scene
 // hiện tại — ứng viên hàng đầu để sửa lỗi chồng chữ ở app kiểu Template
 // thuần (không có content view riêng như bản đồ).
+// Hàm dùng chung: thử gọi 1 selector KHÔNG tham số, trả về void, có kiểm tra
+// chữ ký trước — dùng cho mọi ứng viên "trigger" tiếp theo (invalidate...).
+static void DPTryZeroArgVoid(id target, NSString *tag, NSString *selName) {
+    if (!target) return;
+    SEL sel = NSSelectorFromString(selName);
+    if (![target respondsToSelector:sel]) {
+        DPLog(@"POKE %@.%@ SKIP not respond", tag, selName);
+        return;
+    }
+    NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+    if (!sig || sig.numberOfArguments != 2 || strcmp(sig.methodReturnType, @encode(void)) != 0) {
+        DPLog(@"POKE %@.%@ SKIP unexpected signature argc=%lu returnType=%s",
+              tag, selName, sig ? (unsigned long)sig.numberOfArguments : 0,
+              sig ? sig.methodReturnType : "?");
+        return;
+    }
+    @try {
+        ((void (*)(id, SEL))objc_msgSend)(target, sel);
+        DPLog(@"POKE %@.%@ CALLED OK", tag, selName);
+    } @catch (NSException *e) {
+        DPLog(@"POKE %@.%@ EXCEPTION %@ %@", tag, selName, e.name, e.reason);
+    }
+}
+// Chỉ ĐỌC — gọi 1 getter không tham số trả về object, để xem giá trị hiện
+// tại (currentSceneUpdate, layoutElementAssertion...), không tự ý thay đổi
+// gì. Giúp hiểu cấu trúc dữ liệu trước khi dám set lại nó.
+static void DPPeekZeroArgObject(id target, NSString *tag, NSString *selName) {
+    if (!target) return;
+    SEL sel = NSSelectorFromString(selName);
+    if (![target respondsToSelector:sel]) {
+        DPLog(@"PEEK %@.%@ SKIP not respond", tag, selName);
+        return;
+    }
+    NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+    if (!sig || sig.numberOfArguments != 2 || strcmp(sig.methodReturnType, @encode(id)) != 0) {
+        DPLog(@"PEEK %@.%@ SKIP unexpected signature argc=%lu returnType=%s",
+              tag, selName, sig ? (unsigned long)sig.numberOfArguments : 0,
+              sig ? sig.methodReturnType : "?");
+        return;
+    }
+    @try {
+        id result = ((id (*)(id, SEL))objc_msgSend)(target, sel);
+        DPLog(@"PEEK %@.%@ => %@ class=%@", tag, selName, result ?: @"nil",
+              result ? NSStringFromClass([result class]) : @"nil");
+    } @catch (NSException *e) {
+        DPLog(@"PEEK %@.%@ EXCEPTION %@ %@", tag, selName, e.name, e.reason);
+    }
+}
 static void DPTryPokeSceneUI(DPRecord *record) {
     if (!record.controller) return;
     SEL sel = NSSelectorFromString(@"_updateSceneUI");
@@ -634,6 +684,20 @@ static void DPTryPokeSceneUI(DPRecord *record) {
     } @catch (NSException *e) {
         DPLog(@"POKE-SCENEUI bundle=%@ EXCEPTION %@ %@", record.bundle, e.name, e.reason);
     }
+
+    // _updateSceneUI KHÔNG có tác dụng (xác nhận qua test thực tế trên xe:
+    // gọi OK nhưng UI vẫn vỡ layout y hệt). Thử tiếp các ứng viên khác đã
+    // thấy trong probe: "invalidate" trên chính scene và trên presentation
+    // view — cả 2 đều không tham số, tên gợi ý đúng việc yêu cầu vẽ lại.
+    id scene = DPValue(record.controller, @"scene");
+    NSString *tag = record.bundle;
+    DPTryZeroArgVoid(scene, [tag stringByAppendingString:@".scene"], @"invalidate");
+    DPTryZeroArgVoid(record.presentation, [tag stringByAppendingString:@".presentation"], @"invalidate");
+
+    // Chỉ đọc, không tự ý set — xem 2 getter này trả về gì để hiểu cấu trúc,
+    // trước khi dám thử VIẾT lại chúng ở vòng sau.
+    DPPeekZeroArgObject(record.controller, [tag stringByAppendingString:@".controller"], @"currentSceneUpdate");
+    DPPeekZeroArgObject(record.controller, [tag stringByAppendingString:@".controller"], @"layoutElementAssertion");
 }
 static NSMutableSet<NSString *> *gTemplateProbed;
 static void DPProbeTemplateSurface(DPRecord *record) {
