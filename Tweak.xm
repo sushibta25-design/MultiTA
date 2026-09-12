@@ -96,6 +96,7 @@ static NSUInteger gGeneration;
 static NSUInteger gSessionEpoch;
 static CGFloat gRatio = 0.5, gStartRatio;
 static CGSize gNativeSize;
+static BOOL gAppProbeEnabled = NO;
 static void DPStop(NSString *reason);
 static void DPLayout(void);
 static void DPRefreshButton(void);
@@ -620,9 +621,40 @@ static void DPTick(void) {
     %orig;
 }
 %end
+
+// Chạy BÊN TRONG process của chính app bản đồ (Maps/Google Maps/Vietmap), khác
+// hẳn khối hook DBApplicationSceneViewController ở trên (chạy trong CarPlayApp).
+// Mục đích: xem chính app đó tự khai báo role/configuration gì khi nó kết nối
+// tới scene CarPlay — dữ liệu này quyết định có spoof/redirect được không.
+// _connectUIScene:withOptions: là API private phổ biến, có thể không tồn tại
+// trên mọi phiên bản iOS — nếu log không thấy dòng APPSIDE-CONNECT nào dù đã
+// mở app trên CarPlay, nghĩa là cần probe selector khác, không phải app không
+// kết nối.
+%hook UIApplication
+- (void)_connectUIScene:(UIScene *)scene withOptions:(id)options {
+    %orig;
+    if (!gAppProbeEnabled || ![scene isKindOfClass:UIWindowScene.class]) return;
+    @try {
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
+        UISceneSession *session = windowScene.session;
+        DPLog(@"APPSIDE-CONNECT proc=%@ sid=%@ role=%@ configName=%@ configDelegateClass=%@ orientation=%ld",
+              NSBundle.mainBundle.bundleIdentifier, session.persistentIdentifier, session.role,
+              session.configuration.name, session.configuration.delegateClass,
+              (long)windowScene.interfaceOrientation);
+    } @catch (NSException *e) { DPLog(@"APPSIDE-CONNECT PROBE ERROR %@", e.reason); }
+}
+%end
 %ctor {
     @autoreleasepool {
-        if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.CarPlayApp"]) return;
+        NSString *proc = NSBundle.mainBundle.bundleIdentifier;
+        // Nhánh probe: KHÔNG đụng tới bất kỳ global nào của phần host-side
+        // (gRecords/gControls/...) — chỉ bật cờ cho hook UIApplication ở trên.
+        if ([@[@"com.apple.Maps", @"com.google.Maps", @"vn.vietmap.live"] containsObject:proc]) {
+            gAppProbeEnabled = YES;
+            DPLog(@"APPSIDE PROBE ACTIVE proc=%@", proc);
+            return;
+        }
+        if (![proc isEqualToString:@"com.apple.CarPlayApp"]) return;
         gRecords = [NSMutableDictionary dictionary]; gOrder = [NSMutableArray array];
         if ([NSUserDefaults.standardUserDefaults objectForKey:DPRatioKey])
             gRatio = DPValidRatio([NSUserDefaults.standardUserDefaults doubleForKey:DPRatioKey]);

@@ -1,7 +1,10 @@
 {
     Filter = {
         Bundles = (
-            "com.apple.CarPlayApp"
+            "com.apple.CarPlayApp",
+            "com.apple.Maps",
+            "com.google.Maps",
+            "vn.vietmap.live"
         );
     };
 }
