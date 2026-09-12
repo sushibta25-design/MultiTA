@@ -1,2 +1,2 @@
-DuoPhone V1
+DuoPhone V6.2.1
 Package: com.sushibta.duophone

@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.8.1-v6.1
+Version: 0.8.2-v6.2.1
 Architecture: iphoneos-arm64e
-Description: DuoPhone V6.1 targets full DBApplicationSceneViewController scenes, excludes widget/dashboard scenes, and keeps selected CarPlay app scenes active for true split hosting.
+Description: Experimental CarPlay two-pane scene host with build fix and runtime diagnostics.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

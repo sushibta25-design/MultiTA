@@ -1,4 +1,4 @@
-// DuoPhone V6.2 — full-app scene retention + split host
+// DuoPhone V6.2.1 — full-app scene retention + split host
 //
 // Điều log V5.6 đã chứng minh:
 //   - Re-parent một _UIScenePresentationView sang view khác + đổi frame
@@ -7,17 +7,16 @@
 //     widget điều hướng (DBMapsNavigationWidgetViewController, 179x224),
 //     không phải app Maps đầy đủ. Nên kết quả là widget bị kéo giãn.
 //
-// V6.2 đổi mục tiêu: không bám vào widget nữa.
-//   Mọi app CarPlay khi được mở đều tạo trong CHÍNH process này một
-//   _UISceneLayerHostContainerView có sceneID dạng "Car[2-3]:<bundle>".
-//   V6.2 quét toàn bộ window, ghi nhận mọi scene app thấy được, giữ hai
-//   scene gần nhất sống song song và đặt trái/phải theo divider.
-//
-// Cách dùng: mở app A trên CarPlay, rồi mở app B. Cả hai được giữ lại
-// cạnh nhau thay vì app B thay chỗ app A.
+// V6.2.1 tiếp tục thử nghiệm host hai full-app scene trong CarPlayApp.
+// Giữ controller/view không bảo đảm process ứng dụng còn foreground.
+// Hooks lifecycle vẫn gọi %orig; phải kiểm tra cả hình động và touch trên xe.
+// Mở app A rồi app B để thu thập hai scene, kéo divider để đổi tỷ lệ.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
+#import <unistd.h>
+#import <math.h>
 
 #pragma mark - Hằng số
 
@@ -111,23 +110,21 @@ static void DPSavePrefs(void) {
 #pragma mark - Scene CarPlay
 
 static UIWindowScene *DPCarPlayScene(void) {
-    UIWindowScene *fallback = nil;
-
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
         if (![s isKindOfClass:UIWindowScene.class]) continue;
         UIWindowScene *ws = (UIWindowScene *)s;
 
         NSString *pid = s.session.persistentIdentifier ?: @"";
         if ([pid containsString:@"DBDashboard-Car"]) return ws;
-        if (!fallback) fallback = ws;
     }
-    return fallback;
+    return nil;
 }
 
 // View gốc của window chứa DBDashboardRootViewController.
 static UIView *DPDashboardRootView(UIWindowScene *ws) {
-    if (gHostRoot) return gHostRoot;
     if (!ws) return nil;
+    if (gHostRoot.window.windowScene == ws) return gHostRoot;
+    gHostRoot = nil;
 
     for (UIWindow *w in ws.windows) {
         UIViewController *root = w.rootViewController;
@@ -151,7 +148,7 @@ static NSString *DPBundleFromSceneID(NSString *sceneID) {
 
     NSArray<NSString *> *parts = [sceneID componentsSeparatedByString:@":"];
 
-    // V6.2 chỉ nhận FULL APP scene chính xác:
+    // V6.2.1 chỉ nhận FULL APP scene chính xác:
     //   Car[2-3]:com.apple.Maps
     // và loại toàn bộ :widget / :dashboard / scene phụ.
     if (parts.count != 2) return nil;
@@ -209,7 +206,7 @@ static void DPCollectScenes(UIView *v, NSInteger depth) {
         NSString *sceneID = DPSceneIDOfHost(v);
         NSString *bundle  = DPBundleFromSceneID(sceneID);
 
-        if (bundle) {
+        if (bundle && !gAppControllers[bundle]) {
             UIView *presentation = DPPresentationForHost(v);
 
             if (presentation && gScenes[bundle] != presentation) {
@@ -218,7 +215,7 @@ static void DPCollectScenes(UIView *v, NSInteger depth) {
                 [gOrder removeObject:bundle];
                 [gOrder addObject:bundle];
 
-                DPLog(@"V6.2 SCENE FOUND bundle=%@ sceneID=%@ presentation=%@ frame=%@",
+                DPLog(@"V6.2.1 SCENE FOUND bundle=%@ sceneID=%@ presentation=%@ frame=%@",
                       bundle, sceneID,
                       NSStringFromClass([presentation class]),
                       NSStringFromCGRect(presentation.frame));
@@ -249,25 +246,20 @@ static void DPRegisterAppController(id controller) {
         if ([v isKindOfClass:UIView.class]) controllerView = (UIView *)v;
     } @catch (__unused NSException *e) {}
 
+    BOOL changed = gAppControllers[bundle] != controller || gScenes[bundle] != host;
     gAppControllers[bundle] = controller;
     gScenes[bundle] = host;
     if (controllerView) gControllerViews[bundle] = controllerView;
+    else [gControllerViews removeObjectForKey:bundle];
+
+    if (!changed) return;
 
     [gOrder removeObject:bundle];
     [gOrder addObject:bundle];
 
-    DPLog(@"V6.2 FULL APP REGISTER bundle=%@ sceneID=%@ controller=%@ host=%@ frame=%@",
+    DPLog(@"V6.2.1 FULL APP REGISTER bundle=%@ sceneID=%@ controller=%@ host=%@ frame=%@",
           bundle, sceneID, NSStringFromClass([controller class]),
           NSStringFromClass([host class]), NSStringFromCGRect(host.frame));
-}
-
-static BOOL DPControllerIsPinned(id controller) {
-    if (!controller) return NO;
-    NSString *sceneID = DPValue(controller, @"sceneID");
-    NSString *bundle = [sceneID isKindOfClass:NSString.class]
-        ? DPBundleFromSceneID(sceneID) : nil;
-    if (!bundle) return NO;
-    return [bundle isEqualToString:gLeftApp] || [bundle isEqualToString:gRightApp];
 }
 
 static void DPCollectAppControllers(UIViewController *vc) {
@@ -305,7 +297,11 @@ static void DPResolvePanes(void) {
     BOOL leftOK  = gLeftApp  && gScenes[gLeftApp];
     BOOL rightOK = gRightApp && gScenes[gRightApp];
 
-    if (leftOK && rightOK) return;
+    if (leftOK && rightOK && ![gLeftApp isEqualToString:gRightApp]) return;
+    if (leftOK && [gLeftApp isEqualToString:gRightApp]) {
+        gRightApp = nil;
+        rightOK = NO;
+    }
 
     // Nếu không, lấy 2 app xuất hiện gần nhất.
     NSInteger n = (NSInteger)gOrder.count;
@@ -345,12 +341,12 @@ static void DPPinPaneForBundle(NSString *bundle, UIView *presentation, UIView *r
     pane.clipsToBounds = YES;
     pane.userInteractionEnabled = YES;
 
-    if (pane != presentation && presentation.superview != pane) {
+    if (pane != presentation && ![presentation isDescendantOfView:pane]) {
         [presentation removeFromSuperview];
         [pane addSubview:presentation];
     }
 
-    if (pane != presentation)
+    if (presentation.superview == pane)
         presentation.frame = pane.bounds;
 
     presentation.hidden = NO;
@@ -389,18 +385,10 @@ static void DPApplySplit(void) {
     UIView *leftView  = gLeftApp  ? gScenes[gLeftApp]  : nil;
     UIView *rightView = gRightApp ? gScenes[gRightApp] : nil;
 
-    // Dọn entry đã chết (view bị giải phóng).
-    for (NSString *b in [gScenes.allKeys copy]) {
-        if (!gScenes[b]) {
-            [gScenes removeObjectForKey:b];
-            [gOrder removeObject:b];
-        }
-    }
-
     if (!leftView && !rightView) {
         static NSUInteger miss = 0;
         if ((miss++ % 10) == 0)
-            DPLog(@"V6.2 chờ scene app: known=%lu order=%@",
+            DPLog(@"V6.2.1 chờ scene app: known=%lu order=%@",
                   (unsigned long)gScenes.count, gOrder);
         return;
     }
@@ -427,23 +415,26 @@ static void DPApplySplit(void) {
         if (leftView)  DPPinPaneForBundle(gLeftApp, leftView, root, left);
         if (rightView) DPPinPaneForBundle(gRightApp, rightView, root, right);
 
-        if (leftView)  [root bringSubviewToFront:leftView];
-        if (rightView) [root bringSubviewToFront:rightView];
+        UIView *leftPane = gLeftApp ? (gControllerViews[gLeftApp] ?: leftView) : nil;
+        UIView *rightPane = gRightApp ? (gControllerViews[gRightApp] ?: rightView) : nil;
+        if (leftPane.superview == root) [root bringSubviewToFront:leftPane];
+        if (rightPane.superview == root) [root bringSubviewToFront:rightPane];
     }];
 
-    if (!gSplitActive) {
-        gSplitActive = YES;
-        DPLog(@"========== V6.2 SPLIT ACTIVE ==========");
-        DPLog(@"V6.2 left=%@ (%@) right=%@ (%@)",
+    BOOL hasTwoPanes = leftView && rightView && leftView != rightView;
+    gDividerWindow.hidden = !hasTwoPanes;
+    if (gSplitActive != hasTwoPanes) {
+        gSplitActive = hasTwoPanes;
+        DPLog(@"V6.2.1 TWO PANES ATTACHED=%d (app liveness unverified)", hasTwoPanes);
+        DPLog(@"V6.2.1 left=%@ (%@) right=%@ (%@)",
               gLeftApp ?: @"nil", NSStringFromCGRect(left),
               gRightApp ?: @"nil", NSStringFromCGRect(right));
-        DPLog(@"========== V6.2 SPLIT ACTIVE END ==========");
     }
 
     static CGRect lastRight = {{0,0},{0,0}};
     if (!CGRectEqualToRect(lastRight, right)) {
         lastRight = right;
-        DPLog(@"V6.2 panes left=%@ right=%@ ratio=%.2f",
+        DPLog(@"V6.2.1 panes left=%@ right=%@ ratio=%.2f",
               NSStringFromCGRect(left), NSStringFromCGRect(right), gRatio);
     }
 }
@@ -484,7 +475,7 @@ static DPDividerTarget *gTarget = nil;
         g.state == UIGestureRecognizerStateFailed) {
         gDragging = NO;
         DPSavePrefs();
-        DPLog(@"V6.2 ratio=%.3f", gRatio);
+        DPLog(@"V6.2.1 ratio=%.3f", gRatio);
     }
 }
 
@@ -494,7 +485,7 @@ static DPDividerTarget *gTarget = nil;
     gLeftApp  = gRightApp;
     gRightApp = tmp;
     DPSavePrefs();
-    DPLog(@"V6.2 swap left=%@ right=%@", gLeftApp ?: @"nil", gRightApp ?: @"nil");
+    DPLog(@"V6.2.1 swap left=%@ right=%@", gLeftApp ?: @"nil", gRightApp ?: @"nil");
     DPApplySplit();
 }
 
@@ -568,9 +559,9 @@ static void DPCreateDivider(void) {
     [gDividerWindow addGestureRecognizer:tap];
 
     DPLayoutDivider();
-    gDividerWindow.hidden = NO;
+    gDividerWindow.hidden = YES;
 
-    DPLog(@"V6.2 divider ready frame=%@",
+    DPLog(@"V6.2.1 divider ready frame=%@",
           NSStringFromCGRect(gDividerWindow.frame));
 }
 
@@ -578,6 +569,22 @@ static void DPCreateDivider(void) {
 
 static void DPTick(void) {
     if (!DPIsCarPlay()) return;
+
+    UIWindowScene *scene = DPCarPlayScene();
+    if (gDividerWindow && gDividerWindow.windowScene != scene) {
+        gDividerWindow.hidden = YES;
+        gDividerWindow = nil;
+        gDividerBar = nil;
+        gTarget = nil;
+        gHostRoot = nil;
+        gSplitActive = NO;
+        gDragging = NO;
+        [gScenes removeAllObjects];
+        [gAppControllers removeAllObjects];
+        [gControllerViews removeAllObjects];
+        [gOrder removeAllObjects];
+        DPLog(@"V6.2.1 DISPLAY RESET: cleared retained app views");
+    }
 
     if (!gDividerWindow) DPCreateDivider();
     if (gDividerWindow && !gDragging) DPLayoutDivider();
@@ -590,7 +597,7 @@ static void DPTick(void) {
 
 
 
-#pragma mark - V6.2 observe lifecycle without blocking CarPlay
+#pragma mark - V6.2.1 observe lifecycle without blocking CarPlay
 
 %hook DBApplicationSceneViewController
 
@@ -611,14 +618,14 @@ static void DPTick(void) {
 
 - (void)backgroundSceneWithCompletion:(id)completion {
     NSString *sceneID = DPValue(self, @"sceneID");
-    DPLog(@"V6.2 lifecycle background sceneID=%@", sceneID ?: @"nil");
+    DPLog(@"V6.2.1 lifecycle background sceneID=%@", sceneID ?: @"nil");
     %orig;
     DPRegisterAppController(self);
 }
 
 - (void)deactivateSceneWithReasonMask:(NSUInteger)mask {
     NSString *sceneID = DPValue(self, @"sceneID");
-    DPLog(@"V6.2 lifecycle deactivate sceneID=%@ mask=%lu",
+    DPLog(@"V6.2.1 lifecycle deactivate sceneID=%@ mask=%lu",
           sceneID ?: @"nil", (unsigned long)mask);
     %orig;
     DPRegisterAppController(self);
@@ -636,7 +643,9 @@ static void DPTick(void) {
         gOrder  = [NSMutableArray array];
 
         DPLoadPrefs();
-        DPLog(@"CTOR V6.2 bundle=%@ ratio=%.2f left=%@ right=%@",
+        DPLog(@"V6.2.1 runtime DBApplicationSceneViewController=%@",
+              NSClassFromString(@"DBApplicationSceneViewController"));
+        DPLog(@"CTOR V6.2.1 bundle=%@ ratio=%.2f left=%@ right=%@",
               NSBundle.mainBundle.bundleIdentifier ?: @"nil",
               gRatio, gLeftApp ?: @"nil", gRightApp ?: @"nil");
 
