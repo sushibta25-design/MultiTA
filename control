@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.9.4-v6.8-rootless
+Version: 0.9.4-v6.13
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.8 for Dopamine rootless; manual dual CarPlay panes with experimental scene-frame resizing.
+Description: DuoPhone V6.13 - guaranteed-fill scale fallback on top of native scene resize, plus restored draggable divider ratio.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
