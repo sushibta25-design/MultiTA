@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.9.0-v6.4
+Version: 0.9.1-v6.5
 Architecture: iphoneos-arm64e
-Description: DuoPhone V6.4 - fixes divider thickness, top black bar, and aspect-correct pane scaling on top of the working V6.3.2 split.
+Description: DuoPhone V6.5 - cover-scale fit (no letterbox), removes app-name label, keeps only Thoat pill.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

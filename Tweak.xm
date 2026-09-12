@@ -1,3 +1,9 @@
+// V6.5: hoàn tác đổi FIT (letterbox) sang COVER (lấp kín, không viền đen).
+// Bỏ hẳn label ten app theo yêu cầu, chỉ giữ pill Thoát nhỏ.
+// LƯU Ý: "bubble tốc độ" (nút tròn nổi của Maps) nếu vẫn bị cắt là do nó
+// là 1 overlay/layer RIÊNG của app, không nằm trong _UIScenePresentationView
+// (layers=1) mà presentationViewWithIdentifier: trả về — code hiện chưa
+// đụng tới overlay đó. Cần probe thêm nếu muốn nắn luôn nó.
 // FIX GHI CHÚ V6.4 (dựa trên V6.3.2 đã chạy được, chỉ vá UI):
 //  1. Bỏ dải 30pt đen trên cùng — 2 pane giờ full chiều cao CarPlay.
 //  2. Divider: vùng chạm vẫn rộng nhưng chỉ vẽ 1 vạch mảnh 5pt ở giữa.
@@ -117,10 +123,10 @@ static void DPFit(UIView *view, UIView *pane) {
     view.transform = CGAffineTransformIdentity;
     view.bounds = (CGRect){CGPointZero, gNativeSize};
 
-    // Scale ĐỀU (cùng 1 hệ số cho X và Y) để giữ đúng khung hình gốc của app,
-    // thay vì kéo méo theo 2 trục riêng biệt như bản trước. Pane không vừa
-    // khít tỉ lệ gốc sẽ có viền đen 2 bên/trên-dưới thay vì hình bị méo.
-    CGFloat scale = MIN(paneW / gNativeSize.width, paneH / gNativeSize.height);
+    // Scale ĐỀU kiểu "cover": lấp kín toàn bộ pane, không méo hình, có thể
+    // cắt bớt viền ngoài nếu tỉ lệ pane khác tỉ lệ gốc app (không để lại
+    // viền đen như kiểu "fit" — đổi lại theo phản hồi thực tế trên xe).
+    CGFloat scale = MAX(paneW / gNativeSize.width, paneH / gNativeSize.height);
     if (!isfinite(scale) || scale <= 0) return;
 
     view.center = CGPointMake(CGRectGetMidX(pane.bounds), CGRectGetMidY(pane.bounds));
@@ -145,9 +151,8 @@ static void DPLayout(void) {
     bar.frame = CGRectMake((kDividerGrabWidth - kDividerVisualWidth) * 0.5, 0,
                            kDividerVisualWidth, height);
 
-    // Overlay trạng thái + nút Thoát: nổi trong suốt, không chiếm chỗ của app.
+    // Nút Thoát: pill nhỏ nổi góc trên phải, không có label tên app.
     CGFloat pillH = 26.0;
-    gStatus.frame = CGRectMake(8, 6, MAX(1, width - 84), pillH);
     UIButton *exitButton = (UIButton *)[gSplitWindow.rootViewController.view viewWithTag:9002];
     exitButton.frame = CGRectMake(width - 68, 6, 60, pillH);
 
@@ -258,29 +263,22 @@ static void DPInspect(NSUInteger generation) {
     gSplitWindow.windowLevel = UIWindowLevelAlert + 70;
     gSplitWindow.rootViewController = [UIViewController new];
     UIView *root = gSplitWindow.rootViewController.view;
-    root.backgroundColor = UIColor.blackColor; // chỉ lấp khe hở 2pt giữa 2 pane, không che app
+    root.backgroundColor = UIColor.blackColor; // chỉ lấp khe 2pt giữa 2 pane
     gLeftPane = [UIView new]; gRightPane = [UIView new];
     gLeftPane.clipsToBounds = YES; gRightPane.clipsToBounds = YES;
     gLeftPane.backgroundColor = UIColor.blackColor;
     gRightPane.backgroundColor = UIColor.blackColor;
     [root addSubview:gLeftPane]; [root addSubview:gRightPane];
 
-    // Pill trạng thái nổi, nền trong suốt mờ — không chiếm dải ngang riêng.
+    // Không hiện tên app nữa theo yêu cầu — chỉ còn 1 pill Thoát nhỏ.
     gStatus = [UILabel new];
-    gStatus.text = @"Đang mở hai ứng dụng…";
-    gStatus.textColor = UIColor.whiteColor;
-    gStatus.font = [UIFont systemFontOfSize:11];
-    gStatus.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
-    gStatus.layer.cornerRadius = 6;
-    gStatus.clipsToBounds = YES;
-    gStatus.textAlignment = NSTextAlignmentCenter;
-    [root addSubview:gStatus];
+    gStatus.hidden = YES;
 
     UIButton *exit = [UIButton buttonWithType:UIButtonTypeSystem];
     exit.tag = 9002;
     [exit setTitle:@"Thoát" forState:UIControlStateNormal];
     exit.tintColor = UIColor.whiteColor;
-    exit.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+    exit.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
     exit.layer.cornerRadius = 6;
     [exit addTarget:self action:@selector(stop) forControlEvents:UIControlEventTouchUpInside];
     [root addSubview:exit];
