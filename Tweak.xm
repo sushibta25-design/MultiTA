@@ -1,4 +1,4 @@
-// DuoPhone V6.14-template-probe — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.15-poke-sceneui — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.14-template-probe %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.15-poke-sceneui %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -98,6 +98,7 @@ static void DPRefreshButton(void);
 static void DPInspect(NSUInteger generation);
 static void DPDumpConnectedScenes(NSString *tag);
 static void DPProbeTemplateSurface(DPRecord *record);
+static void DPTryPokeSceneUI(DPRecord *record);
 static NSString *DPName(DPRecord *record) {
     if ([record.bundle isEqualToString:@"com.apple.Maps"]) return @"Maps";
     if ([record.bundle isEqualToString:@"com.google.ios.youtubemusic"]) return @"YouTube Music";
@@ -212,6 +213,7 @@ static void DPQueueResize(DPRecord *record, CGSize size) {
             BOOL readable = DPReadFrame(scene, &actual);
             DPLog(@"RESIZE OBSERVED bundle=%@ requested=%@ actual=%@ readable=%d setterState=%ld",
                   record.bundle, NSStringFromCGSize(target), NSStringFromCGRect(actual), readable, (long)record.resizeState);
+            DPTryPokeSceneUI(record);
             // Observed settings are not proof that the remote application has redrawn.
             DPLayout();
         });
@@ -598,11 +600,41 @@ static void DPProbeClassSurface(Class cls, NSString *tag) {
     for (unsigned int i = 0; i < mc; i++) {
         NSString *name = NSStringFromSelector(method_getName(methods[i]));
         if (DPTemplateProbeNameLooksUseful(name))
-            DPLog(@"TEMPLATE-PROBE %@ METHOD %@", tag, name);
+            DPLog(@"TEMPLATE-PROBE %@ METHOD %@ argc=%u types=%s", tag, name,
+                  method_getNumberOfArguments(methods[i]),
+                  method_getTypeEncoding(methods[i]) ?: "?");
     }
     if (methods) free(methods);
 }
-static NSMutableSet<NSString *> *gTemplateProbed;
+// Thử nghiệm có kiểm soát: gọi _updateSceneUI trên controller sau khi resize
+// xong, với ĐIỀU KIỆN chữ ký phải đúng "0 tham số, trả về void" mới gọi —
+// nếu không khớp thì bỏ qua, không đoán liều gây crash. Tên hàm gợi ý đây là
+// lệnh yêu cầu host Template tính lại layout (tab bar, list...) cho scene
+// hiện tại — ứng viên hàng đầu để sửa lỗi chồng chữ ở app kiểu Template
+// thuần (không có content view riêng như bản đồ).
+static void DPTryPokeSceneUI(DPRecord *record) {
+    if (!record.controller) return;
+    SEL sel = NSSelectorFromString(@"_updateSceneUI");
+    if (![record.controller respondsToSelector:sel]) {
+        DPLog(@"POKE-SCENEUI bundle=%@ SKIP not respond", record.bundle);
+        return;
+    }
+    NSMethodSignature *sig = [record.controller methodSignatureForSelector:sel];
+    // Chỉ self + _cmd (2 tham số ẩn), trả về void — đúng hình dạng 1 lệnh
+    // "trigger" không tham số. Sai hình dạng thì KHÔNG gọi.
+    if (!sig || sig.numberOfArguments != 2 || strcmp(sig.methodReturnType, @encode(void)) != 0) {
+        DPLog(@"POKE-SCENEUI bundle=%@ SKIP unexpected signature argc=%lu returnType=%s",
+              record.bundle, sig ? (unsigned long)sig.numberOfArguments : 0,
+              sig ? sig.methodReturnType : "?");
+        return;
+    }
+    @try {
+        ((void (*)(id, SEL))objc_msgSend)(record.controller, sel);
+        DPLog(@"POKE-SCENEUI bundle=%@ CALLED OK", record.bundle);
+    } @catch (NSException *e) {
+        DPLog(@"POKE-SCENEUI bundle=%@ EXCEPTION %@ %@", record.bundle, e.name, e.reason);
+    }
+}
 static void DPProbeTemplateSurface(DPRecord *record) {
     if (!record.controller) return;
     if (!gTemplateProbed) gTemplateProbed = [NSMutableSet set];
