@@ -1,5 +1,6 @@
-// DuoPhone V6.3.1 — stability update on device-confirmed V6.3 split/touch.
-// Keeps the same presentation creation and aspect-fit geometry as V6.3.
+// DuoPhone V6.3.2 — stability update on device-confirmed V6.3 split/touch.
+// Keeps V6.3 presentation creation; fills each pane using independent X/Y scaling.
+// This stretches native content; it does not request app-side responsive layout.
 // Replace only Tweak.xm. Package metadata stays unchanged.
 // Observed device APIs: foregroundSceneWithSettings:completion:,
 // presentationViewWithIdentifier:, invalidatePresentationViewForIdentifier:.
@@ -17,7 +18,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.3.1 %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.3.2 %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -106,13 +107,14 @@ static NSUInteger DPLayers(UIView *view, NSUInteger depth) {
 }
 static void DPFit(UIView *view, UIView *pane) {
     if (!view || gNativeSize.width <= 0 || gNativeSize.height <= 0) return;
-    // Preserve native app geometry; first test scales the full surface to fit.
+    // Preserve native bounds for input mapping; stretch the full surface to fill.
+    // Both edges stay visible. Text/icons can change aspect ratio.
     view.transform = CGAffineTransformIdentity;
     view.bounds = (CGRect){CGPointZero, gNativeSize};
-    CGFloat scale = MIN(pane.bounds.size.width / gNativeSize.width,
-                        pane.bounds.size.height / gNativeSize.height);
+    CGFloat scaleX = pane.bounds.size.width / gNativeSize.width;
+    CGFloat scaleY = pane.bounds.size.height / gNativeSize.height;
     view.center = CGPointMake(CGRectGetMidX(pane.bounds), CGRectGetMidY(pane.bounds));
-    view.transform = CGAffineTransformMakeScale(scale, scale);
+    view.transform = CGAffineTransformMakeScale(scaleX, scaleY);
 }
 static void DPLayout(void) {
     if (!gSplitWindow) return;
