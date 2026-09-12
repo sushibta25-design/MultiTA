@@ -50,7 +50,7 @@ static id DPValue(id object, NSString *key) {
 }
 static NSString *DPCategoryToken(NSString *sid) {
     if (![sid isKindOfClass:NSString.class]) return nil;
-    NSArray *parts = [sid componentsSeparatedByString:@":"];
+    NSArray<NSString *> *parts = [sid componentsSeparatedByString:@":"];
     if (parts.count < 2 || ![parts[0] hasPrefix:@"Car["] || ![parts[0] hasSuffix:@"]"]) return nil;
     return [parts[0] substringWithRange:NSMakeRange(4, parts[0].length - 5)];
 }
