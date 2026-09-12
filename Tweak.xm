@@ -1,4 +1,4 @@
-// DuoPhone V6.6 — dựa trên V6.3.2 (đã chạy được: 2 app scene thật song song
+// DuoPhone V6.7 — dựa trên V6.3.2 (đã chạy được: 2 app scene thật song song
 // qua presentationViewWithIdentifier:), chỉ vá UI + thêm picker chọn app.
 //
 // Lịch sử các lần vá UI trên nền V6.3.2:
@@ -8,7 +8,7 @@
 //  V6.5: đổi "fit" sang "cover" (MAX scale) để lấp kín, hết viền đen — nhưng
 //        vì chiều cao pane không đổi khi kéo divider, cover-scale gần như
 //        cố định, nên kéo chỉ dịch vùng crop chứ ảnh không co giãn.
-//  V6.6: đổi hẳn sang stretch ĐỘC LẬP X/Y (scaleX theo chiều rộng pane,
+//  V6.7: đổi hẳn sang stretch ĐỘC LẬP X/Y (scaleX theo chiều rộng pane,
 //        scaleY theo chiều cao pane) — lấp kín pane VÀ co giãn đúng theo cả
 //        2 chiều khi kéo divider. Đánh đổi: hình có thể hơi méo tỉ lệ.
 //        Thêm picker: nhớ tối đa 6 app đã mở trong phiên, nút "Chia" mở
@@ -34,7 +34,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.6 %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.7 %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -77,7 +77,7 @@ static NSString *DPBundle(NSString *sid) {
 static NSMutableDictionary<NSString *, DPRecord *> *gRecords;
 static NSMutableArray<NSString *> *gOrder;
 static NSArray<DPRecord *> *gPair;
-static UIWindow *gButtonWindow, *gSplitWindow, *gPickerWindow;
+static UIWindow *gButtonWindow, *gSplitWindow, *gPickerWindow, *gDockWindow;
 static UIView *gLeftPane, *gRightPane, *gDivider;
 static UIButton *gButton;
 static NSMutableArray<NSString *> *gPickerBundles;   // snapshot khi mở picker
@@ -146,6 +146,7 @@ static const CGFloat kDividerGrabWidth = 28.0;   // vùng chạm (không hiển 
 static const CGFloat kDividerVisualWidth = 5.0;  // vạch mảnh thực sự nhìn thấy
 static const CGFloat kPaneGap = 2.0;
 static const NSUInteger kMaxCachedApps = 6;      // nhớ tối đa 6 app đã mở trong phiên
+static const CGFloat kPaneCornerRadius = 14.0;   // bo góc kiểu iPhone
 
 static void DPLayout(void) {
     if (!gSplitWindow) return;
@@ -212,6 +213,7 @@ static void DPStop(NSString *reason) {
 - (void)openPicker;
 - (void)closePicker;
 - (void)pickerTap:(UIButton *)sender;
+- (void)dockLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)startWithLeftBundle:(NSString *)leftBundle rightBundle:(NSString *)rightBundle;
 - (void)stop;
 - (void)pan:(UIPanGestureRecognizer *)gesture;
@@ -323,6 +325,13 @@ static void DPInspect(NSUInteger generation) {
     [self startWithLeftBundle:left rightBundle:right];
 }
 
+// Chạm giữ ~0.5s trên thanh Dock để mở picker chọn cặp app — thay cho việc
+// phải bấm trúng nút "Chia" nhỏ. Nút "Chia" vẫn giữ song song làm phương án
+// dự phòng (không xoá) vì cơ chế mới chưa test đủ nhiều trên xe thật.
+- (void)dockLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    [self openPicker];
+}
 - (void)pan:(UIPanGestureRecognizer *)gesture {
     if (!gRunning) return;
     if (gesture.state == UIGestureRecognizerStateBegan) gStartRatio = gRatio;
@@ -348,7 +357,20 @@ static void DPInspect(NSUInteger generation) {
 - (void)startWithLeftBundle:(NSString *)leftBundle rightBundle:(NSString *)rightBundle {
     if (gRunning || !gSession || DPDashboard() != gSession) return;
     DPRecord *left = gRecords[leftBundle], *right = gRecords[rightBundle];
-    if (!left.valid || !right.valid || left.controller == right.controller) return;
+    if (!left.valid || !right.valid) {
+        DPLog(@"REFUSE invalid record left=%@(%d) right=%@(%d)",
+              leftBundle, left.valid, rightBundle, right.valid);
+        return;
+    }
+    if (left.controller == right.controller) {
+        // Nếu 2 bundle khác nhau nhưng CÙNG 1 controller vật lý, nhiều khả năng
+        // CarPlay xếp cả 2 vào chung 1 "vai trò" (ví dụ Navigation) và chỉ cho
+        // 1 app thuộc vai trò đó active tại 1 thời điểm — giới hạn tầng OS,
+        // không phải lỗi ở logic ghép cặp của tweak.
+        DPLog(@"REFUSE same controller=%p left=%@ right=%@ — có thể 2 app cùng 1 vai trò CarPlay (vd Navigation)",
+              (__bridge void *)left.controller, leftBundle, rightBundle);
+        return;
+    }
     NSString *leftDisplay = [left.sid componentsSeparatedByString:@":"].firstObject;
     NSString *rightDisplay = [right.sid componentsSeparatedByString:@":"].firstObject;
     if (![leftDisplay isEqual:rightDisplay]) { DPLog(@"REFUSE mismatched displays"); return; }
@@ -367,6 +389,11 @@ static void DPInspect(NSUInteger generation) {
     root.backgroundColor = UIColor.blackColor; // chỉ lấp khe 2pt giữa 2 pane
     gLeftPane = [UIView new]; gRightPane = [UIView new];
     gLeftPane.clipsToBounds = YES; gRightPane.clipsToBounds = YES;
+    for (UIView *pane in @[gLeftPane, gRightPane]) {
+        pane.layer.cornerRadius = kPaneCornerRadius;
+        if (@available(iOS 13.0, *)) pane.layer.cornerCurve = kCACornerCurveContinuous;
+        pane.layer.masksToBounds = YES;
+    }
     gLeftPane.backgroundColor = UIColor.blackColor;
     gRightPane.backgroundColor = UIColor.blackColor;
     [root addSubview:gLeftPane]; [root addSubview:gRightPane];
@@ -470,7 +497,8 @@ static void DPCapture(id controller, id settings) {
         while (gOrder.count > kMaxCachedApps) {
             [gRecords removeObjectForKey:gOrder.firstObject]; [gOrder removeObjectAtIndex:0];
         }
-        DPLog(@"CAPTURE bundle=%@ source=%@ suspended=%@", bundle,
+        DPLog(@"CAPTURE bundle=%@ controller=%p source=%@ suspended=%@", bundle,
+              (__bridge void *)controller,
               copy[@"DBActivationSettingLaunchSource"], copy[@"DBActivationSettingSuspended"]);
         DPRefreshButton();
     };
@@ -485,6 +513,7 @@ static void DPTick(void) {
         DPStop(@"display changed");
         [gControls closePicker];
         gButtonWindow.hidden = YES; gButtonWindow = nil; gButton = nil;
+        gDockWindow.hidden = YES; gDockWindow = nil;
         [gRecords removeAllObjects]; [gOrder removeAllObjects];
         gSession = session;
         DPLog(@"DISPLAY %@", session.session.persistentIdentifier);
@@ -505,10 +534,24 @@ static void DPTick(void) {
         [gButton addTarget:gControls action:@selector(openPicker) forControlEvents:UIControlEventTouchUpInside];
         [gButtonWindow.rootViewController.view addSubview:gButton];
     }
+    if (session && !gDockWindow) {
+        gDockWindow = [[UIWindow alloc] initWithWindowScene:session];
+        gDockWindow.windowLevel = UIWindowLevelAlert + 75; // dưới picker/split, trên UI thường
+        gDockWindow.backgroundColor = UIColor.clearColor;
+        gDockWindow.rootViewController = [UIViewController new];
+        gDockWindow.rootViewController.view.backgroundColor = UIColor.clearColor;
+        UILongPressGestureRecognizer *hold =
+            [[UILongPressGestureRecognizer alloc] initWithTarget:gControls
+                                                          action:@selector(dockLongPress:)];
+        hold.minimumPressDuration = 0.5;
+        [gDockWindow addGestureRecognizer:hold];
+    }
     if (session) {
         CGFloat width = session.coordinateSpace.bounds.size.width;
         gButtonWindow.frame = CGRectMake(MAX(45,width-58), 0, 58, 28);
         gButton.frame = CGRectMake(0,0,58,28);
+        gDockWindow.frame = CGRectMake(0, 0, 45, session.coordinateSpace.bounds.size.height);
+        gDockWindow.hidden = gRunning; // đang chia màn thì thôi, tránh đè lên divider
         DPRefreshButton();
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPTick(); });
