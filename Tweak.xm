@@ -1,4 +1,4 @@
-// DuoPhone V6.13-fit-fix — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.14-template-probe — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.13-fit-fix %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.14-template-probe %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -97,6 +97,7 @@ static void DPLayout(void);
 static void DPRefreshButton(void);
 static void DPInspect(NSUInteger generation);
 static void DPDumpConnectedScenes(NSString *tag);
+static void DPProbeTemplateSurface(DPRecord *record);
 static NSString *DPName(DPRecord *record) {
     if ([record.bundle isEqualToString:@"com.apple.Maps"]) return @"Maps";
     if ([record.bundle isEqualToString:@"com.google.ios.youtubemusic"]) return @"YouTube Music";
@@ -555,6 +556,7 @@ static void DPInspect(NSUInteger generation) {
                 [(index == 0 ? gLeftPane : gRightPane) addSubview:result];
                 DPLog(@"CREATE bundle=%@ identifier=%@ class=%@ layers=%lu", record.bundle,
                       record.presentationID, NSStringFromClass([result class]), (unsigned long)DPLayers(result,0));
+                DPProbeTemplateSurface(record);
             }
             DPLayout();
         } @catch (NSException *e) {
@@ -574,6 +576,56 @@ static void DPRefreshButton(void) {
     for (NSString *bundle in gOrder) if (gRecords[bundle].valid) validCount++;
     BOOL ready = validCount >= 2;
     gButtonWindow.hidden = gRunning || !ready;
+}
+// Chỉ CHẨN ĐOÁN — quét tên method/property của controller + scene, lọc theo
+// từ khoá liên quan tới template/tab bar/layout, để TÌM (không phải đoán mò)
+// xem có API nào bắt hệ thống Template (CarPlayTemplateUIHost) vẽ lại UI theo
+// kích thước mới hay không. Chỉ chạy 1 lần/app để không spam log.
+static BOOL DPTemplateProbeNameLooksUseful(NSString *name) {
+    if (!name) return NO;
+    NSString *l = name.lowercaseString;
+    return [l containsString:@"template"] || [l containsString:@"tabbar"] ||
+           [l containsString:@"tab"] || [l containsString:@"layout"] ||
+           [l containsString:@"reload"] || [l containsString:@"invalidate"] ||
+           [l containsString:@"relayout"] || [l containsString:@"content"] ||
+           [l containsString:@"redraw"] || [l containsString:@"update"];
+}
+static void DPProbeClassSurface(Class cls, NSString *tag) {
+    if (!cls || !tag) return;
+    DPLog(@"TEMPLATE-PROBE class=%@ super=%@", tag, NSStringFromClass(class_getSuperclass(cls)));
+    unsigned int mc = 0;
+    Method *methods = class_copyMethodList(cls, &mc);
+    for (unsigned int i = 0; i < mc; i++) {
+        NSString *name = NSStringFromSelector(method_getName(methods[i]));
+        if (DPTemplateProbeNameLooksUseful(name))
+            DPLog(@"TEMPLATE-PROBE %@ METHOD %@", tag, name);
+    }
+    if (methods) free(methods);
+}
+static NSMutableSet<NSString *> *gTemplateProbed;
+static void DPProbeTemplateSurface(DPRecord *record) {
+    if (!record.controller) return;
+    if (!gTemplateProbed) gTemplateProbed = [NSMutableSet set];
+    if ([gTemplateProbed containsObject:record.bundle]) return;
+    [gTemplateProbed addObject:record.bundle];
+
+    BOOL isTemplate = [record.sid containsString:@"CarPlayTemplateUIHost"];
+    DPLog(@"========== TEMPLATE-PROBE bundle=%@ isTemplate=%d ==========", record.bundle, isTemplate);
+
+    DPProbeClassSurface([record.controller class],
+                        [NSString stringWithFormat:@"controller(%@)", record.bundle]);
+
+    id scene = DPValue(record.controller, @"scene");
+    if (scene) DPProbeClassSurface([scene class],
+                                   [NSString stringWithFormat:@"scene(%@)", record.bundle]);
+
+    // Presentation view chính là bề mặt render — quét luôn để tìm hàm
+    // "reload/invalidate layout" ngay trên chính view đó nếu có.
+    if (record.presentation)
+        DPProbeClassSurface([record.presentation class],
+                            [NSString stringWithFormat:@"presentation(%@)", record.bundle]);
+
+    DPLog(@"========== TEMPLATE-PROBE bundle=%@ END ==========", record.bundle);
 }
 static void DPDumpConnectedScenes(NSString *tag) {
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
@@ -612,9 +664,16 @@ static void DPCapture(id controller, id settings) {
         while (gOrder.count > kMaxCachedApps) {
             [gRecords removeObjectForKey:gOrder.firstObject]; [gOrder removeObjectAtIndex:0];
         }
-        DPLog(@"CAPTURE bundle=%@ category=%@ sid=%@ controller=%p source=%@ suspended=%@", bundle, category, sid,
+        DPLog(@"CAPTURE bundle=%@ category=%@ sid=%@ controller=%p source=%@ suspended=%@ isTemplate=%d", bundle, category, sid,
               (__bridge void *)controller,
-              copy[@"DBActivationSettingLaunchSource"], copy[@"DBActivationSettingSuspended"]);
+              copy[@"DBActivationSettingLaunchSource"], copy[@"DBActivationSettingSuspended"],
+              [sid containsString:@"CarPlayTemplateUIHost"]);
+        // Dump TOÀN BỘ key trong settings — đang tìm 1 key kiểu frame/display
+        // configuration có thể set NGAY LÚC connect, thay vì resize sau khi
+        // đã render (cách hiện tại không hiệu quả với app kiểu Template).
+        for (NSString *key in copy.allKeys)
+            DPLog(@"SETTINGS-DUMP bundle=%@ key=%@ value=%@ class=%@",
+                  bundle, key, copy[key], NSStringFromClass([copy[key] class]));
         DPDumpConnectedScenes([NSString stringWithFormat:@"capture:%@", bundle]);
         DPRefreshButton();
     };

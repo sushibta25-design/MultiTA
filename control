@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.9.5-v6.13
+Version: 0.9.6-v6.14
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.13 - fixes DPFit initial-size bug so both panes fill correctly from the first frame instead of a full-size crop during the async resize round-trip.
+Description: DuoPhone V6.14 - adds diagnostic probes: full settings-dict dump and template/relayout method surface scan, to find why CarPlayTemplateUIHost apps (YouTube Music, Podcasts) break layout on resize while native apps (Maps) do not.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
