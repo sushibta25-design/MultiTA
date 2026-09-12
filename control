@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.9.9-v6.16
+Version: 0.9.10-v6.17
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.16 - _updateSceneUI confirmed no effect; now trying invalidate on scene/presentation plus read-only peeks at currentSceneUpdate/layoutElementAssertion.
+Description: DuoPhone V6.17 - removes _updateSceneUI and invalidate (confirmed to destroy the scene, caused the crash); switches to read-only inspection of the FBSDisplayLayoutElement found via layoutElementAssertion.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

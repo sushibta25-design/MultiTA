@@ -1,4 +1,4 @@
-// DuoPhone V6.16-more-triggers — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.17-safe-readonly — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.16-more-triggers %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.17-safe-readonly %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -664,35 +664,80 @@ static void DPPeekZeroArgObject(id target, NSString *tag, NSString *selName) {
 }
 static void DPTryPokeSceneUI(DPRecord *record) {
     if (!record.controller) return;
-    SEL sel = NSSelectorFromString(@"_updateSceneUI");
-    if (![record.controller respondsToSelector:sel]) {
-        DPLog(@"POKE-SCENEUI bundle=%@ SKIP not respond", record.bundle);
-        return;
-    }
-    NSMethodSignature *sig = [record.controller methodSignatureForSelector:sel];
-    // Chỉ self + _cmd (2 tham số ẩn), trả về void — đúng hình dạng 1 lệnh
-    // "trigger" không tham số. Sai hình dạng thì KHÔNG gọi.
-    if (!sig || sig.numberOfArguments != 2 || strcmp(sig.methodReturnType, @encode(void)) != 0) {
-        DPLog(@"POKE-SCENEUI bundle=%@ SKIP unexpected signature argc=%lu returnType=%s",
-              record.bundle, sig ? (unsigned long)sig.numberOfArguments : 0,
-              sig ? sig.methodReturnType : "?");
-        return;
-    }
-    @try {
-        ((void (*)(id, SEL))objc_msgSend)(record.controller, sel);
-        DPLog(@"POKE-SCENEUI bundle=%@ CALLED OK", record.bundle);
-    } @catch (NSException *e) {
-        DPLog(@"POKE-SCENEUI bundle=%@ EXCEPTION %@ %@", record.bundle, e.name, e.reason);
+
+    // ĐÃ BỎ HẲN: _updateSceneUI VÀ mọi lệnh "invalidate". Log thực tế cho
+    // thấy MỌI lần gọi _updateSceneUI đều ngay lập tức kéo theo
+    // "STOP native scene destroyed" — nó không "vô hại" như kết luận sai ở
+    // bản trước, mà chính là thứ khiến hệ thống tự huỷ scene. "invalidate"
+    // cùng họ tên với các API kiểu FrontBoard chuyên dùng để "huỷ/gỡ đăng
+    // ký" — CHƯA có bằng chứng nó an toàn (2 lần gọi thành công trong log
+    // đều là gọi trên scene ĐÃ CHẾT sẵn từ _updateSceneUI, không chứng minh
+    // được gì khi gọi trên scene còn sống). Từ bản này CHỈ ĐỌC, không gọi
+    // thêm bất kỳ hàm "trigger" nào nữa cho tới khi hiểu rõ hơn.
+
+    id controller = record.controller;
+    NSString *tag = record.bundle;
+
+    // Đào tiếp phát hiện quan trọng nhất log trước: layoutElementAssertion
+    // trả về BSSimpleAssertion, bên trong có .reason là FBSDisplayLayoutElement
+    // — rất có thể đây là đối tượng hệ thống dùng để đăng ký VÙNG HIỂN THỊ
+    // của app. Đọc (không sửa) mọi key khả nghi để hiểu cấu trúc nó.
+    id assertion = nil;
+    SEL assertionSel = NSSelectorFromString(@"layoutElementAssertion");
+    if ([controller respondsToSelector:assertionSel]) {
+        NSMethodSignature *sig = [controller methodSignatureForSelector:assertionSel];
+        if (sig && sig.numberOfArguments == 2 && strcmp(sig.methodReturnType, @encode(id)) == 0) {
+            @try { assertion = ((id (*)(id, SEL))objc_msgSend)(controller, assertionSel); }
+            @catch (NSException *e) { DPLog(@"PEEK %@ layoutElementAssertion EXCEPTION %@", tag, e.name); }
+        }
     }
 
-    // _updateSceneUI KHÔNG có tác dụng (xác nhận qua test thực tế trên xe:
-    // gọi OK nhưng UI vẫn vỡ layout y hệt). Thử tiếp các ứng viên khác đã
-    // thấy trong probe: "invalidate" trên chính scene và trên presentation
-    // view — cả 2 đều không tham số, tên gợi ý đúng việc yêu cầu vẽ lại.
-    id scene = DPValue(record.controller, @"scene");
-    NSString *tag = record.bundle;
-    DPTryZeroArgVoid(scene, [tag stringByAppendingString:@".scene"], @"invalidate");
-    DPTryZeroArgVoid(record.presentation, [tag stringByAppendingString:@".presentation"], @"invalidate");
+    if (!assertion) {
+        DPLog(@"PEEK %@ layoutElementAssertion => nil (scene có thể đã bị huỷ)", tag);
+        return;
+    }
+
+    id element = DPValue(assertion, @"reason");
+    DPLog(@"PEEK %@ layoutElement=%@ class=%@", tag, element ?: @"nil",
+          element ? NSStringFromClass([element class]) : @"nil");
+
+    if (!element) return;
+
+    // Đọc mọi key hình học/kích thước khả dĩ — KHÔNG set lại bất kỳ cái gì.
+    for (NSString *key in @[@"frame", @"bounds", @"size", @"rect", @"region",
+                            @"displayIdentity", @"identity", @"identifier",
+                            @"contentSize", @"logicalSize", @"screenBounds"]) {
+        id value = DPValue(element, key);
+        if (value) DPLog(@"PEEK %@ layoutElement.%@ => %@ class=%@",
+                          tag, key, value, NSStringFromClass([value class]));
+    }
+
+    // Quét thêm ivar kiểu CGRect/CGSize nếu có (đọc bằng object_getIvar an
+    // toàn qua @try, không dùng con trỏ thô để tránh đọc sai kiểu).
+    Class cls = [element class];
+    unsigned int ic = 0;
+    Ivar *ivars = class_copyIvarList(cls, &ic);
+    for (unsigned int i = 0; i < ic; i++) {
+        const char *rawName = ivar_getName(ivars[i]);
+        const char *rawType = ivar_getTypeEncoding(ivars[i]);
+        if (!rawName || !rawType) continue;
+        NSString *name = [NSString stringWithUTF8String:rawName];
+        if (strcmp(rawType, @encode(CGRect)) == 0) {
+            @try {
+                CGRect r;
+                ptrdiff_t offset = ivar_getOffset(ivars[i]);
+                memcpy(&r, (char *)(__bridge void *)element + offset, sizeof(CGRect));
+                DPLog(@"PEEK %@ layoutElement IVAR %@ (CGRect) => %@", tag, name, NSStringFromCGRect(r));
+            } @catch (__unused NSException *e) {}
+        } else if (strcmp(rawType, @encode(CGSize)) == 0) {
+            @try {
+                CGSize s; ptrdiff_t offset = ivar_getOffset(ivars[i]);
+                memcpy(&s, (char *)(__bridge void *)element + offset, sizeof(CGSize));
+                DPLog(@"PEEK %@ layoutElement IVAR %@ (CGSize) => %@", tag, name, NSStringFromCGSize(s));
+            } @catch (__unused NSException *e) {}
+        }
+    }
+    if (ivars) free(ivars);
 
     // Chỉ đọc, không tự ý set — xem 2 getter này trả về gì để hiểu cấu trúc,
     // trước khi dám thử VIẾT lại chúng ở vòng sau.
