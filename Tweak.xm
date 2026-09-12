@@ -48,6 +48,12 @@ static id DPValue(id object, NSString *key) {
     @try { return [object valueForKey:key]; }
     @catch (__unused NSException *e) { return nil; }
 }
+static NSString *DPCategoryToken(NSString *sid) {
+    if (![sid isKindOfClass:NSString.class]) return nil;
+    NSArray *parts = [sid componentsSeparatedByString:@":"];
+    if (parts.count < 2 || ![parts[0] hasPrefix:@"Car["] || ![parts[0] hasSuffix:@"]"]) return nil;
+    return [parts[0] substringWithRange:NSMakeRange(4, parts[0].length - 5)];
+}
 static NSString *DPBundle(NSString *sid) {
     if (![sid isKindOfClass:NSString.class]) return nil;
     NSArray *parts = [sid componentsSeparatedByString:@":"];
@@ -63,6 +69,7 @@ static NSString *DPBundle(NSString *sid) {
 @interface DPRecord : NSObject
 @property(nonatomic,strong) id controller;
 @property(nonatomic,copy) NSString *sid;
+@property(nonatomic,copy) NSString *category;
 @property(nonatomic,copy) NSString *bundle;
 @property(nonatomic,copy) NSDictionary *settings;
 @property(nonatomic,copy) NSString *presentationID;
@@ -77,7 +84,7 @@ static NSString *DPBundle(NSString *sid) {
 static NSMutableDictionary<NSString *, DPRecord *> *gRecords;
 static NSMutableArray<NSString *> *gOrder;
 static NSArray<DPRecord *> *gPair;
-static UIWindow *gButtonWindow, *gSplitWindow, *gPickerWindow, *gDockWindow;
+static UIWindow *gButtonWindow, *gSplitWindow, *gPickerWindow;
 static UIView *gLeftPane, *gRightPane, *gDivider;
 static UIButton *gButton;
 static NSMutableArray<NSString *> *gPickerBundles;   // snapshot khi mở picker
@@ -93,6 +100,7 @@ static void DPStop(NSString *reason);
 static void DPLayout(void);
 static void DPRefreshButton(void);
 static void DPInspect(NSUInteger generation);
+static void DPDumpConnectedScenes(NSString *tag);
 static CGFloat DPValidRatio(CGFloat ratio) {
     return isfinite(ratio) ? MAX(0.30, MIN(0.70, ratio)) : 0.5;
 }
@@ -213,7 +221,6 @@ static void DPStop(NSString *reason) {
 - (void)openPicker;
 - (void)closePicker;
 - (void)pickerTap:(UIButton *)sender;
-- (void)dockLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)startWithLeftBundle:(NSString *)leftBundle rightBundle:(NSString *)rightBundle;
 - (void)stop;
 - (void)pan:(UIPanGestureRecognizer *)gesture;
@@ -325,13 +332,6 @@ static void DPInspect(NSUInteger generation) {
     [self startWithLeftBundle:left rightBundle:right];
 }
 
-// Chạm giữ ~0.5s trên thanh Dock để mở picker chọn cặp app — thay cho việc
-// phải bấm trúng nút "Chia" nhỏ. Nút "Chia" vẫn giữ song song làm phương án
-// dự phòng (không xoá) vì cơ chế mới chưa test đủ nhiều trên xe thật.
-- (void)dockLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateBegan) return;
-    [self openPicker];
-}
 - (void)pan:(UIPanGestureRecognizer *)gesture {
     if (!gRunning) return;
     if (gesture.state == UIGestureRecognizerStateBegan) gStartRatio = gRatio;
@@ -362,13 +362,14 @@ static void DPInspect(NSUInteger generation) {
               leftBundle, left.valid, rightBundle, right.valid);
         return;
     }
+    DPDumpConnectedScenes(@"start-attempt");
     if (left.controller == right.controller) {
         // Nếu 2 bundle khác nhau nhưng CÙNG 1 controller vật lý, nhiều khả năng
         // CarPlay xếp cả 2 vào chung 1 "vai trò" (ví dụ Navigation) và chỉ cho
         // 1 app thuộc vai trò đó active tại 1 thời điểm — giới hạn tầng OS,
         // không phải lỗi ở logic ghép cặp của tweak.
-        DPLog(@"REFUSE same controller=%p left=%@ right=%@ — có thể 2 app cùng 1 vai trò CarPlay (vd Navigation)",
-              (__bridge void *)left.controller, leftBundle, rightBundle);
+        DPLog(@"REFUSE same controller=%p left=%@(cat=%@) right=%@(cat=%@) — có thể 2 app cùng 1 vai trò CarPlay (vd Navigation)",
+              (__bridge void *)left.controller, leftBundle, left.category, rightBundle, right.category);
         return;
     }
     NSString *leftDisplay = [left.sid componentsSeparatedByString:@":"].firstObject;
@@ -478,28 +479,47 @@ static void DPRefreshButton(void) {
     BOOL ready = validCount >= 2;
     gButtonWindow.hidden = gRunning || !ready;
 }
+static void DPDumpConnectedScenes(NSString *tag) {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        NSString *pid = scene.session.persistentIdentifier;
+        NSString *role = scene.session.role;
+        BOOL active = scene.activationState == UISceneActivationStateForegroundActive;
+        DPLog(@"SCENES[%@] pid=%@ role=%@ class=%@ active=%d",
+              tag, pid, role, NSStringFromClass([scene class]), active);
+    }
+}
 static void DPCapture(id controller, id settings) {
     if (gOwnCall || ![settings isKindOfClass:NSDictionary.class]) return;
     // Ignore suspended prewarming. Only retain observed explicit launch settings.
     if (!settings[@"DBActivationSettingLaunchSource"]) return;
     NSString *sid = DPValue(controller, @"sceneID"), *bundle = DPBundle(sid);
     if (!bundle) return;
+    NSString *category = DPCategoryToken(sid);
     NSDictionary *copy = [settings copy];
     NSUInteger epoch = gSessionEpoch;
     void (^capture)(void) = ^{
         if (epoch != gSessionEpoch || !gSession || DPDashboard() != gSession) return;
         if (gRunning) return;
         DPRecord *record = [DPRecord new];
-        record.controller = controller; record.sid = sid; record.bundle = bundle; record.settings = copy;
+        record.controller = controller; record.sid = sid; record.category = category;
+        record.bundle = bundle; record.settings = copy;
         record.valid = YES;
+        // Nếu bundle này đã có record cũ với category KHÁC, hoặc trùng bundle
+        // nhưng khác controller — đáng chú ý, log riêng để đối chiếu sau.
+        DPRecord *previous = gRecords[bundle];
+        if (previous && previous.controller != controller)
+            DPLog(@"CAPTURE-REPLACE bundle=%@ oldController=%p oldCategory=%@ newController=%p newCategory=%@",
+                  bundle, (__bridge void *)previous.controller, previous.category,
+                  (__bridge void *)controller, category);
         gRecords[bundle] = record;
         [gOrder removeObject:bundle]; [gOrder addObject:bundle];
         while (gOrder.count > kMaxCachedApps) {
             [gRecords removeObjectForKey:gOrder.firstObject]; [gOrder removeObjectAtIndex:0];
         }
-        DPLog(@"CAPTURE bundle=%@ controller=%p source=%@ suspended=%@", bundle,
+        DPLog(@"CAPTURE bundle=%@ category=%@ sid=%@ controller=%p source=%@ suspended=%@", bundle, category, sid,
               (__bridge void *)controller,
               copy[@"DBActivationSettingLaunchSource"], copy[@"DBActivationSettingSuspended"]);
+        DPDumpConnectedScenes([NSString stringWithFormat:@"capture:%@", bundle]);
         DPRefreshButton();
     };
     // Register before %orig can synchronously background/destroy this controller.
@@ -513,7 +533,6 @@ static void DPTick(void) {
         DPStop(@"display changed");
         [gControls closePicker];
         gButtonWindow.hidden = YES; gButtonWindow = nil; gButton = nil;
-        gDockWindow.hidden = YES; gDockWindow = nil;
         [gRecords removeAllObjects]; [gOrder removeAllObjects];
         gSession = session;
         DPLog(@"DISPLAY %@", session.session.persistentIdentifier);
@@ -534,24 +553,10 @@ static void DPTick(void) {
         [gButton addTarget:gControls action:@selector(openPicker) forControlEvents:UIControlEventTouchUpInside];
         [gButtonWindow.rootViewController.view addSubview:gButton];
     }
-    if (session && !gDockWindow) {
-        gDockWindow = [[UIWindow alloc] initWithWindowScene:session];
-        gDockWindow.windowLevel = UIWindowLevelAlert + 75; // dưới picker/split, trên UI thường
-        gDockWindow.backgroundColor = UIColor.clearColor;
-        gDockWindow.rootViewController = [UIViewController new];
-        gDockWindow.rootViewController.view.backgroundColor = UIColor.clearColor;
-        UILongPressGestureRecognizer *hold =
-            [[UILongPressGestureRecognizer alloc] initWithTarget:gControls
-                                                          action:@selector(dockLongPress:)];
-        hold.minimumPressDuration = 0.5;
-        [gDockWindow addGestureRecognizer:hold];
-    }
     if (session) {
         CGFloat width = session.coordinateSpace.bounds.size.width;
         gButtonWindow.frame = CGRectMake(MAX(45,width-58), 0, 58, 28);
         gButton.frame = CGRectMake(0,0,58,28);
-        gDockWindow.frame = CGRectMake(0, 0, 45, session.coordinateSpace.bounds.size.height);
-        gDockWindow.hidden = gRunning; // đang chia màn thì thôi, tránh đè lên divider
         DPRefreshButton();
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPTick(); });
