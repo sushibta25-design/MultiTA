@@ -1,4 +1,5 @@
-// DuoPhone V6.3 — manual, one-shot dual presentation experiment.
+// DuoPhone V6.3.1 — stability update on device-confirmed V6.3 split/touch.
+// Keeps the same presentation creation and aspect-fit geometry as V6.3.
 // Replace only Tweak.xm. Package metadata stays unchanged.
 // Observed device APIs: foregroundSceneWithSettings:completion:,
 // presentationViewWithIdentifier:, invalidatePresentationViewForIdentifier:.
@@ -11,11 +12,12 @@
 #import <math.h>
 
 static NSString *const DPTrace = @"/var/mobile/DuoPhoneV6Trace.txt";
+static NSString *const DPRatioKey = @"DuoPhoneManualSplitRatio";
 static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.3 %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.3.1 %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -50,6 +52,7 @@ static NSString *DPBundle(NSString *sid) {
 @property(nonatomic,strong) UIView *presentation;
 @property(nonatomic) BOOL nativeBackgrounded;
 @property(nonatomic) BOOL restoreBackground;
+@property(nonatomic) BOOL valid;
 @end
 @implementation DPRecord
 @end
@@ -64,11 +67,24 @@ static UILabel *gStatus;
 static __weak UIWindowScene *gSession;
 static BOOL gRunning, gOwnCall;
 static NSUInteger gGeneration;
+static NSUInteger gSessionEpoch;
 static CGFloat gRatio = 0.5, gStartRatio;
 static CGSize gNativeSize;
 static void DPStop(NSString *reason);
 static void DPLayout(void);
 static void DPRefreshButton(void);
+static void DPInspect(NSUInteger generation);
+static CGFloat DPValidRatio(CGFloat ratio) {
+    return isfinite(ratio) ? MAX(0.30, MIN(0.70, ratio)) : 0.5;
+}
+static void DPSaveRatio(void) {
+    [NSUserDefaults.standardUserDefaults setDouble:DPValidRatio(gRatio) forKey:DPRatioKey];
+}
+static NSString *DPName(DPRecord *record) {
+    if ([record.bundle isEqualToString:@"com.apple.Maps"]) return @"Maps";
+    if ([record.bundle isEqualToString:@"com.google.ios.youtubemusic"]) return @"YouTube Music";
+    return [record.bundle componentsSeparatedByString:@"."].lastObject ?: @"App";
+}
 
 static UIWindowScene *DPDashboard(void) {
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes)
@@ -115,6 +131,7 @@ static void DPStop(NSString *reason) {
     if (!gRunning) return;
     gRunning = NO;
     ++gGeneration; // Cancel delayed creation and inspection from this attempt.
+    DPSaveRatio();
     DPLog(@"STOP %@", reason);
     gSplitWindow.hidden = YES;
     BOOL previousOwnCall = gOwnCall;
@@ -122,18 +139,23 @@ static void DPStop(NSString *reason) {
     for (DPRecord *record in gPair) {
         [record.presentation removeFromSuperview];
         record.presentation = nil;
+        if (!record.valid) { record.presentationID = nil; continue; }
         @try {
             SEL invalidate = NSSelectorFromString(@"invalidatePresentationViewForIdentifier:");
             if (record.presentationID && [record.controller respondsToSelector:invalidate])
                 ((void(*)(id,SEL,id))objc_msgSend)(record.controller, invalidate, record.presentationID);
+        } @catch (NSException *e) { DPLog(@"INVALIDATE ERROR %@ %@", record.bundle, e.name); }
+        @try {
+            // Restore even if invalidating the presentation failed.
             // Restore the observed native lifecycle, not FBScene.isActive:
             // an active FBScene need not be the foreground application.
-            if (record.restoreBackground) {
+            if (record.valid && record.restoreBackground) {
                 SEL background = NSSelectorFromString(@"backgroundSceneWithCompletion:");
                 if ([record.controller respondsToSelector:background])
                     ((void(*)(id,SEL,id))objc_msgSend)(record.controller, background, nil);
             }
         } @catch (NSException *e) { DPLog(@"CLEANUP ERROR %@ %@", record.bundle, e.name); }
+        record.nativeBackgrounded = record.restoreBackground;
         record.presentationID = nil;
     }
     gOwnCall = previousOwnCall;
@@ -159,7 +181,9 @@ static void DPInspect(NSUInteger generation) {
               (unsigned long)layers, record.presentationID);
         if (!active || !record.presentation.window || !layers) allAttached = NO;
     }
-    gStatus.text = allAttached ? @"Thử chạm cả hai ô" : @"Chưa hiển thị đủ hai app";
+    gStatus.text = allAttached && gPair.count == 2
+        ? [NSString stringWithFormat:@"%@ | %@", DPName(gPair[0]), DPName(gPair[1])]
+        : @"Chưa hiển thị đủ hai app";
     // These are structural signals, never proof of live rendering/touch.
 }
 @implementation DPControls
@@ -170,6 +194,12 @@ static void DPInspect(NSUInteger generation) {
     CGFloat dx = [gesture translationInView:gSplitWindow].x;
     gRatio = MAX(0.30, MIN(0.70, gStartRatio + dx / MAX(1, gSplitWindow.bounds.size.width)));
     DPLayout();
+    if (gesture.state == UIGestureRecognizerStateEnded ||
+        gesture.state == UIGestureRecognizerStateCancelled ||
+        gesture.state == UIGestureRecognizerStateFailed) {
+        DPSaveRatio();
+        DPLog(@"RATIO %.3f", gRatio);
+    }
 }
 - (void)swap {
     if (gPair.count != 2 || !gPair[0].presentation || !gPair[1].presentation) return;
@@ -177,19 +207,22 @@ static void DPInspect(NSUInteger generation) {
     [gLeftPane addSubview:gPair[0].presentation];
     [gRightPane addSubview:gPair[1].presentation];
     DPLayout();
+    DPInspect(gGeneration);
+    DPLog(@"SWAP left=%@ right=%@", gPair[0].bundle, gPair[1].bundle);
 }
 - (void)start {
-    if (gRunning || gOrder.count < 2 || !gSession) return;
+    if (gRunning || gOrder.count < 2 || !gSession || DPDashboard() != gSession) return;
     DPRecord *left = gRecords[gOrder[gOrder.count - 2]], *right = gRecords[gOrder.lastObject];
-    if (!left || !right || left.controller == right.controller) return;
+    if (!left.valid || !right.valid || left.controller == right.controller) return;
     NSString *leftDisplay = [left.sid componentsSeparatedByString:@":"].firstObject;
     NSString *rightDisplay = [right.sid componentsSeparatedByString:@":"].firstObject;
     if (![leftDisplay isEqual:rightDisplay]) { DPLog(@"REFUSE mismatched displays"); return; }
+    CGRect bounds = gSession.coordinateSpace.bounds;
+    if (bounds.size.width <= 109 || bounds.size.height <= 60) return;
     gPair = @[left, right];
     gRunning = YES;
     NSUInteger generation = ++gGeneration;
     for (DPRecord *record in gPair) record.restoreBackground = record.nativeBackgrounded;
-    CGRect bounds = gSession.coordinateSpace.bounds;
     gNativeSize = bounds.size;
     gSplitWindow = [[UIWindow alloc] initWithWindowScene:gSession];
     gSplitWindow.frame = CGRectMake(45, 0, MAX(1, bounds.size.width - 45), bounds.size.height);
@@ -222,6 +255,8 @@ static void DPInspect(NSUInteger generation) {
             if (![record.controller respondsToSelector:foreground])
                 @throw [NSException exceptionWithName:@"MissingForegroundAPI" reason:record.bundle userInfo:nil];
             ((void(*)(id,SEL,id,id))objc_msgSend)(record.controller, foreground, record.settings, nil);
+            if (!gRunning || generation != gGeneration) { gOwnCall = NO; return; }
+            record.nativeBackgrounded = NO;
         }
     } @catch (NSException *e) {
         DPLog(@"FOREGROUND ERROR %@", e.name); gOwnCall = NO; DPStop(@"foreground error"); return;
@@ -238,6 +273,7 @@ static void DPInspect(NSUInteger generation) {
                 if (![record.controller respondsToSelector:create])
                     @throw [NSException exceptionWithName:@"MissingPresentationAPI" reason:record.bundle userInfo:nil];
                 id result = ((id(*)(id,SEL,id))objc_msgSend)(record.controller, create, record.presentationID);
+                if (!gRunning || generation != gGeneration) { gOwnCall = NO; return; }
                 // A fresh owned view is required. Never steal native attached UI.
                 if (![result isKindOfClass:UIView.class] || ((UIView *)result).superview)
                     @throw [NSException exceptionWithName:@"PresentationNotIndependent" reason:record.bundle userInfo:nil];
@@ -253,12 +289,15 @@ static void DPInspect(NSUInteger generation) {
         gOwnCall = NO;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
     });
 }
 @end
 
 static void DPRefreshButton(void) {
-    gButtonWindow.hidden = gRunning || gOrder.count < 2;
+    BOOL ready = gOrder.count == 2 && gRecords[gOrder[0]].valid && gRecords[gOrder[1]].valid;
+    gButtonWindow.hidden = gRunning || !ready;
 }
 static void DPCapture(id controller, id settings) {
     if (gOwnCall || ![settings isKindOfClass:NSDictionary.class]) return;
@@ -267,9 +306,13 @@ static void DPCapture(id controller, id settings) {
     NSString *sid = DPValue(controller, @"sceneID"), *bundle = DPBundle(sid);
     if (!bundle) return;
     NSDictionary *copy = [settings copy];
-    dispatch_async(dispatch_get_main_queue(), ^{
+    NSUInteger epoch = gSessionEpoch;
+    void (^capture)(void) = ^{
+        if (epoch != gSessionEpoch || !gSession || DPDashboard() != gSession) return;
+        if (gRunning) return;
         DPRecord *record = [DPRecord new];
         record.controller = controller; record.sid = sid; record.bundle = bundle; record.settings = copy;
+        record.valid = YES;
         gRecords[bundle] = record;
         [gOrder removeObject:bundle]; [gOrder addObject:bundle];
         while (gOrder.count > 2) {
@@ -278,16 +321,25 @@ static void DPCapture(id controller, id settings) {
         DPLog(@"CAPTURE bundle=%@ source=%@ suspended=%@", bundle,
               copy[@"DBActivationSettingLaunchSource"], copy[@"DBActivationSettingSuspended"]);
         DPRefreshButton();
-    });
+    };
+    // Register before %orig can synchronously background/destroy this controller.
+    if ([NSThread isMainThread]) capture();
+    else dispatch_async(dispatch_get_main_queue(), capture);
 }
 static void DPTick(void) {
     UIWindowScene *session = DPDashboard();
     if (session != gSession) {
+        ++gSessionEpoch;
         DPStop(@"display changed");
         gButtonWindow.hidden = YES; gButtonWindow = nil; gButton = nil;
         [gRecords removeAllObjects]; [gOrder removeAllObjects];
         gSession = session;
         DPLog(@"DISPLAY %@", session.session.persistentIdentifier);
+    }
+    if (gRunning && session) {
+        CGSize size = session.coordinateSpace.bounds.size;
+        if (fabs(size.width - gNativeSize.width) > 0.5 || fabs(size.height - gNativeSize.height) > 0.5)
+            DPStop(@"display geometry changed");
     }
     if (session && !gButtonWindow) {
         gButtonWindow = [[UIWindow alloc] initWithWindowScene:session];
@@ -313,6 +365,7 @@ static void DPTick(void) {
     NSString *bundle = DPBundle(DPValue(self, @"sceneID"));
     DPRecord *record = bundle ? gRecords[bundle] : nil;
     if (record.controller == self) {
+        record.valid = NO;
         DPStop(@"native scene destroyed");
         [gRecords removeObjectForKey:bundle];
         [gOrder removeObject:bundle];
@@ -349,6 +402,8 @@ static void DPTick(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.CarPlayApp"]) return;
         gRecords = [NSMutableDictionary dictionary]; gOrder = [NSMutableArray array];
+        if ([NSUserDefaults.standardUserDefaults objectForKey:DPRatioKey])
+            gRatio = DPValidRatio([NSUserDefaults.standardUserDefaults doubleForKey:DPRatioKey]);
         gControls = [DPControls new];
         dispatch_async(dispatch_get_main_queue(), ^{
             DPLog(@"CTOR MANUAL EXPERIMENT — open two apps, tap Chia; no automatic split");
