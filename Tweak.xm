@@ -1,7 +1,7 @@
-// DuoPhone V6.9-rootless — scene-frame resize experiment on uploaded V6.7.
-// Requests scene geometry per pane. YouTube Music gets a native-width logical
-// viewport with proportionally larger height, displayed with uniform scaling.
-// App-specific adaptation: other apps retain V6.8 scene sizing. Device QA required.
+// DuoPhone V6.10-rootless — scene-frame resize experiment on uploaded V6.7.
+// Requests the actual pane size for every app; no artificial tall viewport.
+// Presentation bounds follow observed scene settings at 1:1 scale.
+// Narrow template tab layout remains app-owned. Device QA required.
 // Saves/restores only the scene frame. Keeps picker, floating exit and app probes.
 // Runtime guards verify method signatures. Device-side redraw/touch still needs testing.
 // Inspect RESIZE REQUEST / OBSERVED / RESTORE in DuoPhoneV6Trace.txt.
@@ -23,7 +23,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.9-rootless %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.10-rootless %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -228,23 +228,20 @@ static void DPFit(DPRecord *record, UIView *pane) {
     UIView *view = record.presentation;
     if (!view || pane.bounds.size.width <= 0 || pane.bounds.size.height <= 0) return;
     CGSize logicalSize = pane.bounds.size;
-    // Device video: YouTube Music's fixed tab row overlaps at narrow widths.
-    // Keep its known native width while requesting proportional extra height.
-    // This is a resized logical viewport, not stretching a 426x240 screenshot.
-    BOOL compactMusic = [record.bundle isEqualToString:@"com.google.ios.youtubemusic"] &&
-                        gNativeSize.width > logicalSize.width;
-    if (compactMusic) {
-        CGFloat factor = gNativeSize.width / logicalSize.width;
-        logicalSize = CGSizeMake(gNativeSize.width, logicalSize.height * factor);
-    }
     DPQueueResize(record, logicalSize);
     view.transform = CGAffineTransformIdentity;
     if (record.resizeState == 1) {
-        // Same scale on X/Y; logical viewport has the same aspect ratio as pane.
-        view.bounds = (CGRect){CGPointZero, logicalSize};
-        view.center = CGPointMake(CGRectGetMidX(pane.bounds), CGRectGetMidY(pane.bounds));
-        CGFloat scale = pane.bounds.size.width / logicalSize.width;
-        view.transform = CGAffineTransformMakeScale(scale, scale);
+        // Do not stretch the previous scene into the newest drag target.
+        // Until the scene update lands, retain its observed size at 1:1.
+        // The pane clips any temporary overflow; the settled frame fills it.
+        CGRect observed = CGRectZero;
+        CGSize source = record.submittedSize;
+        if (record.resizeScene && DPReadFrame(record.resizeScene, &observed))
+            source = observed.size;
+        if (source.width <= 0 || source.height <= 0) return;
+        view.bounds = (CGRect){CGPointZero, source};
+        view.center = CGPointMake(CGRectGetMinX(pane.bounds) + source.width * 0.5,
+                                  CGRectGetMinY(pane.bounds) + source.height * 0.5);
     } else {
         // Temporary/unsupported fallback is aspect-fit and explicitly logged.
         // Never disguise a rejected scene resize by stretching the image.
