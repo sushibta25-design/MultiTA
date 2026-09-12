@@ -1,6 +1,10 @@
-// DuoPhone V6.3.2 — stability update on device-confirmed V6.3 split/touch.
-// Keeps V6.3 presentation creation; fills each pane using independent X/Y scaling.
-// This stretches native content; it does not request app-side responsive layout.
+// FIX GHI CHÚ V6.4 (dựa trên V6.3.2 đã chạy được, chỉ vá UI):
+//  1. Bỏ dải 30pt đen trên cùng — 2 pane giờ full chiều cao CarPlay.
+//  2. Divider: vùng chạm vẫn rộng nhưng chỉ vẽ 1 vạch mảnh 5pt ở giữa.
+//  3. Status + nút Thoát: pill nổi trong suốt, không chiếm dải ngang riêng.
+//  4. DPFit: scale ĐỀU (aspect fit) thay vì kéo méo X/Y riêng biệt.
+// DuoPhone V6.4 — stability update on device-confirmed V6.3 split/touch.
+// Keeps V6.3 presentation creation; fills each pane using uniform aspect-fit scaling.
 // Replace only Tweak.xm. Package metadata stays unchanged.
 // Observed device APIs: foregroundSceneWithSettings:completion:,
 // presentationViewWithIdentifier:, invalidatePresentationViewForIdentifier:.
@@ -18,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.3.2 %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.4 %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -106,24 +110,47 @@ static NSUInteger DPLayers(UIView *view, NSUInteger depth) {
     return count;
 }
 static void DPFit(UIView *view, UIView *pane) {
-    if (!view || gNativeSize.width <= 0 || gNativeSize.height <= 0) return;
-    // Preserve native bounds for input mapping; stretch the full surface to fill.
-    // Both edges stay visible. Text/icons can change aspect ratio.
+    if (!view) return;
+    CGFloat paneW = pane.bounds.size.width, paneH = pane.bounds.size.height;
+    if (gNativeSize.width <= 0 || gNativeSize.height <= 0 || paneW <= 0 || paneH <= 0) return;
+
     view.transform = CGAffineTransformIdentity;
     view.bounds = (CGRect){CGPointZero, gNativeSize};
-    CGFloat scaleX = pane.bounds.size.width / gNativeSize.width;
-    CGFloat scaleY = pane.bounds.size.height / gNativeSize.height;
+
+    // Scale ĐỀU (cùng 1 hệ số cho X và Y) để giữ đúng khung hình gốc của app,
+    // thay vì kéo méo theo 2 trục riêng biệt như bản trước. Pane không vừa
+    // khít tỉ lệ gốc sẽ có viền đen 2 bên/trên-dưới thay vì hình bị méo.
+    CGFloat scale = MIN(paneW / gNativeSize.width, paneH / gNativeSize.height);
+    if (!isfinite(scale) || scale <= 0) return;
+
     view.center = CGPointMake(CGRectGetMidX(pane.bounds), CGRectGetMidY(pane.bounds));
-    view.transform = CGAffineTransformMakeScale(scaleX, scaleY);
+    view.transform = CGAffineTransformMakeScale(scale, scale);
 }
+static const CGFloat kDividerGrabWidth = 28.0;   // vùng chạm (không hiển thị hết)
+static const CGFloat kDividerVisualWidth = 5.0;  // vạch mảnh thực sự nhìn thấy
+static const CGFloat kPaneGap = 2.0;
+
 static void DPLayout(void) {
     if (!gSplitWindow) return;
     CGFloat width = gSplitWindow.bounds.size.width, height = gSplitWindow.bounds.size.height;
-    CGFloat split = floor(width * gRatio), top = 30.0;
-    gLeftPane.frame = CGRectMake(0, top, MAX(1, split - 3), MAX(1, height - top));
-    gRightPane.frame = CGRectMake(split + 3, top, MAX(1, width - split - 3), MAX(1, height - top));
-    gDivider.frame = CGRectMake(split - 12, top, 24, MAX(1, height - top));
-    gStatus.frame = CGRectMake(6, 0, MAX(1, width - 72), 30);
+    CGFloat split = floor(width * gRatio);
+
+    // Không còn chừa dải trên cùng: 2 pane chiếm full chiều cao CarPlay.
+    gLeftPane.frame = CGRectMake(0, 0, MAX(1, split - kPaneGap), height);
+    gRightPane.frame = CGRectMake(split + kPaneGap, 0, MAX(1, width - split - kPaneGap), height);
+
+    // Vùng CHẠM của divider vẫn rộng (dễ kéo), nhưng chỉ vẽ 1 vạch mảnh ở giữa.
+    gDivider.frame = CGRectMake(split - kDividerGrabWidth * 0.5, 0, kDividerGrabWidth, height);
+    UIView *bar = [gDivider viewWithTag:9001];
+    bar.frame = CGRectMake((kDividerGrabWidth - kDividerVisualWidth) * 0.5, 0,
+                           kDividerVisualWidth, height);
+
+    // Overlay trạng thái + nút Thoát: nổi trong suốt, không chiếm chỗ của app.
+    CGFloat pillH = 26.0;
+    gStatus.frame = CGRectMake(8, 6, MAX(1, width - 84), pillH);
+    UIButton *exitButton = (UIButton *)[gSplitWindow.rootViewController.view viewWithTag:9002];
+    exitButton.frame = CGRectMake(width - 68, 6, 60, pillH);
+
     if (gPair.count == 2) {
         DPFit(gPair[0].presentation, gLeftPane);
         DPFit(gPair[1].presentation, gRightPane);
@@ -231,19 +258,41 @@ static void DPInspect(NSUInteger generation) {
     gSplitWindow.windowLevel = UIWindowLevelAlert + 70;
     gSplitWindow.rootViewController = [UIViewController new];
     UIView *root = gSplitWindow.rootViewController.view;
-    root.backgroundColor = UIColor.blackColor;
+    root.backgroundColor = UIColor.blackColor; // chỉ lấp khe hở 2pt giữa 2 pane, không che app
     gLeftPane = [UIView new]; gRightPane = [UIView new];
     gLeftPane.clipsToBounds = YES; gRightPane.clipsToBounds = YES;
+    gLeftPane.backgroundColor = UIColor.blackColor;
+    gRightPane.backgroundColor = UIColor.blackColor;
     [root addSubview:gLeftPane]; [root addSubview:gRightPane];
-    gStatus = [UILabel new]; gStatus.text = @"Đang mở hai ứng dụng…";
-    gStatus.textColor = UIColor.whiteColor; gStatus.font = [UIFont systemFontOfSize:11];
+
+    // Pill trạng thái nổi, nền trong suốt mờ — không chiếm dải ngang riêng.
+    gStatus = [UILabel new];
+    gStatus.text = @"Đang mở hai ứng dụng…";
+    gStatus.textColor = UIColor.whiteColor;
+    gStatus.font = [UIFont systemFontOfSize:11];
+    gStatus.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+    gStatus.layer.cornerRadius = 6;
+    gStatus.clipsToBounds = YES;
+    gStatus.textAlignment = NSTextAlignmentCenter;
     [root addSubview:gStatus];
+
     UIButton *exit = [UIButton buttonWithType:UIButtonTypeSystem];
+    exit.tag = 9002;
     [exit setTitle:@"Thoát" forState:UIControlStateNormal];
-    exit.frame = CGRectMake(gSplitWindow.bounds.size.width - 64, 0, 64, 30);
+    exit.tintColor = UIColor.whiteColor;
+    exit.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+    exit.layer.cornerRadius = 6;
     [exit addTarget:self action:@selector(stop) forControlEvents:UIControlEventTouchUpInside];
     [root addSubview:exit];
-    gDivider = [UIView new]; gDivider.backgroundColor = [UIColor colorWithWhite:0.2 alpha:0.9];
+    // Vùng CHẠM trong suốt (rộng, dễ bấm trúng) chứa 1 vạch mảnh làm dấu hiệu thị giác.
+    gDivider = [UIView new];
+    gDivider.backgroundColor = UIColor.clearColor;
+    UIView *dividerBar = [UIView new];
+    dividerBar.tag = 9001;
+    dividerBar.backgroundColor = [UIColor colorWithWhite:0.85 alpha:0.85];
+    dividerBar.layer.cornerRadius = kDividerVisualWidth * 0.5;
+    dividerBar.userInteractionEnabled = NO;
+    [gDivider addSubview:dividerBar];
     [gDivider addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)]];
     UITapGestureRecognizer *swap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(swap)];
     swap.numberOfTapsRequired = 2; [gDivider addGestureRecognizer:swap];

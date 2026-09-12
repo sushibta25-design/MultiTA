@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.8.2-v6.2.1
+Version: 0.9.0-v6.4
 Architecture: iphoneos-arm64e
-Description: Experimental CarPlay two-pane scene host with build fix and runtime diagnostics.
+Description: DuoPhone V6.4 - fixes divider thickness, top black bar, and aspect-correct pane scaling on top of the working V6.3.2 split.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
