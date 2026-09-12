@@ -1,4 +1,4 @@
-// DuoPhone V6.2.3 — temporary native-layout lifecycle diagnostic.
+// DuoPhone V6.2.4 — temporary native-layout lifecycle diagnostic.
 // No view reparenting, divider, activation suppression, or completion substitution.
 // Collect actual private method signatures before attempting dual foreground scenes.
 // Replace only Tweak.xm; package metadata is intentionally unchanged.
@@ -20,7 +20,7 @@ static void DPLog(NSString *format, ...) {
     va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSString *line = [NSString stringWithFormat:@"[%@:%d] V6.2.3 %@\n",
+    NSString *line = [NSString stringWithFormat:@"[%@:%d] V6.2.4 %@\n",
         NSProcessInfo.processInfo.processName, getpid(), message];
     NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (kTracePath) {
@@ -41,7 +41,8 @@ static BOOL DPInteresting(NSString *name) {
     NSString *lower = name.lowercaseString;
     for (NSString *word in @[@"scene", @"activ", @"foreground", @"background",
                             @"setting", @"present", @"visible", @"appear",
-                            @"assert", @"suspend", @"resume", @"display"]) {
+                            @"assert", @"suspend", @"resume", @"display",
+                            @"frame", @"bound", @"orient", @"content", @"context"]) {
         if ([lower containsString:word]) return YES;
     }
     return NO;
@@ -110,7 +111,68 @@ static void DPAfterTransition(id controller, NSString *event) {
     });
 }
 
+static void DPActivationArgument(id controller, id settings, NSString *event) {
+    // Observe exactly the object supplied by CarPlay; do not replay settings yet.
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ DPActivationArgument(controller, settings, event); });
+        return;
+    }
+    DPLog(@"ACTIVATION %@ id=%@ settingsClass=%@ copyable=%d",
+          event, DPValue(controller, @"sceneID"), NSStringFromClass([settings class]),
+          [settings conformsToProtocol:@protocol(NSCopying)]);
+    if (settings) DPDumpClass([settings class]);
+    if ([settings isKindOfClass:NSDictionary.class]) {
+        NSDictionary *dictionary = settings;
+        // Record keys and value classes, not application content.
+        for (id key in dictionary) {
+            DPLog(@"ACTIVATION KEY %@ valueClass=%@", key,
+                  NSStringFromClass([dictionary[key] class]));
+        }
+    }
+    DPAfterTransition(controller, [event stringByAppendingString:@" settled +1s"]);
+}
+
+static void DPPresentationResult(id controller, id identifier, id result) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ DPPresentationResult(controller, identifier, result); });
+        return;
+    }
+    UIView *view = [result isKindOfClass:UIView.class] ? result : nil;
+    DPLog(@"PRESENTATION id=%@ identifier=%@ resultClass=%@ view=%p window=%p children=%lu",
+          DPValue(controller, @"sceneID"), identifier, NSStringFromClass([result class]),
+          (__bridge void *)view, (__bridge void *)view.window, (unsigned long)view.subviews.count);
+    if (result) DPDumpClass([result class]);
+    __weak UIView *weakView = view;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        UIView *current = weakView;
+        DPLog(@"PRESENTATION SETTLED identifier=%@ view=%p parent=%@ window=%p alpha=%.2f children=%lu",
+              identifier, (__bridge void *)current, NSStringFromClass(current.superview.class),
+              (__bridge void *)current.window, current.alpha, (unsigned long)current.subviews.count);
+    });
+}
+
 %hook DBApplicationSceneViewController
+
+- (void)activateSceneWithSettings:(id)settings completion:(id)completion {
+    DPActivationArgument(self, settings, @"activate");
+    %orig;
+}
+
+- (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
+    DPActivationArgument(self, settings, @"foreground");
+    %orig;
+}
+
+- (id)presentationViewWithIdentifier:(id)identifier {
+    id result = %orig;
+    DPPresentationResult(self, identifier, result);
+    return result;
+}
+
+- (void)invalidatePresentationViewForIdentifier:(id)identifier {
+    DPLog(@"INVALIDATE PRESENTATION id=%@ identifier=%@", DPValue(self, @"sceneID"), identifier);
+    %orig;
+}
 
 - (void)setScene:(id)scene {
     %orig;
