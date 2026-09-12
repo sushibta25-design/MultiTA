@@ -85,9 +85,7 @@ static __weak UIView *gV53MapsPresentationView = nil;
 static __weak UIView *gV53MapsHostContainer = nil;
 static __weak UIView *gV53DashboardHomeView = nil;
 static BOOL gV53Applied = NO;
-static CGRect gV54OriginalDashFrame = {{0,0},{0,0}};
-static CGRect gV54OriginalMapsFrame = {{0,0},{0,0}};
-static BOOL gV54CapturedOriginalFrames = NO;
+
 static __weak UIView *gV55MapsPlatter = nil;
 static __weak UIView *gV55DashboardRootView = nil;
 static BOOL gV55Detached = NO;
@@ -474,7 +472,6 @@ static void DPProbeDashboard(void) {
     DPLog(@"========== V5.0 DASHBOARD PROBE END ==========");
 }
 
-
 #pragma mark - V5.1 Dashboard host probe
 
 static BOOL DPV51InterestingName(NSString *name) {
@@ -577,7 +574,6 @@ static void DPV51ProbeDashboardHost(void) {
     }
     DPLog(@"========== V5.1 DASHBOARD HOST PROBE END ==========");
 }
-
 
 #pragma mark - V5.2 Scene presentation host probe
 
@@ -726,7 +722,6 @@ static void DPV52ProbeScenePresentationHost(void) {
     DPLog(@"========== V5.2 SCENE PRESENTATION HOST PROBE END ==========");
 }
 
-
 #pragma mark - V5.3 EXPERIMENTAL live Maps host split
 
 static id DPV53SafeKVC(id obj, NSString *key) {
@@ -858,8 +853,6 @@ static void DPV53ApplySplit(void) {
         DPLog(@"========== V5.3 LIVE SPLIT APPLIED END ==========");
     }
 }
-
-
 
 #pragma mark - V5.5 EXPERIMENTAL detach Maps platter into right pane
 
@@ -1006,7 +999,6 @@ static void DPV55ApplyDetachedMapsSplit(UIWindowScene *ws) {
     }
 }
 
-
 #pragma mark - Vòng lặp
 
 static void DPTick(void) {
@@ -1035,7 +1027,7 @@ static void DPTick(void) {
         if (!DPIsCarPlay()) return;
 
         DPLoadPrefs();
-        DPLog(@"CTOR V5.5.2 bundle=%@ ratio=%.2f",
+        DPLog(@"CTOR V5.5.5 bundle=%@ ratio=%.2f",
               NSBundle.mainBundle.bundleIdentifier ?: @"nil", gRatio);
 
         dispatch_async(dispatch_get_main_queue(), ^{ DPTick(); });
