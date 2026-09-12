@@ -1,4 +1,4 @@
-// DuoPhone V6.18-ivar-scan — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.19-metaclass-probe — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.18-ivar-scan %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.19-metaclass-probe %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -78,6 +78,7 @@ static NSString *DPBundle(NSString *sid) {
 @end
 
 static NSMutableDictionary<NSString *, DPRecord *> *gRecords;
+static BOOL gLayoutElementClassLogged = NO;
 static NSMutableArray<NSString *> *gOrder;
 static NSArray<DPRecord *> *gPair;
 static UIWindow *gButtonWindow, *gSplitWindow, *gPickerWindow;
@@ -624,23 +625,37 @@ static void DPTryPokeSceneUI(DPRecord *record) {
     Class targetClass = NSClassFromString(@"FBSDisplayLayoutElement");
 
     // Soi cấu trúc class NGAY CẢ KHI chưa có instance — reflection tĩnh luôn
-    // làm được, không cần object sống. Lọc theo từ khoá hình học/kích thước.
-    if (targetClass) {
+    // làm được, không cần object sống. Class này nhỏ nên dump TOÀN BỘ method
+    // (không lọc keyword nữa) cho cả 2 phía:
+    //   - instance-side: method gọi trên 1 OBJECT đã có (frame, setFrame:...)
+    //   - class-side (metaclass): method gọi trên CHÍNH CLASS, thường là nơi
+    //     có factory/lookup (kiểu +elementForIdentifier:, +currentElements)
+    //     — đây là thứ đang thiếu: cách LẤY object đang sống, thay vì phải
+    //     tự tạo mới (initWithIdentifier: có thể có tác dụng phụ ngầm khi
+    //     gọi, giống bài học từ _updateSceneUI — CHƯA dám gọi thử).
+    if (targetClass && !gLayoutElementClassLogged) {
+        gLayoutElementClassLogged = YES;
         DPLog(@"========== FBSDisplayLayoutElement CLASS SURFACE ==========");
         unsigned int mc = 0;
         Method *methods = class_copyMethodList(targetClass, &mc);
         for (unsigned int i = 0; i < mc; i++) {
             NSString *name = NSStringFromSelector(method_getName(methods[i]));
-            NSString *l = name.lowercaseString;
-            if ([l containsString:@"frame"] || [l containsString:@"bounds"] ||
-                [l containsString:@"size"] || [l containsString:@"rect"] ||
-                [l containsString:@"identity"] || [l containsString:@"identifier"] ||
-                [l containsString:@"display"] || [l containsString:@"scene"])
-                DPLog(@"FBSDisplayLayoutElement METHOD %@ argc=%u types=%s",
-                      name, method_getNumberOfArguments(methods[i]),
-                      method_getTypeEncoding(methods[i]) ?: "?");
+            DPLog(@"FBSDisplayLayoutElement -%@ argc=%u types=%s",
+                  name, method_getNumberOfArguments(methods[i]),
+                  method_getTypeEncoding(methods[i]) ?: "?");
         }
         if (methods) free(methods);
+
+        Class meta = object_getClass(targetClass);
+        unsigned int mc2 = 0;
+        Method *classMethods = class_copyMethodList(meta, &mc2);
+        for (unsigned int i = 0; i < mc2; i++) {
+            NSString *name = NSStringFromSelector(method_getName(classMethods[i]));
+            DPLog(@"FBSDisplayLayoutElement +%@ argc=%u types=%s",
+                  name, method_getNumberOfArguments(classMethods[i]),
+                  method_getTypeEncoding(classMethods[i]) ?: "?");
+        }
+        if (classMethods) free(classMethods);
         DPLog(@"========== FBSDisplayLayoutElement CLASS SURFACE END ==========");
     } else {
         DPLog(@"FBSDisplayLayoutElement class KHÔNG tồn tại trong runtime này");
