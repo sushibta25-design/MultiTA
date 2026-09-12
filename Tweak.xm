@@ -1,17 +1,23 @@
-// V6.5: hoàn tác đổi FIT (letterbox) sang COVER (lấp kín, không viền đen).
-// Bỏ hẳn label ten app theo yêu cầu, chỉ giữ pill Thoát nhỏ.
-// LƯU Ý: "bubble tốc độ" (nút tròn nổi của Maps) nếu vẫn bị cắt là do nó
-// là 1 overlay/layer RIÊNG của app, không nằm trong _UIScenePresentationView
-// (layers=1) mà presentationViewWithIdentifier: trả về — code hiện chưa
-// đụng tới overlay đó. Cần probe thêm nếu muốn nắn luôn nó.
-// FIX GHI CHÚ V6.4 (dựa trên V6.3.2 đã chạy được, chỉ vá UI):
-//  1. Bỏ dải 30pt đen trên cùng — 2 pane giờ full chiều cao CarPlay.
-//  2. Divider: vùng chạm vẫn rộng nhưng chỉ vẽ 1 vạch mảnh 5pt ở giữa.
-//  3. Status + nút Thoát: pill nổi trong suốt, không chiếm dải ngang riêng.
-//  4. DPFit: scale ĐỀU (aspect fit) thay vì kéo méo X/Y riêng biệt.
-// DuoPhone V6.4 — stability update on device-confirmed V6.3 split/touch.
-// Keeps V6.3 presentation creation; fills each pane using uniform aspect-fit scaling.
-// Replace only Tweak.xm. Package metadata stays unchanged.
+// DuoPhone V6.6 — dựa trên V6.3.2 (đã chạy được: 2 app scene thật song song
+// qua presentationViewWithIdentifier:), chỉ vá UI + thêm picker chọn app.
+//
+// Lịch sử các lần vá UI trên nền V6.3.2:
+//  V6.4: bỏ dải 30pt đen trên cùng, divider chỉ còn vạch mảnh, status/exit
+//        thành pill nổi — nhưng đổi DPFit sang scale "fit" (giữ tỉ lệ) làm
+//        lộ viền đen letterbox trên/dưới mỗi pane.
+//  V6.5: đổi "fit" sang "cover" (MAX scale) để lấp kín, hết viền đen — nhưng
+//        vì chiều cao pane không đổi khi kéo divider, cover-scale gần như
+//        cố định, nên kéo chỉ dịch vùng crop chứ ảnh không co giãn.
+//  V6.6: đổi hẳn sang stretch ĐỘC LẬP X/Y (scaleX theo chiều rộng pane,
+//        scaleY theo chiều cao pane) — lấp kín pane VÀ co giãn đúng theo cả
+//        2 chiều khi kéo divider. Đánh đổi: hình có thể hơi méo tỉ lệ.
+//        Thêm picker: nhớ tối đa 6 app đã mở trong phiên, nút "Chia" mở
+//        danh sách chọn 2 app bất kỳ thay vì luôn lấy 2 app mở gần nhất.
+//
+// LƯU Ý CHƯA XỬ LÝ: "bubble tốc độ" (nút tròn nổi của Maps) nếu bị cắt là do
+// nó là 1 overlay/layer RIÊNG của app, không nằm trong _UIScenePresentationView
+// (layers=1) mà presentationViewWithIdentifier: trả về — cần probe thêm.
+//
 // Observed device APIs: foregroundSceneWithSettings:completion:,
 // presentationViewWithIdentifier:, invalidatePresentationViewForIdentifier:.
 // Never reuse native animation identifiers or suppress native lifecycle callbacks.
@@ -28,7 +34,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.4 %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.6 %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -71,9 +77,11 @@ static NSString *DPBundle(NSString *sid) {
 static NSMutableDictionary<NSString *, DPRecord *> *gRecords;
 static NSMutableArray<NSString *> *gOrder;
 static NSArray<DPRecord *> *gPair;
-static UIWindow *gButtonWindow, *gSplitWindow;
+static UIWindow *gButtonWindow, *gSplitWindow, *gPickerWindow;
 static UIView *gLeftPane, *gRightPane, *gDivider;
 static UIButton *gButton;
+static NSMutableArray<NSString *> *gPickerBundles;   // snapshot khi mở picker
+static NSString *gPickerFirstPick = nil;             // app đã chọn làm bên trái
 static UILabel *gStatus;
 static __weak UIWindowScene *gSession;
 static BOOL gRunning, gOwnCall;
@@ -123,18 +131,21 @@ static void DPFit(UIView *view, UIView *pane) {
     view.transform = CGAffineTransformIdentity;
     view.bounds = (CGRect){CGPointZero, gNativeSize};
 
-    // Scale ĐỀU kiểu "cover": lấp kín toàn bộ pane, không méo hình, có thể
-    // cắt bớt viền ngoài nếu tỉ lệ pane khác tỉ lệ gốc app (không để lại
-    // viền đen như kiểu "fit" — đổi lại theo phản hồi thực tế trên xe).
-    CGFloat scale = MAX(paneW / gNativeSize.width, paneH / gNativeSize.height);
-    if (!isfinite(scale) || scale <= 0) return;
+    // Stretch ĐỘC LẬP theo X và Y: lấp kín pane hoàn toàn (không viền đen)
+    // và co giãn theo CẢ chiều rộng lẫn chiều cao khi kéo divider — cover-scale
+    // (đều X=Y) không làm được việc này vì chiều cao pane không đổi khi kéo,
+    // nên hệ số scale gần như cố định. Đánh đổi: hình có thể hơi méo tỉ lệ.
+    CGFloat scaleX = paneW / gNativeSize.width;
+    CGFloat scaleY = paneH / gNativeSize.height;
+    if (!isfinite(scaleX) || !isfinite(scaleY) || scaleX <= 0 || scaleY <= 0) return;
 
     view.center = CGPointMake(CGRectGetMidX(pane.bounds), CGRectGetMidY(pane.bounds));
-    view.transform = CGAffineTransformMakeScale(scale, scale);
+    view.transform = CGAffineTransformMakeScale(scaleX, scaleY);
 }
 static const CGFloat kDividerGrabWidth = 28.0;   // vùng chạm (không hiển thị hết)
 static const CGFloat kDividerVisualWidth = 5.0;  // vạch mảnh thực sự nhìn thấy
 static const CGFloat kPaneGap = 2.0;
+static const NSUInteger kMaxCachedApps = 6;      // nhớ tối đa 6 app đã mở trong phiên
 
 static void DPLayout(void) {
     if (!gSplitWindow) return;
@@ -198,7 +209,10 @@ static void DPStop(NSString *reason) {
     DPRefreshButton();
 }
 @interface DPControls : NSObject
-- (void)start;
+- (void)openPicker;
+- (void)closePicker;
+- (void)pickerTap:(UIButton *)sender;
+- (void)startWithLeftBundle:(NSString *)leftBundle rightBundle:(NSString *)rightBundle;
 - (void)stop;
 - (void)pan:(UIPanGestureRecognizer *)gesture;
 - (void)swap;
@@ -222,6 +236,93 @@ static void DPInspect(NSUInteger generation) {
 }
 @implementation DPControls
 - (void)stop { DPStop(@"user exit"); }
+
+- (void)closePicker {
+    gPickerWindow.hidden = YES;
+    gPickerWindow = nil;
+    gPickerBundles = nil;
+    gPickerFirstPick = nil;
+}
+
+// Danh sách các app còn "sống" (controller vẫn hợp lệ), mới mở gần đây lên trước.
+- (NSArray<NSString *> *)validCachedBundlesNewestFirst {
+    NSMutableArray<NSString *> *result = [NSMutableArray array];
+    for (NSString *bundle in gOrder.reverseObjectEnumerator)
+        if (gRecords[bundle].valid) [result addObject:bundle];
+    return result;
+}
+
+// Nút "Chia" giờ mở 1 danh sách các app đã mở trong phiên lái xe (tối đa 6,
+// không chỉ 2 app cuối cùng) — chạm chọn app trái, chạm tiếp chọn app phải,
+// không cần quay lại Trang chủ mở lại app mỗi lần muốn đổi cặp chia màn.
+- (void)openPicker {
+    if (gRunning || !gSession) return;
+    [self closePicker];
+
+    NSArray<NSString *> *bundles = [self validCachedBundlesNewestFirst];
+    if (bundles.count < 2) return;
+
+    gPickerBundles = [bundles mutableCopy];
+
+    CGRect bounds = gSession.coordinateSpace.bounds;
+    gPickerWindow = [[UIWindow alloc] initWithWindowScene:gSession];
+    gPickerWindow.windowLevel = UIWindowLevelAlert + 85;
+    gPickerWindow.frame = CGRectMake(45, 0, MAX(1, bounds.size.width - 45), bounds.size.height);
+    gPickerWindow.rootViewController = [UIViewController new];
+    UIView *root = gPickerWindow.rootViewController.view;
+    root.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.92];
+
+    UILabel *hint = [UILabel new];
+    hint.text = @"Chạm chọn app bên trái, rồi chạm app bên phải";
+    hint.textColor = UIColor.whiteColor;
+    hint.font = [UIFont systemFontOfSize:12];
+    hint.textAlignment = NSTextAlignmentCenter;
+    hint.frame = CGRectMake(8, 6, root.bounds.size.width - 16, 20);
+    hint.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [root addSubview:hint];
+
+    CGFloat rowH = 34, gap = 6, top = 32;
+    for (NSUInteger i = 0; i < gPickerBundles.count; i++) {
+        UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
+        row.tag = (NSInteger)i;
+        row.backgroundColor = [UIColor colorWithWhite:0.2 alpha:0.9];
+        row.layer.cornerRadius = 6;
+        row.tintColor = UIColor.whiteColor;
+        [row setTitle:DPName(gRecords[gPickerBundles[i]]) forState:UIControlStateNormal];
+        row.frame = CGRectMake(12, top + i * (rowH + gap), root.bounds.size.width - 24, rowH);
+        row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        [row addTarget:self action:@selector(pickerTap:) forControlEvents:UIControlEventTouchUpInside];
+        [root addSubview:row];
+    }
+
+    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
+    [cancel setTitle:@"Huỷ" forState:UIControlStateNormal];
+    cancel.tintColor = UIColor.whiteColor;
+    cancel.frame = CGRectMake(root.bounds.size.width - 60, 4, 52, 24);
+    cancel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    [cancel addTarget:self action:@selector(closePicker) forControlEvents:UIControlEventTouchUpInside];
+    [root addSubview:cancel];
+
+    gPickerWindow.hidden = NO;
+}
+
+- (void)pickerTap:(UIButton *)sender {
+    if (!gPickerBundles || sender.tag < 0 || (NSUInteger)sender.tag >= gPickerBundles.count) return;
+    NSString *bundle = gPickerBundles[(NSUInteger)sender.tag];
+
+    if (!gPickerFirstPick) {
+        gPickerFirstPick = bundle;
+        sender.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:0.9 alpha:0.95];
+        return;
+    }
+
+    if ([gPickerFirstPick isEqualToString:bundle]) return; // không cho chọn trùng 1 app cho cả 2 bên
+
+    NSString *left = gPickerFirstPick, *right = bundle;
+    [self closePicker];
+    [self startWithLeftBundle:left rightBundle:right];
+}
+
 - (void)pan:(UIPanGestureRecognizer *)gesture {
     if (!gRunning) return;
     if (gesture.state == UIGestureRecognizerStateBegan) gStartRatio = gRatio;
@@ -244,9 +345,9 @@ static void DPInspect(NSUInteger generation) {
     DPInspect(gGeneration);
     DPLog(@"SWAP left=%@ right=%@", gPair[0].bundle, gPair[1].bundle);
 }
-- (void)start {
-    if (gRunning || gOrder.count < 2 || !gSession || DPDashboard() != gSession) return;
-    DPRecord *left = gRecords[gOrder[gOrder.count - 2]], *right = gRecords[gOrder.lastObject];
+- (void)startWithLeftBundle:(NSString *)leftBundle rightBundle:(NSString *)rightBundle {
+    if (gRunning || !gSession || DPDashboard() != gSession) return;
+    DPRecord *left = gRecords[leftBundle], *right = gRecords[rightBundle];
     if (!left.valid || !right.valid || left.controller == right.controller) return;
     NSString *leftDisplay = [left.sid componentsSeparatedByString:@":"].firstObject;
     NSString *rightDisplay = [right.sid componentsSeparatedByString:@":"].firstObject;
@@ -345,7 +446,9 @@ static void DPInspect(NSUInteger generation) {
 @end
 
 static void DPRefreshButton(void) {
-    BOOL ready = gOrder.count == 2 && gRecords[gOrder[0]].valid && gRecords[gOrder[1]].valid;
+    NSUInteger validCount = 0;
+    for (NSString *bundle in gOrder) if (gRecords[bundle].valid) validCount++;
+    BOOL ready = validCount >= 2;
     gButtonWindow.hidden = gRunning || !ready;
 }
 static void DPCapture(id controller, id settings) {
@@ -364,7 +467,7 @@ static void DPCapture(id controller, id settings) {
         record.valid = YES;
         gRecords[bundle] = record;
         [gOrder removeObject:bundle]; [gOrder addObject:bundle];
-        while (gOrder.count > 2) {
+        while (gOrder.count > kMaxCachedApps) {
             [gRecords removeObjectForKey:gOrder.firstObject]; [gOrder removeObjectAtIndex:0];
         }
         DPLog(@"CAPTURE bundle=%@ source=%@ suspended=%@", bundle,
@@ -380,6 +483,7 @@ static void DPTick(void) {
     if (session != gSession) {
         ++gSessionEpoch;
         DPStop(@"display changed");
+        [gControls closePicker];
         gButtonWindow.hidden = YES; gButtonWindow = nil; gButton = nil;
         [gRecords removeAllObjects]; [gOrder removeAllObjects];
         gSession = session;
@@ -398,7 +502,7 @@ static void DPTick(void) {
         [gButton setTitle:@"Chia" forState:UIControlStateNormal];
         gButton.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.9];
         gButton.layer.cornerRadius = 8;
-        [gButton addTarget:gControls action:@selector(start) forControlEvents:UIControlEventTouchUpInside];
+        [gButton addTarget:gControls action:@selector(openPicker) forControlEvents:UIControlEventTouchUpInside];
         [gButtonWindow.rootViewController.view addSubview:gButton];
     }
     if (session) {
@@ -416,6 +520,7 @@ static void DPTick(void) {
     if (record.controller == self) {
         record.valid = NO;
         DPStop(@"native scene destroyed");
+        if (gPickerWindow) [gControls closePicker];
         [gRecords removeObjectForKey:bundle];
         [gOrder removeObject:bundle];
         DPRefreshButton();
