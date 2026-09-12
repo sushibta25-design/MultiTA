@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.7.5-2
+Version: 0.8.0-v6
 Architecture: iphoneos-arm64e
-Description: DuoPhone V5.5.2 removes obsolete V5.4 geometry code so the V5.5 detached Maps platter split builds cleanly with -Werror.
+Description: DuoPhone V6.0 keeps two live CarPlay app scenes side by side with a draggable divider.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
