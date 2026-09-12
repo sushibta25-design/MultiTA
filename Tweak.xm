@@ -89,7 +89,10 @@ static BOOL gV53Applied = NO;
 static __weak UIView *gV55MapsPlatter = nil;
 static __weak UIView *gV55DashboardRootView = nil;
 static BOOL gV55Detached = NO;
+static __weak UIView *gV56MapsPresenterSuperview = nil;
+static BOOL gV56Promoted = NO;
 static void DPV55ApplyDetachedMapsSplit(UIWindowScene *ws);
+static void DPV56ApplyPromotedMapsSplit(UIWindowScene *ws);
 
 static NSString *gLeftApp  = nil;
 static NSString *gRightApp = nil;
@@ -836,7 +839,7 @@ static void DPV53ApplySplit(void) {
         return;
     }
 
-    DPV55ApplyDetachedMapsSplit(ws);
+    DPV56ApplyPromotedMapsSplit(ws);
 
     if (!gV53Applied) {
         gV53Applied = YES;
@@ -892,7 +895,7 @@ static UIView *DPV55DashboardRootView(UIWindowScene *ws) {
     return nil;
 }
 
-static void DPV55ApplyDetachedMapsSplit(UIWindowScene *ws) {
+static void __attribute__((used)) DPV55ApplyDetachedMapsSplit(UIWindowScene *ws) {
     if (!ws || !gV53MapsPresentationView || !gV53DashboardHomeView)
         return;
 
@@ -999,6 +1002,132 @@ static void DPV55ApplyDetachedMapsSplit(UIWindowScene *ws) {
     }
 }
 
+
+#pragma mark - V5.6 EXPERIMENTAL promote actual Maps presenter superview
+
+static UIView *DPV56FindPromotableSuperview(UIView *presentation) {
+    if (!presentation) return nil;
+
+    UIView *cur = presentation.superview;
+    NSInteger depth = 0;
+
+    while (cur && depth < 8) {
+        NSString *cn = NSStringFromClass([cur class]);
+
+        if ([cn containsString:@"CPUIPassthroughView"] ||
+            [cn containsString:@"DBAnimationView"] ||
+            [cn containsString:@"DBDashboardRootViewController"]) {
+            break;
+        }
+
+        // Prefer a plain UIView directly containing the presentation chain.
+        if ([cn isEqualToString:@"UIView"])
+            return cur;
+
+        cur = cur.superview;
+        depth++;
+    }
+
+    return presentation.superview;
+}
+
+static void DPV56ApplyPromotedMapsSplit(UIWindowScene *ws) {
+    if (!ws || !gV53MapsPresentationView || !gV53DashboardHomeView)
+        return;
+
+    UIView *rootView = DPV55DashboardRootView(ws);
+    if (!rootView) return;
+
+    if (!gV56MapsPresenterSuperview)
+        gV56MapsPresenterSuperview = DPV56FindPromotableSuperview(gV53MapsPresentationView);
+
+    UIView *carrier = gV56MapsPresenterSuperview;
+    if (!carrier) {
+        static NSUInteger miss = 0;
+        if ((miss++ % 8) == 0)
+            DPLog(@"V5.6 no promotable Maps carrier yet");
+        return;
+    }
+
+    if (!gV56Promoted) {
+        DPLog(@"========== V5.6 PROMOTE MAPS CARRIER ==========");
+        DPLog(@"V5.6 carrier=%@ class=%@ oldSuper=%@ frame=%@",
+              carrier,
+              NSStringFromClass([carrier class]),
+              carrier.superview ? NSStringFromClass([carrier.superview class]) : @"nil",
+              NSStringFromCGRect(carrier.frame));
+
+        [carrier removeFromSuperview];
+        [rootView addSubview:carrier];
+        [rootView bringSubviewToFront:carrier];
+
+        carrier.hidden = NO;
+        carrier.alpha = 1.0;
+        carrier.userInteractionEnabled = YES;
+
+        gV56Promoted = YES;
+
+        DPLog(@"V5.6 newSuper=%@",
+              carrier.superview ? NSStringFromClass([carrier.superview class]) : @"nil");
+        DPLog(@"========== V5.6 PROMOTE MAPS CARRIER END ==========");
+    }
+
+    CGFloat W = CGRectGetWidth(ws.coordinateSpace.bounds);
+    CGFloat H = CGRectGetHeight(ws.coordinateSpace.bounds);
+    CGFloat dock = 45.0;
+
+    CGFloat dividerCenter = CGRectGetMidX(gDividerWindow.frame);
+    if (dividerCenter <= dock + 40.0 || dividerCenter >= W - 40.0)
+        dividerCenter = MAX(dock + 80.0, MIN(W - 80.0, W * gRatio));
+
+    CGFloat gap = 2.0;
+
+    CGRect left = CGRectMake(dock, 0,
+                             MAX(1.0, dividerCenter - dock - gap),
+                             H);
+
+    CGRect right = CGRectMake(dividerCenter + gap, 0,
+                              MAX(1.0, W - dividerCenter - gap),
+                              H);
+
+    [UIView performWithoutAnimation:^{
+        gV53DashboardHomeView.frame = left;
+        gV53DashboardHomeView.clipsToBounds = YES;
+
+        carrier.frame = right;
+        carrier.clipsToBounds = YES;
+        carrier.hidden = NO;
+        carrier.alpha = 1.0;
+
+        gV53MapsPresentationView.frame = carrier.bounds;
+        gV53MapsPresentationView.hidden = NO;
+        gV53MapsPresentationView.alpha = 1.0;
+        gV53MapsPresentationView.clipsToBounds = YES;
+
+        if (gV53MapsHostContainer) {
+            gV53MapsHostContainer.frame = gV53MapsPresentationView.bounds;
+            gV53MapsHostContainer.clipsToBounds = YES;
+        }
+
+        [rootView bringSubviewToFront:carrier];
+    }];
+
+    static CGRect lastRight = {{0,0},{0,0}};
+    if (!CGRectEqualToRect(lastRight, right)) {
+        lastRight = right;
+        DPLog(@"========== V5.6 SPLIT ==========");
+        DPLog(@"V5.6 left=%@ right=%@",
+              NSStringFromCGRect(left),
+              NSStringFromCGRect(right));
+        DPLog(@"V5.6 carrierNow=%@ presentationNow=%@ hostNow=%@",
+              NSStringFromCGRect(carrier.frame),
+              NSStringFromCGRect(gV53MapsPresentationView.frame),
+              gV53MapsHostContainer ? NSStringFromCGRect(gV53MapsHostContainer.frame) : @"nil");
+        DPLog(@"========== V5.6 SPLIT END ==========");
+    }
+}
+
+
 #pragma mark - Vòng lặp
 
 static void DPTick(void) {
@@ -1027,7 +1156,7 @@ static void DPTick(void) {
         if (!DPIsCarPlay()) return;
 
         DPLoadPrefs();
-        DPLog(@"CTOR V5.5.5 bundle=%@ ratio=%.2f",
+        DPLog(@"CTOR V5.6 bundle=%@ ratio=%.2f",
               NSBundle.mainBundle.bundleIdentifier ?: @"nil", gRatio);
 
         dispatch_async(dispatch_get_main_queue(), ^{ DPTick(); });
