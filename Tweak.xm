@@ -1,4 +1,4 @@
-// DuoPhone V6.15-poke-sceneui — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.15b-poke-sceneui-buildfix — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.15-poke-sceneui %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.15b-poke-sceneui-buildfix %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -635,6 +635,7 @@ static void DPTryPokeSceneUI(DPRecord *record) {
         DPLog(@"POKE-SCENEUI bundle=%@ EXCEPTION %@ %@", record.bundle, e.name, e.reason);
     }
 }
+static NSMutableSet<NSString *> *gTemplateProbed;
 static void DPProbeTemplateSurface(DPRecord *record) {
     if (!record.controller) return;
     if (!gTemplateProbed) gTemplateProbed = [NSMutableSet set];

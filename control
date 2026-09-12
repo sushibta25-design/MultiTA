@@ -1,6 +1,6 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.9.7-v6.15
+Version: 0.9.8-v6.15b
 Architecture: iphoneos-arm64
 Description: DuoPhone V6.15 - logs method signatures and safely attempts calling _updateSceneUI after resize, aiming to force CarPlay Template UI (tab bar/list) to relayout for the new pane size.
 Maintainer: sushibta25-design
