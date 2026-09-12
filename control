@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.9.11-v6.17b
+Version: 0.9.12-v6.18
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.17b - build fix: removed unused DPTryZeroArgVoid left over after dropping the crash-causing trigger calls (project uses -Werror).
+Description: DuoPhone V6.18 - the "reason" string from layoutElementAssertion was a dead end (just a description, not the real object); now scans real ivars for an actual FBSDisplayLayoutElement instance and dumps its class surface.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
