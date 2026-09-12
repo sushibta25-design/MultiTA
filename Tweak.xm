@@ -1,4 +1,7 @@
-// DuoPhone V6.2.1 — full-app scene retention + split host
+// DuoPhone V6.2.2 — template scene identity + presentation-only split
+// Single-file update: replace Tweak.xm; package metadata remains unchanged.
+// Device log showed Maps + CarPlaySettings pinned and YouTube Music rejected.
+// This fixes selection/layout, NOT a claim of verified simultaneous app activity.
 //
 // Điều log V5.6 đã chứng minh:
 //   - Re-parent một _UIScenePresentationView sang view khác + đổi frame
@@ -7,7 +10,7 @@
 //     widget điều hướng (DBMapsNavigationWidgetViewController, 179x224),
 //     không phải app Maps đầy đủ. Nên kết quả là widget bị kéo giãn.
 //
-// V6.2.1 tiếp tục thử nghiệm host hai full-app scene trong CarPlayApp.
+// V6.2.2 tiếp tục thử nghiệm host hai full-app scene trong CarPlayApp.
 // Giữ controller/view không bảo đảm process ứng dụng còn foreground.
 // Hooks lifecycle vẫn gọi %orig; phải kiểm tra cả hình động và touch trên xe.
 // Mở app A rồi app B để thu thập hai scene, kéo divider để đổi tỷ lệ.
@@ -78,7 +81,6 @@ static CGFloat   gDragStartX    = 0.0;
 static NSMutableDictionary<NSString *, UIView *> *gScenes = nil;
 // bundle id -> DBApplicationSceneViewController (giữ sống full app controller)
 static NSMutableDictionary<NSString *, id> *gAppControllers = nil;
-static NSMutableDictionary<NSString *, UIView *> *gControllerViews = nil;
 // thứ tự xuất hiện, dùng để chọn 2 app gần nhất
 static NSMutableArray<NSString *> *gOrder = nil;
 
@@ -96,8 +98,11 @@ static void DPLoadPrefs(void) {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     if ([d objectForKey:kRatioKey])
         gRatio = DPClamp([d doubleForKey:kRatioKey], kMinRatio, kMaxRatio);
-    gLeftApp  = [d stringForKey:kLeftKey];
-    gRightApp = [d stringForKey:kRightKey];
+    // Chọn lại theo scene của phiên kết nối; không hồi sinh cặp Maps/Settings cũ.
+    gLeftApp = nil;
+    gRightApp = nil;
+    [d removeObjectForKey:kLeftKey];
+    [d removeObjectForKey:kRightKey];
 }
 
 static void DPSavePrefs(void) {
@@ -148,19 +153,27 @@ static NSString *DPBundleFromSceneID(NSString *sceneID) {
 
     NSArray<NSString *> *parts = [sceneID componentsSeparatedByString:@":"];
 
-    // V6.2.1 chỉ nhận FULL APP scene chính xác:
-    //   Car[2-3]:com.apple.Maps
-    // và loại toàn bộ :widget / :dashboard / scene phụ.
-    if (parts.count != 2) return nil;
-
+    if (parts.count < 2) return nil;
     NSString *display = parts[0];
-    NSString *bundle  = parts[1];
-    if (![display hasPrefix:@"Car["]) return nil;
+    if (![display hasPrefix:@"Car["] || ![display hasSuffix:@"]"]) return nil;
+
+    NSString *bundle = nil;
+    if (parts.count == 3 &&
+        [parts[1] isEqualToString:@"com.apple.CarPlayTemplateUIHost"]) {
+        // Đã quan sát trong log thiết bị: host chung + bundle app thật.
+        bundle = parts[2];
+    } else if (parts.count == 2) {
+        bundle = parts[1];
+    } else {
+        return nil; // dashboard/widget và các scene phụ chưa xác minh
+    }
     if (![bundle containsString:@"."]) return nil;
 
     // Các surface hệ thống không phải app pane.
     if ([bundle isEqualToString:@"com.apple.CarPlayApp"] ||
-        [bundle isEqualToString:@"com.apple.CarPlayWallpaper"])
+        [bundle isEqualToString:@"com.apple.CarPlayWallpaper"] ||
+        [bundle isEqualToString:@"com.apple.CarPlaySettings"] ||
+        [bundle isEqualToString:@"com.apple.CarPlayTemplateUIHost"])
         return nil;
 
     return bundle;
@@ -194,7 +207,7 @@ static UIView *DPPresentationForHost(UIView *host) {
         cur = cur.superview;
         depth++;
     }
-    return host.superview ?: host;
+    return nil; // Không kéo một container tùy ý khi thiếu presentation view.
 }
 
 static void DPCollectScenes(UIView *v, NSInteger depth) {
@@ -210,12 +223,16 @@ static void DPCollectScenes(UIView *v, NSInteger depth) {
             UIView *presentation = DPPresentationForHost(v);
 
             if (presentation && gScenes[bundle] != presentation) {
+                UIView *previous = gScenes[bundle];
+                if (gHostRoot && previous.superview == gHostRoot)
+                    [previous removeFromSuperview];
                 gScenes[bundle] = presentation;
+                gSplitActive = NO;
 
                 [gOrder removeObject:bundle];
                 [gOrder addObject:bundle];
 
-                DPLog(@"V6.2.1 SCENE FOUND bundle=%@ sceneID=%@ presentation=%@ frame=%@",
+                DPLog(@"V6.2.2 SCENE FOUND bundle=%@ sceneID=%@ presentation=%@ frame=%@",
                       bundle, sceneID,
                       NSStringFromClass([presentation class]),
                       NSStringFromCGRect(presentation.frame));
@@ -240,26 +257,27 @@ static void DPRegisterAppController(id controller) {
     if (![hostObj isKindOfClass:UIView.class]) return;
 
     UIView *host = (UIView *)hostObj;
-    UIView *controllerView = nil;
-    @try {
-        id v = [controller valueForKey:@"view"];
-        if ([v isKindOfClass:UIView.class]) controllerView = (UIView *)v;
-    } @catch (__unused NSException *e) {}
+    if (![NSStringFromClass(host.class) containsString:@"_UIScenePresentationView"])
+        return;
 
     BOOL changed = gAppControllers[bundle] != controller || gScenes[bundle] != host;
+    UIView *previous = gScenes[bundle];
+    if (previous != host && gHostRoot && previous.superview == gHostRoot)
+        [previous removeFromSuperview];
     gAppControllers[bundle] = controller;
     gScenes[bundle] = host;
-    if (controllerView) gControllerViews[bundle] = controllerView;
-    else [gControllerViews removeObjectForKey:bundle];
 
     if (!changed) return;
+    gSplitActive = NO;
 
     [gOrder removeObject:bundle];
     [gOrder addObject:bundle];
 
-    DPLog(@"V6.2.1 FULL APP REGISTER bundle=%@ sceneID=%@ controller=%@ host=%@ frame=%@",
+    DPLog(@"V6.2.2 FULL APP REGISTER bundle=%@ sceneID=%@ controller=%@ host=%@ frame=%@",
           bundle, sceneID, NSStringFromClass([controller class]),
           NSStringFromClass([host class]), NSStringFromCGRect(host.frame));
+    DPLog(@"V6.2.2 HOST DETAIL bundle=%@ host=%p parent=%@ children=%@",
+          bundle, (__bridge void *)host, NSStringFromClass(host.superview.class), host.subviews);
 }
 
 static void DPCollectAppControllers(UIViewController *vc) {
@@ -325,51 +343,24 @@ static void DPResolvePanes(void) {
 
 static void DPPinPaneForBundle(NSString *bundle, UIView *presentation, UIView *root, CGRect frame) {
     if (!bundle.length || !presentation || !root) return;
-
-    id controller = gAppControllers[bundle];
-    UIView *controllerView = gControllerViews[bundle];
-    UIView *pane = controllerView ?: presentation;
-
-    if (pane.superview != root) {
-        [pane removeFromSuperview];
-        [root addSubview:pane];
+    // Chỉ di chuyển surface của app, không di chuyển controller.view.
+    if (presentation == root || [root isDescendantOfView:presentation]) return;
+    if (presentation.superview != root) {
+        DPLog(@"V6.2.2 MOVE SURFACE bundle=%@ from=%@ frame=%@", bundle,
+              NSStringFromClass(presentation.superview.class), NSStringFromCGRect(frame));
+        [root addSubview:presentation];
     }
-
-    pane.frame = frame;
-    pane.hidden = NO;
-    pane.alpha = 1.0;
-    pane.clipsToBounds = YES;
-    pane.userInteractionEnabled = YES;
-
-    if (pane != presentation && ![presentation isDescendantOfView:pane]) {
-        [presentation removeFromSuperview];
-        [pane addSubview:presentation];
-    }
-
-    if (presentation.superview == pane)
-        presentation.frame = pane.bounds;
-
+    presentation.frame = frame;
     presentation.hidden = NO;
     presentation.alpha = 1.0;
     presentation.clipsToBounds = YES;
     presentation.userInteractionEnabled = YES;
-
-    for (UIView *c in presentation.subviews) {
-        if ([NSStringFromClass([c class]) containsString:@"_UISceneLayerHostContainerView"]) {
-            c.frame = presentation.bounds;
-            c.hidden = NO;
-            c.alpha = 1.0;
-        }
+    for (UIView *child in presentation.subviews) {
+        if ([NSStringFromClass(child.class) containsString:@"_UISceneLayerHostContainerView"])
+            child.frame = presentation.bounds;
     }
-
-    if (controller && [controller respondsToSelector:NSSelectorFromString(@"_updateSceneUI")]) {
-        @try {
-            ((void(*)(id,SEL))objc_msgSend)(controller, NSSelectorFromString(@"_updateSceneUI"));
-        } @catch (__unused NSException *e) {}
-    }
-
-    [pane setNeedsLayout];
-    [pane layoutIfNeeded];
+    // Không gọi _updateSceneUI trên controller còn thuộc layout toàn màn hình.
+    // Resize remote scene và trạng thái foreground vẫn cần xác minh trên xe.
 }
 
 static void DPApplySplit(void) {
@@ -385,10 +376,12 @@ static void DPApplySplit(void) {
     UIView *leftView  = gLeftApp  ? gScenes[gLeftApp]  : nil;
     UIView *rightView = gRightApp ? gScenes[gRightApp] : nil;
 
-    if (!leftView && !rightView) {
+    if (!leftView || !rightView || leftView == rightView) {
+        gDividerWindow.hidden = YES;
+        gSplitActive = NO;
         static NSUInteger miss = 0;
         if ((miss++ % 10) == 0)
-            DPLog(@"V6.2.1 chờ scene app: known=%lu order=%@",
+            DPLog(@"V6.2.2 WAIT TWO APPS (native layout untouched): known=%lu order=%@",
                   (unsigned long)gScenes.count, gOrder);
         return;
     }
@@ -405,28 +398,20 @@ static void DPApplySplit(void) {
     CGRect right = CGRectMake(splitX + kPaneGap, 0,
                               MAX(1.0, W - splitX - kPaneGap), H);
 
-    // Chỉ có 1 app: cho nó chiếm toàn bộ vùng dùng được.
-    if (leftView && !rightView)
-        left = CGRectMake(usableX, 0, usableW, H);
-    if (rightView && !leftView)
-        right = CGRectMake(usableX, 0, usableW, H);
-
     [UIView performWithoutAnimation:^{
         if (leftView)  DPPinPaneForBundle(gLeftApp, leftView, root, left);
         if (rightView) DPPinPaneForBundle(gRightApp, rightView, root, right);
 
-        UIView *leftPane = gLeftApp ? (gControllerViews[gLeftApp] ?: leftView) : nil;
-        UIView *rightPane = gRightApp ? (gControllerViews[gRightApp] ?: rightView) : nil;
-        if (leftPane.superview == root) [root bringSubviewToFront:leftPane];
-        if (rightPane.superview == root) [root bringSubviewToFront:rightPane];
+        if (leftView.superview == root) [root bringSubviewToFront:leftView];
+        if (rightView.superview == root) [root bringSubviewToFront:rightView];
     }];
 
-    BOOL hasTwoPanes = leftView && rightView && leftView != rightView;
+    BOOL hasTwoPanes = leftView != rightView && leftView.superview == root && rightView.superview == root;
     gDividerWindow.hidden = !hasTwoPanes;
     if (gSplitActive != hasTwoPanes) {
         gSplitActive = hasTwoPanes;
-        DPLog(@"V6.2.1 TWO PANES ATTACHED=%d (app liveness unverified)", hasTwoPanes);
-        DPLog(@"V6.2.1 left=%@ (%@) right=%@ (%@)",
+        DPLog(@"V6.2.2 TWO PANES ATTACHED=%d (app liveness unverified)", hasTwoPanes);
+        DPLog(@"V6.2.2 left=%@ (%@) right=%@ (%@)",
               gLeftApp ?: @"nil", NSStringFromCGRect(left),
               gRightApp ?: @"nil", NSStringFromCGRect(right));
     }
@@ -434,7 +419,7 @@ static void DPApplySplit(void) {
     static CGRect lastRight = {{0,0},{0,0}};
     if (!CGRectEqualToRect(lastRight, right)) {
         lastRight = right;
-        DPLog(@"V6.2.1 panes left=%@ right=%@ ratio=%.2f",
+        DPLog(@"V6.2.2 panes left=%@ right=%@ ratio=%.2f",
               NSStringFromCGRect(left), NSStringFromCGRect(right), gRatio);
     }
 }
@@ -475,7 +460,7 @@ static DPDividerTarget *gTarget = nil;
         g.state == UIGestureRecognizerStateFailed) {
         gDragging = NO;
         DPSavePrefs();
-        DPLog(@"V6.2.1 ratio=%.3f", gRatio);
+        DPLog(@"V6.2.2 ratio=%.3f", gRatio);
     }
 }
 
@@ -485,7 +470,7 @@ static DPDividerTarget *gTarget = nil;
     gLeftApp  = gRightApp;
     gRightApp = tmp;
     DPSavePrefs();
-    DPLog(@"V6.2.1 swap left=%@ right=%@", gLeftApp ?: @"nil", gRightApp ?: @"nil");
+    DPLog(@"V6.2.2 swap left=%@ right=%@", gLeftApp ?: @"nil", gRightApp ?: @"nil");
     DPApplySplit();
 }
 
@@ -561,7 +546,7 @@ static void DPCreateDivider(void) {
     DPLayoutDivider();
     gDividerWindow.hidden = YES;
 
-    DPLog(@"V6.2.1 divider ready frame=%@",
+    DPLog(@"V6.2.2 divider ready frame=%@",
           NSStringFromCGRect(gDividerWindow.frame));
 }
 
@@ -581,9 +566,10 @@ static void DPTick(void) {
         gDragging = NO;
         [gScenes removeAllObjects];
         [gAppControllers removeAllObjects];
-        [gControllerViews removeAllObjects];
+        gLeftApp = nil;
+        gRightApp = nil;
         [gOrder removeAllObjects];
-        DPLog(@"V6.2.1 DISPLAY RESET: cleared retained app views");
+        DPLog(@"V6.2.2 DISPLAY RESET: cleared retained app views");
     }
 
     if (!gDividerWindow) DPCreateDivider();
@@ -597,7 +583,7 @@ static void DPTick(void) {
 
 
 
-#pragma mark - V6.2.1 observe lifecycle without blocking CarPlay
+#pragma mark - V6.2.2 observe lifecycle without blocking CarPlay
 
 %hook DBApplicationSceneViewController
 
@@ -618,14 +604,14 @@ static void DPTick(void) {
 
 - (void)backgroundSceneWithCompletion:(id)completion {
     NSString *sceneID = DPValue(self, @"sceneID");
-    DPLog(@"V6.2.1 lifecycle background sceneID=%@", sceneID ?: @"nil");
+    DPLog(@"V6.2.2 lifecycle background sceneID=%@", sceneID ?: @"nil");
     %orig;
     DPRegisterAppController(self);
 }
 
 - (void)deactivateSceneWithReasonMask:(NSUInteger)mask {
     NSString *sceneID = DPValue(self, @"sceneID");
-    DPLog(@"V6.2.1 lifecycle deactivate sceneID=%@ mask=%lu",
+    DPLog(@"V6.2.2 lifecycle deactivate sceneID=%@ mask=%lu",
           sceneID ?: @"nil", (unsigned long)mask);
     %orig;
     DPRegisterAppController(self);
@@ -639,13 +625,12 @@ static void DPTick(void) {
 
         gScenes = [NSMutableDictionary dictionary];
         gAppControllers = [NSMutableDictionary dictionary];
-        gControllerViews = [NSMutableDictionary dictionary];
         gOrder  = [NSMutableArray array];
 
         DPLoadPrefs();
-        DPLog(@"V6.2.1 runtime DBApplicationSceneViewController=%@",
+        DPLog(@"V6.2.2 runtime DBApplicationSceneViewController=%@",
               NSClassFromString(@"DBApplicationSceneViewController"));
-        DPLog(@"CTOR V6.2.1 bundle=%@ ratio=%.2f left=%@ right=%@",
+        DPLog(@"CTOR V6.2.2 bundle=%@ ratio=%.2f left=%@ right=%@",
               NSBundle.mainBundle.bundleIdentifier ?: @"nil",
               gRatio, gLeftApp ?: @"nil", gRightApp ?: @"nil");
 
