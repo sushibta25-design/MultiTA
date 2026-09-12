@@ -566,12 +566,32 @@ static void DPTick(void) {
     NSString *bundle = DPBundle(DPValue(self, @"sceneID"));
     DPRecord *record = bundle ? gRecords[bundle] : nil;
     if (record.controller == self) {
-        record.valid = NO;
-        DPStop(@"native scene destroyed");
+        BOOL wasInPair = gRunning && [gPair containsObject:record];
         if (gPickerWindow) [gControls closePicker];
-        [gRecords removeObjectForKey:bundle];
-        [gOrder removeObject:bundle];
-        DPRefreshButton();
+        if (wasInPair) {
+            // Đang hiển thị app này thật — phải dừng ngay, không trì hoãn.
+            record.valid = NO;
+            DPStop(@"native scene destroyed");
+            [gRecords removeObjectForKey:bundle];
+            [gOrder removeObject:bundle];
+            DPRefreshButton();
+        } else {
+            // Nhiều app tự huỷ rồi tạo lại controller khi cập nhật UI nội bộ
+            // (không thật sự rời CarPlay) — quan sát thấy CAPTURE-REPLACE khá
+            // thường xuyên trong log thực tế. Đánh invalid ngay lập tức làm
+            // điều kiện "đủ 2 app" nhấp nháy, nút "Chia" ẩn/hiện liên tục.
+            // Chờ 1 nhịp xem có bị capture lại (thay thế) không rồi mới gỡ
+            // thật khỏi danh sách + refresh nút.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (gRecords[bundle] == record) {
+                    record.valid = NO;
+                    [gRecords removeObjectForKey:bundle];
+                    [gOrder removeObject:bundle];
+                    DPRefreshButton();
+                }
+            });
+        }
     }
     %orig;
 }
