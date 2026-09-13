@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 0.9.14-v6.20
+Version: 0.9.16-v6.22
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.20 - no class-level factory found on FBSDisplayLayoutElement; now observes (read-only, always calls %orig) every init and setFrame: on that class to see how the system naturally sizes it.
+Description: DuoPhone V6.22 - tests updateUISettingsWithBlock geometry propagation, refreshes presentation geometry, and polls client UIWindowScene bounds to verify true app-side resize.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

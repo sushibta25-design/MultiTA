@@ -1,4 +1,4 @@
-// DuoPhone V6.20-layoutelement-hook — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.22-ui-settings-resize — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.20-layoutelement-hook %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.22-ui-settings-resize %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -78,7 +78,6 @@ static NSString *DPBundle(NSString *sid) {
 @end
 
 static NSMutableDictionary<NSString *, DPRecord *> *gRecords;
-static BOOL gLayoutElementClassLogged = NO;
 static NSMutableArray<NSString *> *gOrder;
 static NSArray<DPRecord *> *gPair;
 static UIWindow *gButtonWindow, *gSplitWindow, *gPickerWindow;
@@ -139,10 +138,15 @@ static BOOL DPFrameSetter(id settings, CGRect frame) {
     ((void(*)(id,SEL,CGRect))objc_msgSend)(settings, setter, frame);
     return YES;
 }
-static BOOL DPHasFrameUpdater(id scene) {
-    NSMethodSignature *sig = [scene methodSignatureForSelector:NSSelectorFromString(@"updateSettingsWithBlock:")];
+static BOOL DPHasBlockUpdater(id scene, NSString *selectorName) {
+    SEL sel = NSSelectorFromString(selectorName);
+    NSMethodSignature *sig = [scene methodSignatureForSelector:sel];
     return sig && sig.numberOfArguments == 3 && !strcmp(sig.methodReturnType, @encode(void)) &&
            !strcmp([sig getArgumentTypeAtIndex:2], "@?");
+}
+static BOOL DPHasFrameUpdater(id scene) {
+    return DPHasBlockUpdater(scene, @"updateUISettingsWithBlock:") ||
+           DPHasBlockUpdater(scene, @"updateSettingsWithBlock:");
 }
 static void DPRestoreFrame(DPRecord *record) {
     if (!record.geometryChanged || !record.valid || !record.resizeScene) return;
@@ -150,15 +154,18 @@ static void DPRestoreFrame(DPRecord *record) {
     CGRect frame = record.originalFrame;
     NSUInteger generation = gGeneration;
     if (DPValue(record.controller, @"scene") != scene || !DPHasFrameUpdater(scene)) return;
+    NSString *updaterName = DPHasBlockUpdater(scene, @"updateUISettingsWithBlock:") ?
+                            @"updateUISettingsWithBlock:" : @"updateSettingsWithBlock:";
     void (^change)(id) = ^(id mutableSettings) {
         if (generation != gGeneration) return;
         @try {
             BOOL restored = DPFrameSetter(mutableSettings, frame);
-            DPLog(@"RESIZE RESTORE bundle=%@ setter=%d frame=%@", record.bundle, restored, NSStringFromCGRect(frame));
+            DPLog(@"RESIZE RESTORE bundle=%@ path=%@ settingsClass=%@ setter=%d frame=%@",
+                  record.bundle, updaterName, NSStringFromClass([mutableSettings class]), restored, NSStringFromCGRect(frame));
         } @catch (NSException *e) { DPLog(@"RESIZE RESTORE ERROR %@ %@", record.bundle, e.name); }
     };
     @try {
-        ((void(*)(id,SEL,id))objc_msgSend)(scene, NSSelectorFromString(@"updateSettingsWithBlock:"), change);
+        ((void(*)(id,SEL,id))objc_msgSend)(scene, NSSelectorFromString(updaterName), change);
     } @catch (NSException *e) { DPLog(@"RESIZE RESTORE ERROR %@ %@", record.bundle, e.name); }
 }
 static void DPQueueResize(DPRecord *record, CGSize size) {
@@ -188,26 +195,69 @@ static void DPQueueResize(DPRecord *record, CGSize size) {
         if (record.resizeScene != scene) { DPStop(@"resize scene replaced"); return; }
         CGSize target = record.requestedSize;
         CGRect frame = (CGRect){CGPointZero, target};
+
+        // V6.22: ưu tiên UI settings. V6.20 đã chứng minh updateSettingsWithBlock:
+        // thay được scene.settings.frame nhưng remote app KHÔNG relayout. Scene này
+        // còn expose updateUISettingsWithBlock:, đây mới là đường có khả năng tạo
+        // geometry diff gửi tới client UIWindowScene.
+        NSString *updaterName = DPHasBlockUpdater(scene, @"updateUISettingsWithBlock:") ?
+                                @"updateUISettingsWithBlock:" : @"updateSettingsWithBlock:";
+        __block BOOL setterWorked = NO;
         void (^change)(id) = ^(id mutableSettings) {
             if (![NSThread isMainThread]) { DPLog(@"RESIZE CALLBACK OFF MAIN — skipped"); return; }
             if (!gRunning || generation != gGeneration || !record.valid) return;
             @try {
-                record.geometryChanged = YES; // Restore even if the setter throws part-way through.
-                if (!DPFrameSetter(mutableSettings, frame)) {
-                    record.resizeState = -1;
-                    DPLog(@"RESIZE NO FRAME SETTER bundle=%@ settings=%@", record.bundle, NSStringFromClass([mutableSettings class]));
+                record.geometryChanged = YES;
+                setterWorked = DPFrameSetter(mutableSettings, frame);
+                if (!setterWorked) {
+                    DPLog(@"RESIZE UI NO FRAME SETTER bundle=%@ path=%@ settings=%@",
+                          record.bundle, updaterName, NSStringFromClass([mutableSettings class]));
                     return;
                 }
                 record.resizeState = 1; record.submittedSize = target;
-                DPLog(@"RESIZE REQUEST bundle=%@ frame=%@", record.bundle, NSStringFromCGRect(frame));
+                DPLog(@"RESIZE REQUEST bundle=%@ path=%@ settingsClass=%@ frame=%@",
+                      record.bundle, updaterName, NSStringFromClass([mutableSettings class]), NSStringFromCGRect(frame));
             } @catch (NSException *e) {
-                record.resizeState = -1;
                 DPLog(@"RESIZE ERROR %@ %@", record.bundle, e.name);
             }
         };
         @try {
-            ((void(*)(id,SEL,id))objc_msgSend)(scene, NSSelectorFromString(@"updateSettingsWithBlock:"), change);
-        } @catch (NSException *e) { record.resizeState = -1; DPLog(@"RESIZE UPDATE ERROR %@ %@", record.bundle, e.name); }
+            ((void(*)(id,SEL,id))objc_msgSend)(scene, NSSelectorFromString(updaterName), change);
+        } @catch (NSException *e) { DPLog(@"RESIZE UPDATE ERROR %@ %@", record.bundle, e.name); }
+
+        // Nếu UI-settings object không có frame setter thì fallback về đường cũ,
+        // để V6.22 vẫn chạy được thay vì vô hiệu hóa split.
+        if (!setterWorked && ![updaterName isEqualToString:@"updateSettingsWithBlock:"] &&
+            DPHasBlockUpdater(scene, @"updateSettingsWithBlock:")) {
+            void (^fallback)(id) = ^(id mutableSettings) {
+                if (!gRunning || generation != gGeneration || !record.valid) return;
+                @try {
+                    if (DPFrameSetter(mutableSettings, frame)) {
+                        record.resizeState = 1; record.submittedSize = target;
+                        DPLog(@"RESIZE FALLBACK bundle=%@ settingsClass=%@ frame=%@",
+                              record.bundle, NSStringFromClass([mutableSettings class]), NSStringFromCGRect(frame));
+                    }
+                } @catch (__unused NSException *e) {}
+            };
+            @try { ((void(*)(id,SEL,id))objc_msgSend)(scene, NSSelectorFromString(@"updateSettingsWithBlock:"), fallback); }
+            @catch (__unused NSException *e) {}
+        }
+
+        // Presentation có hook nội bộ này (đã probe được). Gọi lại sau geometry
+        // update để host view cập nhật transform/frame từ presentation context mới.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 40 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            if (!gRunning || generation != gGeneration || !record.presentation) return;
+            @try {
+                SEL refresh = NSSelectorFromString(@"_updateFrameAndTransform");
+                if ([record.presentation respondsToSelector:refresh]) {
+                    ((void(*)(id,SEL))objc_msgSend)(record.presentation, refresh);
+                    DPLog(@"PRESENTATION GEOMETRY REFRESH bundle=%@ frame=%@ bounds=%@",
+                          record.bundle, NSStringFromCGRect(record.presentation.frame), NSStringFromCGRect(record.presentation.bounds));
+                }
+                [record.presentation setNeedsLayout];
+                [record.presentation layoutIfNeeded];
+            } @catch (NSException *e) { DPLog(@"PRESENTATION REFRESH ERROR %@ %@", record.bundle, e.name); }
+        });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
             if (!gRunning || generation != gGeneration || !record.valid) return;
             CGRect actual = CGRectZero;
@@ -612,115 +662,15 @@ static void DPProbeClassSurface(Class cls, NSString *tag) {
 // chứng minh là ngõ cụt hoặc nguy hiểm (xem log thực tế). Chuyển hẳn sang
 // quét ivar thật ở hàm bên dưới.
 static void DPTryPokeSceneUI(DPRecord *record) {
-    if (!record.controller) return;
-
-    // ĐÃ BỎ HẲN: _updateSceneUI VÀ mọi lệnh "invalidate" (gây huỷ scene/crash).
-    // ĐÃ LOẠI: đọc "reason" của layoutElementAssertion — xác nhận qua log
-    // thực tế đó chỉ là 1 CHUỖI mô tả (__NSCFString) được ghi lại lúc tạo
-    // assertion để debug, KHÔNG phải bản thân object FBSDisplayLayoutElement
-    // thật. Ngõ cụt, không đào tiếp hướng đó.
-
-    id controller = record.controller;
-    NSString *tag = record.bundle;
-    Class targetClass = NSClassFromString(@"FBSDisplayLayoutElement");
-
-    // Soi cấu trúc class NGAY CẢ KHI chưa có instance — reflection tĩnh luôn
-    // làm được, không cần object sống. Class này nhỏ nên dump TOÀN BỘ method
-    // (không lọc keyword nữa) cho cả 2 phía:
-    //   - instance-side: method gọi trên 1 OBJECT đã có (frame, setFrame:...)
-    //   - class-side (metaclass): method gọi trên CHÍNH CLASS, thường là nơi
-    //     có factory/lookup (kiểu +elementForIdentifier:, +currentElements)
-    //     — đây là thứ đang thiếu: cách LẤY object đang sống, thay vì phải
-    //     tự tạo mới (initWithIdentifier: có thể có tác dụng phụ ngầm khi
-    //     gọi, giống bài học từ _updateSceneUI — CHƯA dám gọi thử).
-    if (targetClass && !gLayoutElementClassLogged) {
-        gLayoutElementClassLogged = YES;
-        DPLog(@"========== FBSDisplayLayoutElement CLASS SURFACE ==========");
-        unsigned int mc = 0;
-        Method *methods = class_copyMethodList(targetClass, &mc);
-        for (unsigned int i = 0; i < mc; i++) {
-            NSString *name = NSStringFromSelector(method_getName(methods[i]));
-            DPLog(@"FBSDisplayLayoutElement -%@ argc=%u types=%s",
-                  name, method_getNumberOfArguments(methods[i]),
-                  method_getTypeEncoding(methods[i]) ?: "?");
-        }
-        if (methods) free(methods);
-
-        Class meta = object_getClass(targetClass);
-        unsigned int mc2 = 0;
-        Method *classMethods = class_copyMethodList(meta, &mc2);
-        for (unsigned int i = 0; i < mc2; i++) {
-            NSString *name = NSStringFromSelector(method_getName(classMethods[i]));
-            DPLog(@"FBSDisplayLayoutElement +%@ argc=%u types=%s",
-                  name, method_getNumberOfArguments(classMethods[i]),
-                  method_getTypeEncoding(classMethods[i]) ?: "?");
-        }
-        if (classMethods) free(classMethods);
-        DPLog(@"========== FBSDisplayLayoutElement CLASS SURFACE END ==========");
-    } else {
-        DPLog(@"FBSDisplayLayoutElement class KHÔNG tồn tại trong runtime này");
-    }
-
-    if (!targetClass) return;
-
-    // Quét ivar THẬT (kiểm tra đúng kiểu class, không suy luận qua tên key)
-    // của controller và scene, tìm instance THẬT của FBSDisplayLayoutElement
-    // — khác hẳn cách cũ (đọc "reason" chỉ ra 1 chuỗi mô tả).
-    id scene = DPValue(controller, @"scene");
-    for (id root in @[controller, scene ?: (id)@""]) {
-        if (![root isKindOfClass:NSObject.class]) continue;
-        Class cls = [root class];
-        unsigned int ic = 0;
-        Ivar *ivars = class_copyIvarList(cls, &ic);
-        for (unsigned int i = 0; i < ic; i++) {
-            const char *rawName = ivar_getName(ivars[i]);
-            const char *rawType = ivar_getTypeEncoding(ivars[i]);
-            if (!rawName || !rawType || rawType[0] != '@') continue; // chỉ ivar kiểu object
-            id value = nil;
-            @try { value = object_getIvar(root, ivars[i]); }
-            @catch (__unused NSException *e) { continue; }
-            if (!value || ![value isKindOfClass:targetClass]) continue;
-
-            NSString *name = [NSString stringWithUTF8String:rawName];
-            DPLog(@"========== FOUND REAL FBSDisplayLayoutElement bundle=%@ owner=%@ ivar=%@ ==========",
-                  tag, NSStringFromClass(cls), name);
-            DPLog(@"FOUND instance=%@", value);
-
-            // Đọc mọi key hình học khả dĩ — KHÔNG set lại bất kỳ cái gì.
-            for (NSString *key in @[@"frame", @"bounds", @"size", @"rect", @"region",
-                                    @"displayIdentity", @"identity", @"identifier",
-                                    @"contentSize", @"logicalSize", @"screenBounds"]) {
-                id v = DPValue(value, key);
-                if (v) DPLog(@"FOUND %@.%@ => %@ class=%@", tag, key, v, NSStringFromClass([v class]));
-            }
-
-            // Quét thêm ivar kiểu CGRect/CGSize ngay trong chính object này.
-            unsigned int ic2 = 0;
-            Ivar *ivars2 = class_copyIvarList(targetClass, &ic2);
-            for (unsigned int j = 0; j < ic2; j++) {
-                const char *rn2 = ivar_getName(ivars2[j]);
-                const char *rt2 = ivar_getTypeEncoding(ivars2[j]);
-                if (!rn2 || !rt2) continue;
-                NSString *n2 = [NSString stringWithUTF8String:rn2];
-                if (strcmp(rt2, @encode(CGRect)) == 0) {
-                    @try {
-                        CGRect r; ptrdiff_t off = ivar_getOffset(ivars2[j]);
-                        memcpy(&r, (char *)(__bridge void *)value + off, sizeof(CGRect));
-                        DPLog(@"FOUND %@ IVAR %@ (CGRect) => %@", tag, n2, NSStringFromCGRect(r));
-                    } @catch (__unused NSException *e) {}
-                } else if (strcmp(rt2, @encode(CGSize)) == 0) {
-                    @try {
-                        CGSize s; ptrdiff_t off = ivar_getOffset(ivars2[j]);
-                        memcpy(&s, (char *)(__bridge void *)value + off, sizeof(CGSize));
-                        DPLog(@"FOUND %@ IVAR %@ (CGSize) => %@", tag, n2, NSStringFromCGSize(s));
-                    } @catch (__unused NSException *e) {}
-                }
-            }
-            if (ivars2) free(ivars2);
-            DPLog(@"========== FOUND REAL FBSDisplayLayoutElement END bundle=%@ ==========", tag);
-        }
-        if (ivars) free(ivars);
-    }
+    // GHI CHÚ: hàm này từng đào sâu FBSDisplayLayoutElement (soi class,
+    // quét ivar tìm instance thật). Log thực tế xác nhận đó là NGÕ CỤT —
+    // object này là cơ chế theo dõi UI toàn hệ thống (xuất hiện cho cả
+    // lock-screen, Filza...), không phải thứ quyết định kích thước layout
+    // thật của app CarPlay. Đã gỡ bỏ toàn bộ nhánh đó, để trống chờ hướng
+    // điều tra tiếp theo (xem ghi chú ở %hook UIApplication bên dưới —
+    // hướng mới là soi windowScene NGAY LÚC app kết nối lần đầu, thay vì
+    // resize sau khi đã kết nối).
+    (void)record;
 }
 static NSMutableSet<NSString *> *gTemplateProbed;
 static void DPProbeTemplateSurface(DPRecord *record) {
@@ -896,39 +846,14 @@ static void DPTick(void) {
 }
 %end
 
-// Chỉ QUAN SÁT — không sửa gì (luôn gọi %orig y nguyên trước/sau). Mục
-// đích: bắt sống mọi lần hệ thống tự tạo/đổi frame cho 1
-// FBSDisplayLayoutElement trong quá trình app hoạt động bình thường, để
-// biết nó được tạo lúc nào, ai tạo, giá trị frame mặc định là gì — vì class
-// này không có factory/lookup ở cấp class (đã xác nhận qua probe metaclass:
-// không có method nào bắt đầu bằng dấu +).
-%hook FBSDisplayLayoutElement
-- (id)initWithXPCDictionary:(id)dict {
-    id result = %orig;
-    @try {
-        DPLog(@"LAYOUTELEM-INIT identifier=%@ bundle=%@ frame=%@ fillsDisplayBounds=%d",
-              DPValue(result, @"identifier") ?: @"nil",
-              DPValue(result, @"bundleIdentifier") ?: @"nil",
-              NSStringFromCGRect([result respondsToSelector:@selector(frame)]
-                                  ? ((CGRect(*)(id,SEL))objc_msgSend)(result, @selector(frame))
-                                  : CGRectZero),
-              [result respondsToSelector:@selector(fillsDisplayBounds)]
-                  ? ((BOOL(*)(id,SEL))objc_msgSend)(result, @selector(fillsDisplayBounds))
-                  : -1);
-    } @catch (__unused NSException *e) {}
-    return result;
-}
-- (void)setFrame:(CGRect)frame {
-    @try {
-        DPLog(@"LAYOUTELEM-SETFRAME identifier=%@ bundle=%@ newFrame=%@ oldFrame=%@",
-              DPValue(self, @"identifier") ?: @"nil",
-              DPValue(self, @"bundleIdentifier") ?: @"nil",
-              NSStringFromCGRect(frame),
-              NSStringFromCGRect(((CGRect(*)(id,SEL))objc_msgSend)(self, @selector(frame))));
-    } @catch (__unused NSException *e) {}
-    %orig;
-}
-%end
+// ĐÃ GỠ BỎ: hook FBSDisplayLayoutElement. Log thực tế cho thấy object này
+// xuất hiện cho RẤT NHIỀU thứ không liên quan CarPlay (lock-screen, home-
+// screen, passcode, thậm chí app Filza) và frame của Maps/YouTube Music bị
+// hệ thống tự đặt lại full-width liên tục, nhiều lần. fillsDisplayBounds
+// cũng đã là 0 sẵn từ đầu — không phải cờ cần tắt như từng đoán. Kết luận:
+// đây là cơ chế theo dõi UI toàn hệ thống (khả năng phục vụ Siri/context-
+// awareness), KHÔNG phải thứ quyết định kích thước layout thật của app
+// CarPlay. Ngõ cụt, dừng đào hướng này.
 
 // Chạy BÊN TRONG process của chính app bản đồ (Maps/Google Maps/Vietmap), khác
 // hẳn khối hook DBApplicationSceneViewController ở trên (chạy trong CarPlayApp).
@@ -938,17 +863,67 @@ static void DPTick(void) {
 // trên mọi phiên bản iOS — nếu log không thấy dòng APPSIDE-CONNECT nào dù đã
 // mở app trên CarPlay, nghĩa là cần probe selector khác, không phải app không
 // kết nối.
+//
+// HƯỚNG MỚI (sau khi FBSDisplayLayoutElement bị loại): resize SAU KHI app đã
+// kết nối và tự layout xong không hiệu quả (đã chứng minh qua nhiều bản). Có
+// khả năng app CHỈ tự layout đúng nếu biết kích thước NHỎ ngay từ đầu, giống
+// hệt cách 1 app tự nhiên khác nhau trên iPhone SE và iPhone Pro Max. Bước
+// này log THÊM windowScene.coordinateSpace.bounds và windowScene.screen.bounds
+// — đọc TRƯỚC %orig, tức đúng lúc app CHUẨN BỊ nhận biết kích thước, để xem
+// hệ thống báo cho app kích thước gì NGAY LÚC KẾT NỐI ĐẦU TIÊN. Nếu số liệu
+// ở đây LUÔN LÀ full-width (426.67x240), nghĩa là app học kích thước full
+// ngay từ giây đầu tiên — xác nhận hướng "spoof kích thước lúc connect" là
+// đúng chỗ cần làm, chứ không phải resize về sau như đang làm.
+static __weak UIWindowScene *gAppObservedCarScene = nil;
+static CGRect gAppLastBounds = {{0,0},{0,0}};
+static void DPAppPollSceneBounds(NSUInteger remaining) {
+    if (!gAppProbeEnabled || remaining == 0) return;
+    UIWindowScene *ws = gAppObservedCarScene;
+    if (ws) {
+        @try {
+            CGRect coord = ws.coordinateSpace.bounds;
+            CGRect screen = ws.screen.bounds;
+            if (!CGRectEqualToRect(coord, gAppLastBounds)) {
+                gAppLastBounds = coord;
+                DPLog(@"APPSIDE-BOUNDS-CHANGED proc=%@ sid=%@ coordBounds=%@ screenBounds=%@",
+                      NSBundle.mainBundle.bundleIdentifier, ws.session.persistentIdentifier,
+                      NSStringFromCGRect(coord), NSStringFromCGRect(screen));
+            }
+        } @catch (__unused NSException *e) {}
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        DPAppPollSceneBounds(remaining - 1);
+    });
+}
+
 %hook UIApplication
 - (void)_connectUIScene:(UIScene *)scene withOptions:(id)options {
+    if (gAppProbeEnabled && [scene isKindOfClass:UIWindowScene.class]) {
+        @try {
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            UISceneSession *session = windowScene.session;
+            DPLog(@"APPSIDE-CONNECT-PRE proc=%@ sid=%@ role=%@ coordBounds=%@ screenBounds=%@",
+                  NSBundle.mainBundle.bundleIdentifier, session.persistentIdentifier, session.role,
+                  NSStringFromCGRect(windowScene.coordinateSpace.bounds),
+                  NSStringFromCGRect(windowScene.screen.bounds));
+        } @catch (NSException *e) { DPLog(@"APPSIDE-CONNECT-PRE ERROR %@", e.reason); }
+    }
+
     %orig;
+
     if (!gAppProbeEnabled || ![scene isKindOfClass:UIWindowScene.class]) return;
     @try {
         UIWindowScene *windowScene = (UIWindowScene *)scene;
         UISceneSession *session = windowScene.session;
-        DPLog(@"APPSIDE-CONNECT proc=%@ sid=%@ role=%@ configName=%@ configDelegateClass=%@ orientation=%ld",
+        gAppObservedCarScene = windowScene;
+        gAppLastBounds = CGRectZero;
+        DPAppPollSceneBounds(120);
+        DPLog(@"APPSIDE-CONNECT proc=%@ sid=%@ role=%@ configName=%@ configDelegateClass=%@ orientation=%ld coordBounds=%@ screenBounds=%@",
               NSBundle.mainBundle.bundleIdentifier, session.persistentIdentifier, session.role,
               session.configuration.name, session.configuration.delegateClass,
-              (long)windowScene.interfaceOrientation);
+              (long)windowScene.interfaceOrientation,
+              NSStringFromCGRect(windowScene.coordinateSpace.bounds),
+              NSStringFromCGRect(windowScene.screen.bounds));
     } @catch (NSException *e) { DPLog(@"APPSIDE-CONNECT PROBE ERROR %@", e.reason); }
 }
 %end
@@ -957,7 +932,7 @@ static void DPTick(void) {
         NSString *proc = NSBundle.mainBundle.bundleIdentifier;
         // Nhánh probe: KHÔNG đụng tới bất kỳ global nào của phần host-side
         // (gRecords/gControls/...) — chỉ bật cờ cho hook UIApplication ở trên.
-        if ([@[@"com.apple.Maps", @"com.google.Maps", @"vn.vietmap.live"] containsObject:proc]) {
+        if ([@[@"com.apple.Maps", @"com.google.Maps", @"vn.vietmap.live", @"com.google.ios.youtubemusic"] containsObject:proc]) {
             gAppProbeEnabled = YES;
             DPLog(@"APPSIDE PROBE ACTIVE proc=%@", proc);
             return;

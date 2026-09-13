@@ -4,6 +4,7 @@
             "com.apple.CarPlayApp",
             "com.apple.Maps",
             "com.google.Maps",
+            "com.google.ios.youtubemusic",
             "vn.vietmap.live"
         );
     };
