@@ -1,4 +1,4 @@
-// DuoPhone V6.24-scene-update-propagation — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.25-client-settings-diff — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.24-scene-update-propagation %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.25-client-settings-diff %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -156,6 +156,44 @@ static NSString *DPObjSummary(id obj) {
     if (!desc) desc = @"?";
     if (desc.length > 500) desc = [[desc substringToIndex:500] stringByAppendingString:@"…"];
     return [NSString stringWithFormat:@"<%@:%p> %@", NSStringFromClass([obj class]), (__bridge void *)obj, desc];
+}
+
+// V6.25: map một FBScene / presentation object về record bằng chính scene
+// identifier/description, thay vì dựa vào controller đang hook. Cách này tránh
+// cross-fire giữa Maps và YouTube Music đã thấy trong log V6.24.
+static DPRecord *DPRecordForSceneObject(id scene) {
+    if (!scene || !gRunning || gPair.count != 2) return nil;
+    NSString *desc = nil;
+    @try { desc = [scene description]; } @catch (__unused NSException *e) {}
+    if (!desc) desc = @"";
+    for (DPRecord *record in gPair) {
+        if (record.valid && record.bundle.length && [desc containsString:record.bundle]) return record;
+    }
+    for (NSString *key in @[@"identifier", @"sceneID", @"workspaceIdentifier", @"persistentIdentifier"]) {
+        id value = DPValue(scene, key);
+        if (![value isKindOfClass:NSString.class]) continue;
+        for (DPRecord *record in gPair) {
+            if (record.valid && [value containsString:record.bundle]) return record;
+        }
+    }
+    return nil;
+}
+static DPRecord *DPRecordForPresentation(id presentation) {
+    if (!presentation || !gRunning || gPair.count != 2) return nil;
+    for (DPRecord *record in gPair) if (record.valid && record.presentation == presentation) return record;
+    return nil;
+}
+static void DPDumpClientObject(DPRecord *record, NSString *tag, id object) {
+    if (!record || !object) return;
+    DPLog(@"CLIENT-OBJECT bundle=%@ tag=%@ class=%@ value=%@",
+          record.bundle, tag, NSStringFromClass([object class]), DPObjSummary(object));
+    for (NSString *key in @[@"frame", @"bounds", @"geometry", @"settings", @"sceneSettings",
+                             @"clientSettings", @"displayConfiguration", @"interfaceOrientation",
+                             @"safeAreaInsets", @"transitionContext"]) {
+        id v = DPValue(object, key);
+        if (v) DPLog(@"CLIENT-OBJECT-KVC bundle=%@ tag=%@ key=%@ value=%@",
+                     record.bundle, tag, key, DPObjSummary(v));
+    }
 }
 static void DPDumpSceneUpdateState(DPRecord *record, NSString *tag) {
     if (!record.controller) return;
@@ -920,6 +958,55 @@ static void DPTick(void) {
 }
 %end
 
+// V6.25: đây là callback thật của FBScene khi client settings thay đổi.
+// V6.24 đã chứng minh host scene.settings.frame = 188.83x240 và FBSceneUpdateContext
+// cũng mang frame đó. Giờ ta đo xem "clientSettings" mà process app trao đổi với
+// FrontBoard có còn full-width 426.67 hay đã nhận pane width.
+%hook FBScene
+- (void)client:(id)client didUpdateClientSettings:(id)settings withDiff:(id)diff transitionContext:(id)transitionContext {
+    DPRecord *record = DPRecordForSceneObject(self);
+    if (record) {
+        DPLog(@"CLIENT-SETTINGS ENTER bundle=%@ scene=%@ client=%@ settings=%@ diff=%@ transition=%@",
+              record.bundle, DPObjSummary(self), DPObjSummary(client), DPObjSummary(settings),
+              DPObjSummary(diff), DPObjSummary(transitionContext));
+        DPDumpClientObject(record, @"settings-before", settings);
+        DPDumpClientObject(record, @"diff-before", diff);
+        DPDumpClientObject(record, @"transition-before", transitionContext);
+    }
+    %orig;
+    if (record) {
+        id sceneSettings = DPValue(self, @"settings");
+        DPLog(@"CLIENT-SETTINGS EXIT bundle=%@ sceneSettings=%@", record.bundle, DPObjSummary(sceneSettings));
+        DPDumpClientObject(record, @"scene-settings-after", sceneSettings);
+    }
+}
+%end
+
+// Presentation context là tầng ngay trước _UIScenePresentationView. Nếu client
+// settings đã đúng mà UI vẫn co/crop sai, log này cho biết presentation context
+// có còn giữ geometry full-width hay không.
+%hook _UIScenePresentationView
+- (void)scene:(id)scene didPrepareUpdateWithContext:(id)context {
+    DPRecord *record = DPRecordForPresentation(self);
+    if (record) {
+        DPLog(@"PRESENTATION-PREPARE bundle=%@ scene=%@ context=%@",
+              record.bundle, DPObjSummary(scene), DPObjSummary(context));
+        DPDumpClientObject(record, @"presentation-prepare-context", context);
+    }
+    %orig;
+}
+- (void)_updatePresentationContextFrom:(id)fromContext toContext:(id)toContext {
+    DPRecord *record = DPRecordForPresentation(self);
+    if (record) {
+        DPLog(@"PRESENTATION-CONTEXT bundle=%@ from=%@ to=%@",
+              record.bundle, DPObjSummary(fromContext), DPObjSummary(toContext));
+        DPDumpClientObject(record, @"presentation-from", fromContext);
+        DPDumpClientObject(record, @"presentation-to", toContext);
+    }
+    %orig;
+}
+%end
+
 // ĐÃ GỠ BỎ: hook FBSDisplayLayoutElement. Log thực tế cho thấy object này
 // xuất hiện cho RẤT NHIỀU thứ không liên quan CarPlay (lock-screen, home-
 // screen, passcode, thậm chí app Filza) và frame của Maps/YouTube Music bị
@@ -970,6 +1057,31 @@ static void DPAppPollSceneBounds(NSUInteger remaining) {
     });
 }
 
+static void DPAppScanConnectedScenes(NSUInteger remaining) {
+    if (!gAppProbeEnabled || remaining == 0) return;
+    @try {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            UIWindowScene *ws = (UIWindowScene *)scene;
+            NSString *role = ws.session.role ?: @"";
+            NSString *sid = ws.session.persistentIdentifier ?: @"";
+            if (![role containsString:@"CarPlay"] && ![sid containsString:@"Car["]) continue;
+            CGRect coord = ws.coordinateSpace.bounds;
+            CGRect screen = ws.screen.bounds;
+            if (gAppObservedCarScene != ws || !CGRectEqualToRect(coord, gAppLastBounds)) {
+                gAppObservedCarScene = ws;
+                gAppLastBounds = coord;
+                DPLog(@"APPSIDE-SCAN proc=%@ sid=%@ role=%@ coordBounds=%@ screenBounds=%@ windows=%lu",
+                      NSBundle.mainBundle.bundleIdentifier, sid, role, NSStringFromCGRect(coord),
+                      NSStringFromCGRect(screen), (unsigned long)ws.windows.count);
+            }
+        }
+    } @catch (NSException *e) { DPLog(@"APPSIDE-SCAN ERROR %@", e.name); }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        DPAppScanConnectedScenes(remaining - 1);
+    });
+}
+
 %hook UIApplication
 - (void)_connectUIScene:(UIScene *)scene withOptions:(id)options {
     if (gAppProbeEnabled && [scene isKindOfClass:UIWindowScene.class]) {
@@ -1009,6 +1121,7 @@ static void DPAppPollSceneBounds(NSUInteger remaining) {
         if ([@[@"com.apple.Maps", @"com.google.Maps", @"vn.vietmap.live", @"com.google.ios.youtubemusic"] containsObject:proc]) {
             gAppProbeEnabled = YES;
             DPLog(@"APPSIDE PROBE ACTIVE proc=%@", proc);
+            dispatch_async(dispatch_get_main_queue(), ^{ DPAppScanConnectedScenes(180); });
             return;
         }
         if (![proc isEqualToString:@"com.apple.CarPlayApp"]) return;
