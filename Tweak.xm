@@ -1,4 +1,4 @@
-// DuoPhone V6.32-duodash-layout-polish — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.33-dock-overlay-probe — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.32-duodash-layout-polish %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.33-dock-overlay-probe %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -83,8 +83,10 @@ static NSString *DPBundle(NSString *sid) {
 static NSMutableDictionary<NSString *, DPRecord *> *gRecords;
 static NSMutableArray<NSString *> *gOrder;
 static NSArray<DPRecord *> *gPair;
+@class DPControls;
+static DPControls *gControls;
 static UIWindow *gButtonWindow, *gSplitWindow, *gPickerWindow;
-static UIView *gLeftPane, *gRightPane, *gDivider;
+static UIView *gLeftPane, *gRightPane, *gDivider, *gDockOverlay;
 static UIButton *gButton;
 static NSMutableArray<NSString *> *gPickerBundles;   // snapshot khi mở picker
 static NSString *gPickerFirstPick = nil;             // app đã chọn làm bên trái
@@ -101,6 +103,7 @@ static void DPRefreshButton(void);
 static void DPInspect(NSUInteger generation);
 static void DPDumpConnectedScenes(NSString *tag);
 static void DPProbeTemplateSurface(DPRecord *record);
+static void DPDumpDockCandidates(void);
 static void DPTryPokeSceneUI(DPRecord *record);
 static NSString *DPName(DPRecord *record) {
     if ([record.bundle isEqualToString:@"com.apple.Maps"]) return @"Maps";
@@ -507,6 +510,55 @@ static const CGFloat kPaneGap = 0.0; // V6.31: divider overlays panes; do not th
 static const NSUInteger kMaxCachedApps = 6;      // nhớ tối đa 6 app đã mở trong phiên
 static const CGFloat kPaneCornerRadius = 14.0;   // bo góc kiểu iPhone
 
+static BOOL DPDockClassLooksUseful(NSString *name) {
+    if (!name.length) return NO;
+    NSString *l = name.lowercaseString;
+    return [l containsString:@"dock"] || [l containsString:@"sidebar"] ||
+           [l containsString:@"home"] || [l containsString:@"status"] ||
+           [l containsString:@"dashboard"] || [l containsString:@"appgrid"];
+}
+
+static void DPWalkDockViews(UIView *view, NSUInteger depth) {
+    if (!view || depth > 8) return;
+    NSString *name = NSStringFromClass(view.class);
+    CGRect f = view.frame;
+    // Native CarPlay dock/sidebar is normally narrow and hugs one display edge.
+    BOOL edgeish = (f.size.width > 0 && f.size.width <= 90 && f.size.height >= 80) ||
+                   (f.size.height > 0 && f.size.height <= 90 && f.size.width >= 120);
+    if (DPDockClassLooksUseful(name) || edgeish) {
+        DPLog(@"DOCK-CANDIDATE depth=%lu class=%@ frame=%@ bounds=%@ hidden=%d alpha=%.2f windowLevel=%.1f super=%@",
+              (unsigned long)depth, name, NSStringFromCGRect(f), NSStringFromCGRect(view.bounds),
+              view.hidden, view.alpha, view.window.windowLevel,
+              view.superview ? NSStringFromClass(view.superview.class) : @"nil");
+    }
+    for (UIView *child in view.subviews) DPWalkDockViews(child, depth + 1);
+}
+
+static void DPDumpDockCandidates(void) {
+    UIWindowScene *scene = gSession ?: DPDashboard();
+    if (!scene) return;
+    DPLog(@"========== DOCK-PROBE windows=%lu =========", (unsigned long)scene.windows.count);
+    for (UIWindow *w in scene.windows) {
+        if (w == gSplitWindow || w == gButtonWindow || w == gPickerWindow) continue;
+        DPLog(@"DOCK-WINDOW class=%@ level=%.1f hidden=%d frame=%@ root=%@",
+              NSStringFromClass(w.class), w.windowLevel, w.hidden, NSStringFromCGRect(w.frame),
+              w.rootViewController ? NSStringFromClass(w.rootViewController.class) : @"nil");
+        DPWalkDockViews(w.rootViewController.view ?: w, 0);
+    }
+    DPLog(@"========== DOCK-PROBE END =========");
+}
+
+static UIButton *DPDockButton(NSString *title, SEL action) {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    [b setTitle:title forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold];
+    b.tintColor = UIColor.whiteColor;
+    b.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.72];
+    b.layer.cornerRadius = 8;
+    [b addTarget:gControls action:action forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
+
 static void DPLayout(void) {
     if (!gSplitWindow) return;
     CGFloat width = gSplitWindow.bounds.size.width, height = gSplitWindow.bounds.size.height;
@@ -526,6 +578,19 @@ static void DPLayout(void) {
     CGFloat pillH = 26.0;
     UIButton *exitButton = (UIButton *)[gSplitWindow.rootViewController.view viewWithTag:9002];
     exitButton.frame = CGRectMake(width - 68, 6, 60, pillH);
+
+    // V6.33: floating dock rail overlays the split instead of stealing pane width.
+    // Keep it compact so full-width geometry from V6.31/V6.32 remains untouched.
+    if (gDockOverlay) {
+        CGFloat dockW = 42.0, dockH = 138.0;
+        gDockOverlay.frame = CGRectMake(4.0, MAX(6.0, (height - dockH) * 0.5), dockW, dockH);
+        NSArray *buttons = gDockOverlay.subviews;
+        CGFloat bh = 40.0, gap = 6.0;
+        for (NSUInteger i = 0; i < buttons.count; i++) {
+            UIView *v = buttons[i];
+            v.frame = CGRectMake(1, 1 + i * (bh + gap), dockW - 2, bh);
+        }
+    }
 
     if (gPair.count == 2) {
         DPFit(gPair[0], gLeftPane);
@@ -571,7 +636,7 @@ static void DPStop(NSString *reason) {
     }
     gOwnCall = previousOwnCall;
     gPair = nil;
-    gSplitWindow = nil; gLeftPane = nil; gRightPane = nil; gDivider = nil; gStatus = nil;
+    gSplitWindow = nil; gLeftPane = nil; gRightPane = nil; gDivider = nil; gDockOverlay = nil; gStatus = nil;
     DPRefreshButton();
 }
 @interface DPControls : NSObject
@@ -581,8 +646,9 @@ static void DPStop(NSString *reason) {
 - (void)startWithLeftBundle:(NSString *)leftBundle rightBundle:(NSString *)rightBundle;
 - (void)stop;
 - (void)swap;
+- (void)dockHome;
+- (void)dockApps;
 @end
-static DPControls *gControls;
 static void DPInspect(NSUInteger generation) {
     if (!gRunning || generation != gGeneration) return;
     BOOL allAttached = YES;
@@ -605,6 +671,11 @@ static void DPInspect(NSUInteger generation) {
 }
 @implementation DPControls
 - (void)stop { DPStop(@"user exit"); }
+- (void)dockHome { DPStop(@"dock home"); }
+- (void)dockApps {
+    DPStop(@"dock apps");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [gControls openPicker]; });
+}
 
 - (void)closePicker {
     gPickerWindow.hidden = YES;
@@ -774,7 +845,21 @@ static void DPInspect(NSUInteger generation) {
     [gDivider addSubview:dividerBar];
     gDivider.userInteractionEnabled = NO; // Fixed separator, no pan or swap gestures.
     [root addSubview:gDivider];
+
+    // Floating dock replacement. It does NOT reduce either pane's width.
+    // Home restores native Dashboard; Apps exits split and opens DuoPhone picker; ↔ swaps panes.
+    gDockOverlay = [UIView new];
+    gDockOverlay.backgroundColor = [UIColor colorWithWhite:0.02 alpha:0.42];
+    gDockOverlay.layer.cornerRadius = 10;
+    gDockOverlay.layer.masksToBounds = YES;
+    [gDockOverlay addSubview:DPDockButton(@"⌂", @selector(dockHome))];
+    [gDockOverlay addSubview:DPDockButton(@"▦", @selector(dockApps))];
+    [gDockOverlay addSubview:DPDockButton(@"↔", @selector(swap))];
+    [root addSubview:gDockOverlay];
+
     DPLayout(); gSplitWindow.hidden = NO; DPRefreshButton();
+    DPDumpDockCandidates();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ if (gRunning) DPDumpDockCandidates(); });
     DPLog(@"START FIXED 50/50 left=%@ right=%@ — unscaled scene resize", left.bundle, right.bundle);
     gOwnCall = YES;
     @try {
