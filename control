@@ -2,7 +2,7 @@ Package: com.sushibta.duophone
 Name: DuoPhone
 Version: 6.24
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.22 - tests updateUISettingsWithBlock geometry propagation, refreshes presentation geometry, and polls client UIWindowScene bounds to verify true app-side resize.
+Description: DuoPhone V6.26 - probes CarPlayTemplateUIHost scene/window geometry after host-side pane resize to locate the final renderer layout bottleneck.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

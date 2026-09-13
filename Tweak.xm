@@ -1,4 +1,4 @@
-// DuoPhone V6.25-client-settings-diff — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.26-templateuihost-probe — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.25-client-settings-diff %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.26-templateuihost-probe %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -1082,6 +1082,64 @@ static void DPAppScanConnectedScenes(NSUInteger remaining) {
     });
 }
 
+
+static void DPProbeTemplateHostHierarchy(UIWindowScene *ws, NSString *tag) {
+    if (!ws) return;
+    @try {
+        NSString *proc = NSBundle.mainBundle.bundleIdentifier ?: @"?";
+        NSString *sid = ws.session.persistentIdentifier ?: @"?";
+        CGRect coord = ws.coordinateSpace.bounds;
+        CGRect screen = ws.screen.bounds;
+        DPLog(@"TEMPLATEHOST-SCENE tag=%@ proc=%@ sid=%@ role=%@ coordBounds=%@ screenBounds=%@ windows=%lu",
+              tag, proc, sid, ws.session.role, NSStringFromCGRect(coord), NSStringFromCGRect(screen),
+              (unsigned long)ws.windows.count);
+        NSUInteger wi = 0;
+        for (UIWindow *w in ws.windows) {
+            UIViewController *root = w.rootViewController;
+            DPLog(@"TEMPLATEHOST-WINDOW tag=%@ sid=%@ idx=%lu class=%@ frame=%@ bounds=%@ root=%@ rootViewFrame=%@",
+                  tag, sid, (unsigned long)wi, NSStringFromClass(w.class), NSStringFromCGRect(w.frame),
+                  NSStringFromCGRect(w.bounds), root ? NSStringFromClass(root.class) : @"nil",
+                  root.view ? NSStringFromCGRect(root.view.frame) : @"nil");
+            // Non-destructive relayout poke. Do not force a synthetic frame yet; first see
+            // whether TemplateUIHost receives the pane geometry from its UIWindowScene.
+            [w setNeedsLayout];
+            [w layoutIfNeeded];
+            if (root.view) {
+                [root.view setNeedsLayout];
+                [root.view layoutIfNeeded];
+            }
+            NSUInteger si = 0;
+            for (UIView *v in w.subviews) {
+                if (si >= 8) break;
+                DPLog(@"TEMPLATEHOST-SUBVIEW tag=%@ sid=%@ w=%lu idx=%lu class=%@ frame=%@ bounds=%@",
+                      tag, sid, (unsigned long)wi, (unsigned long)si, NSStringFromClass(v.class),
+                      NSStringFromCGRect(v.frame), NSStringFromCGRect(v.bounds));
+                si++;
+            }
+            wi++;
+        }
+    } @catch (NSException *e) {
+        DPLog(@"TEMPLATEHOST-PROBE ERROR %@ %@", e.name, e.reason);
+    }
+}
+
+static void DPTemplateHostScan(NSUInteger remaining) {
+    if (remaining == 0) return;
+    if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.CarPlayTemplateUIHost"]) return;
+    @try {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            UIWindowScene *ws = (UIWindowScene *)scene;
+            NSString *sid = ws.session.persistentIdentifier ?: @"";
+            if (![sid hasPrefix:@"Car["]) continue;
+            DPProbeTemplateHostHierarchy(ws, @"scan");
+        }
+    } @catch (NSException *e) { DPLog(@"TEMPLATEHOST-SCAN ERROR %@", e.name); }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        DPTemplateHostScan(remaining - 1);
+    });
+}
+
 %hook UIApplication
 - (void)_connectUIScene:(UIScene *)scene withOptions:(id)options {
     if (gAppProbeEnabled && [scene isKindOfClass:UIWindowScene.class]) {
@@ -1096,6 +1154,10 @@ static void DPAppScanConnectedScenes(NSUInteger remaining) {
     }
 
     %orig;
+
+    if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.CarPlayTemplateUIHost"] && [scene isKindOfClass:UIWindowScene.class]) {
+        DPProbeTemplateHostHierarchy((UIWindowScene *)scene, @"connect-post");
+    }
 
     if (!gAppProbeEnabled || ![scene isKindOfClass:UIWindowScene.class]) return;
     @try {
@@ -1118,10 +1180,13 @@ static void DPAppScanConnectedScenes(NSUInteger remaining) {
         NSString *proc = NSBundle.mainBundle.bundleIdentifier;
         // Nhánh probe: KHÔNG đụng tới bất kỳ global nào của phần host-side
         // (gRecords/gControls/...) — chỉ bật cờ cho hook UIApplication ở trên.
-        if ([@[@"com.apple.Maps", @"com.google.Maps", @"vn.vietmap.live", @"com.google.ios.youtubemusic"] containsObject:proc]) {
+        if ([@[@"com.apple.Maps", @"com.google.Maps", @"vn.vietmap.live", @"com.google.ios.youtubemusic", @"com.apple.CarPlayTemplateUIHost"] containsObject:proc]) {
             gAppProbeEnabled = YES;
             DPLog(@"APPSIDE PROBE ACTIVE proc=%@", proc);
-            dispatch_async(dispatch_get_main_queue(), ^{ DPAppScanConnectedScenes(180); });
+            dispatch_async(dispatch_get_main_queue(), ^{
+                DPAppScanConnectedScenes(180);
+                if ([proc isEqualToString:@"com.apple.CarPlayTemplateUIHost"]) DPTemplateHostScan(180);
+            });
             return;
         }
         if (![proc isEqualToString:@"com.apple.CarPlayApp"]) return;

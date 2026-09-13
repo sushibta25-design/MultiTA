@@ -2,6 +2,7 @@
     Filter = {
         Bundles = (
             "com.apple.CarPlayApp",
+            "com.apple.CarPlayTemplateUIHost",
             "com.apple.Maps",
             "com.google.Maps",
             "com.google.ios.youtubemusic",
