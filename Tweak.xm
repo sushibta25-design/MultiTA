@@ -1,4 +1,4 @@
-// DuoPhone V6.26-templateuihost-probe — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.27-templateuihost-deep-layout — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.26-templateuihost-probe %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.27-templateuihost-deep-layout %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -1083,6 +1083,35 @@ static void DPAppScanConnectedScenes(NSUInteger remaining) {
 }
 
 
+
+static void DPTemplateHostDumpViewTree(UIView *view, NSString *sid, NSUInteger depth, NSUInteger *budget) {
+    if (!view || !budget || *budget == 0 || depth > 5) return;
+    (*budget)--;
+    UIEdgeInsets safe = UIEdgeInsetsZero;
+    @try { safe = view.safeAreaInsets; } @catch (__unused NSException *e) {}
+    DPLog(@"TEMPLATEHOST-TREE sid=%@ depth=%lu class=%@ frame=%@ bounds=%@ safe={%.1f,%.1f,%.1f,%.1f} hidden=%d alpha=%.2f constraints=%lu",
+          sid, (unsigned long)depth, NSStringFromClass(view.class), NSStringFromCGRect(view.frame),
+          NSStringFromCGRect(view.bounds), safe.top, safe.left, safe.bottom, safe.right,
+          view.hidden, view.alpha, (unsigned long)view.constraints.count);
+    if (*budget == 0) return;
+    for (UIView *sub in view.subviews) {
+        DPTemplateHostDumpViewTree(sub, sid, depth + 1, budget);
+        if (*budget == 0) break;
+    }
+}
+
+static void DPTemplateHostDumpControllerMethods(Class cls) {
+    static NSMutableSet *seen; static dispatch_once_t once; dispatch_once(&once, ^{ seen=[NSMutableSet set]; });
+    if (!cls) return; NSString *name=NSStringFromClass(cls); if ([seen containsObject:name]) return; [seen addObject:name];
+    unsigned int count=0; Method *methods=class_copyMethodList(cls,&count);
+    for (unsigned int i=0;i<count;i++) {
+        NSString *sel=NSStringFromSelector(method_getName(methods[i])); NSString *l=sel.lowercaseString;
+        if ([l containsString:@"layout"] || [l containsString:@"size"] || [l containsString:@"trait"] || [l containsString:@"safe"] || [l containsString:@"content"] || [l containsString:@"frame"] || [l containsString:@"bounds"])
+            DPLog(@"TEMPLATEHOST-METHOD class=%@ selector=%@ types=%s", name, sel, method_getTypeEncoding(methods[i]));
+    }
+    if (methods) free(methods);
+}
+
 static void DPProbeTemplateHostHierarchy(UIWindowScene *ws, NSString *tag) {
     if (!ws) return;
     @try {
@@ -1107,6 +1136,13 @@ static void DPProbeTemplateHostHierarchy(UIWindowScene *ws, NSString *tag) {
             if (root.view) {
                 [root.view setNeedsLayout];
                 [root.view layoutIfNeeded];
+                DPTemplateHostDumpControllerMethods(root.class);
+                NSUInteger budget = 80;
+                DPTemplateHostDumpViewTree(root.view, sid, 0, &budget);
+                DPLog(@"TEMPLATEHOST-TRAITS sid=%@ root=%@ hSize=%ld vSize=%ld style=%ld safe=%@ preferredContentSize=%@",
+                      sid, NSStringFromClass(root.class), (long)root.traitCollection.horizontalSizeClass,
+                      (long)root.traitCollection.verticalSizeClass, (long)root.traitCollection.userInterfaceStyle,
+                      NSStringFromUIEdgeInsets(root.view.safeAreaInsets), NSStringFromCGSize(root.preferredContentSize));
             }
             NSUInteger si = 0;
             for (UIView *v in w.subviews) {
