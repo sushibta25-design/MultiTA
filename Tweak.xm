@@ -1,4 +1,4 @@
-// DuoPhone V6.23-geometry-surface — geometry-surface experiment based on V6.22.
+// DuoPhone V6.23.1-geometry-surface-fix — geometry-surface experiment based on V6.22.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -23,7 +23,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.23-geometry-surface %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.23.1-geometry-surface-fix %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -1018,6 +1018,28 @@ static void DPAppPollSceneBounds(NSUInteger remaining) {
     } @catch (NSException *e) { DPLog(@"APPSIDE-CONNECT PROBE ERROR %@", e.reason); }
 }
 %end
+static void DPAppProbeScan(NSString *proc, NSUInteger left) {
+    if (!gAppProbeEnabled || left == 0) return;
+
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *ws = (UIWindowScene *)sc;
+        NSString *role = ws.session.role ?: @"";
+        NSString *sid = ws.session.persistentIdentifier ?: @"";
+        @try {
+            DPLog(@"APPSIDE-SCAN proc=%@ sid=%@ role=%@ coordBounds=%@ screenBounds=%@ active=%ld",
+                  proc, sid, role, NSStringFromCGRect(ws.coordinateSpace.bounds),
+                  NSStringFromCGRect(ws.screen.bounds), (long)ws.activationState);
+        } @catch (__unused NSException *e) {}
+    }
+
+    if (left > 1) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            DPAppProbeScan(proc, left - 1);
+        });
+    }
+}
+
 %ctor {
     @autoreleasepool {
         NSString *proc = NSBundle.mainBundle.bundleIdentifier;
@@ -1027,23 +1049,7 @@ static void DPAppPollSceneBounds(NSUInteger remaining) {
             gAppProbeEnabled = YES;
             DPLog(@"APPSIDE PROBE ACTIVE proc=%@", proc);
             dispatch_async(dispatch_get_main_queue(), ^{
-                __block void (^scan)(NSUInteger);
-                scan = ^(NSUInteger left) {
-                    if (!gAppProbeEnabled || left == 0) return;
-                    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
-                        if (![sc isKindOfClass:UIWindowScene.class]) continue;
-                        UIWindowScene *ws = (UIWindowScene *)sc;
-                        NSString *role = ws.session.role ?: @"";
-                        NSString *sid = ws.session.persistentIdentifier ?: @"";
-                        @try {
-                            DPLog(@"APPSIDE-SCAN proc=%@ sid=%@ role=%@ coordBounds=%@ screenBounds=%@ active=%ld",
-                                  proc, sid, role, NSStringFromCGRect(ws.coordinateSpace.bounds),
-                                  NSStringFromCGRect(ws.screen.bounds), (long)ws.activationState);
-                        } @catch (__unused NSException *e) {}
-                    }
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ scan(left - 1); });
-                };
-                scan(30);
+                DPAppProbeScan(proc, 30);
             });
             return;
         }

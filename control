@@ -1,6 +1,6 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 6.23
+Version: 6.23.1
 Architecture: iphoneos-arm64
 Description: DuoPhone V6.23 - probes and applies all runtime CGRect/CGSize geometry setters on CarPlay proxy scene settings, prefers transition UI settings updates, and traces app-side scene bounds.
 Maintainer: sushibta25-design
