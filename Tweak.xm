@@ -1,4 +1,4 @@
-// DuoPhone V6.22-ui-settings-resize — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.23-geometry-surface — geometry-surface experiment based on V6.22.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -12,6 +12,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 #import <unistd.h>
 #import <stdarg.h>
 #import <math.h>
@@ -22,7 +23,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.22-ui-settings-resize %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.23-geometry-surface %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -138,6 +139,82 @@ static BOOL DPFrameSetter(id settings, CGRect frame) {
     ((void(*)(id,SEL,CGRect))objc_msgSend)(settings, setter, frame);
     return YES;
 }
+
+static NSMutableSet<NSString *> *gGeometrySettingsClasses;
+static BOOL DPGeometryName(NSString *name) {
+    if (![name isKindOfClass:NSString.class]) return NO;
+    NSString *n = name.lowercaseString;
+    return [n containsString:@"frame"] || [n containsString:@"bounds"] ||
+           [n containsString:@"size"] || [n containsString:@"geometry"] ||
+           [n containsString:@"viewport"] || [n containsString:@"canvas"] ||
+           [n containsString:@"coordinate"] || [n containsString:@"display"];
+}
+static void DPProbeMutableSettings(id settings, NSString *bundle) {
+    if (!settings) return;
+    if (!gGeometrySettingsClasses) gGeometrySettingsClasses = [NSMutableSet set];
+    NSString *clsName = NSStringFromClass([settings class]);
+    if ([gGeometrySettingsClasses containsObject:clsName]) return;
+    [gGeometrySettingsClasses addObject:clsName];
+    DPLog(@"========== GEOMETRY-SETTINGS-SURFACE bundle=%@ class=%@ ==========", bundle, clsName);
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList([settings class], &count);
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        if (!DPGeometryName(name)) continue;
+        const char *types = method_getTypeEncoding(methods[i]);
+        DPLog(@"GEOMETRY-METHOD %@ types=%s", name, types ? types : "?");
+        NSMethodSignature *sig = [settings methodSignatureForSelector:sel];
+        if (sig && sig.numberOfArguments == 2 && sig.methodReturnLength > 0) {
+            @try {
+                const char *rt = sig.methodReturnType;
+                if (!strcmp(rt, @encode(CGRect))) {
+                    CGRect v = ((CGRect(*)(id,SEL))objc_msgSend)(settings, sel);
+                    DPLog(@"GEOMETRY-GET %@ => %@", name, NSStringFromCGRect(v));
+                } else if (!strcmp(rt, @encode(CGSize))) {
+                    CGSize v = ((CGSize(*)(id,SEL))objc_msgSend)(settings, sel);
+                    DPLog(@"GEOMETRY-GET %@ => %@", name, NSStringFromCGSize(v));
+                } else if (!strcmp(rt, @encode(CGPoint))) {
+                    CGPoint v = ((CGPoint(*)(id,SEL))objc_msgSend)(settings, sel);
+                    DPLog(@"GEOMETRY-GET %@ => %@", name, NSStringFromCGPoint(v));
+                } else if (rt[0] == '@') {
+                    id v = ((id(*)(id,SEL))objc_msgSend)(settings, sel);
+                    if (v) DPLog(@"GEOMETRY-GET %@ => %@ class=%@", name, v, NSStringFromClass([v class]));
+                }
+            } @catch (__unused NSException *e) {}
+        }
+    }
+    if (methods) free(methods);
+    DPLog(@"========== GEOMETRY-SETTINGS-SURFACE END ==========");
+}
+static NSUInteger DPApplyGeometrySetters(id settings, CGRect frame, NSString *bundle) {
+    if (!settings) return 0;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList([settings class], &count);
+    NSUInteger applied = 0;
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        if (![name hasPrefix:@"set"] || !DPGeometryName(name)) continue;
+        NSMethodSignature *sig = [settings methodSignatureForSelector:sel];
+        if (!sig || sig.numberOfArguments != 3 || strcmp(sig.methodReturnType, @encode(void))) continue;
+        const char *arg = [sig getArgumentTypeAtIndex:2];
+        @try {
+            if (!strcmp(arg, @encode(CGRect))) {
+                ((void(*)(id,SEL,CGRect))objc_msgSend)(settings, sel, frame);
+                DPLog(@"GEOMETRY-SET bundle=%@ %@ <= %@", bundle, name, NSStringFromCGRect(frame));
+                applied++;
+            } else if (!strcmp(arg, @encode(CGSize))) {
+                ((void(*)(id,SEL,CGSize))objc_msgSend)(settings, sel, frame.size);
+                DPLog(@"GEOMETRY-SET bundle=%@ %@ <= %@", bundle, name, NSStringFromCGSize(frame.size));
+                applied++;
+            }
+        } @catch (NSException *e) { DPLog(@"GEOMETRY-SET ERROR bundle=%@ %@ %@", bundle, name, e.name); }
+    }
+    if (methods) free(methods);
+    return applied;
+}
+
 static BOOL DPHasBlockUpdater(id scene, NSString *selectorName) {
     SEL sel = NSSelectorFromString(selectorName);
     NSMethodSignature *sig = [scene methodSignatureForSelector:sel];
@@ -145,7 +222,8 @@ static BOOL DPHasBlockUpdater(id scene, NSString *selectorName) {
            !strcmp([sig getArgumentTypeAtIndex:2], "@?");
 }
 static BOOL DPHasFrameUpdater(id scene) {
-    return DPHasBlockUpdater(scene, @"updateUISettingsWithBlock:") ||
+    return DPHasBlockUpdater(scene, @"updateUISettingsWithTransitionBlock:") ||
+           DPHasBlockUpdater(scene, @"updateUISettingsWithBlock:") ||
            DPHasBlockUpdater(scene, @"updateSettingsWithBlock:");
 }
 static void DPRestoreFrame(DPRecord *record) {
@@ -200,23 +278,31 @@ static void DPQueueResize(DPRecord *record, CGSize size) {
         // thay được scene.settings.frame nhưng remote app KHÔNG relayout. Scene này
         // còn expose updateUISettingsWithBlock:, đây mới là đường có khả năng tạo
         // geometry diff gửi tới client UIWindowScene.
-        NSString *updaterName = DPHasBlockUpdater(scene, @"updateUISettingsWithBlock:") ?
-                                @"updateUISettingsWithBlock:" : @"updateSettingsWithBlock:";
+        NSString *updaterName = DPHasBlockUpdater(scene, @"updateUISettingsWithTransitionBlock:") ?
+                                @"updateUISettingsWithTransitionBlock:" :
+                                (DPHasBlockUpdater(scene, @"updateUISettingsWithBlock:") ?
+                                 @"updateUISettingsWithBlock:" : @"updateSettingsWithBlock:");
         __block BOOL setterWorked = NO;
         void (^change)(id) = ^(id mutableSettings) {
             if (![NSThread isMainThread]) { DPLog(@"RESIZE CALLBACK OFF MAIN — skipped"); return; }
             if (!gRunning || generation != gGeneration || !record.valid) return;
             @try {
                 record.geometryChanged = YES;
-                setterWorked = DPFrameSetter(mutableSettings, frame);
+                DPProbeMutableSettings(mutableSettings, record.bundle);
+                NSUInteger geometrySetterCount = DPApplyGeometrySetters(mutableSettings, frame, record.bundle);
+                setterWorked = geometrySetterCount > 0;
                 if (!setterWorked) {
-                    DPLog(@"RESIZE UI NO FRAME SETTER bundle=%@ path=%@ settings=%@",
+                    setterWorked = DPFrameSetter(mutableSettings, frame);
+                }
+                if (!setterWorked) {
+                    DPLog(@"RESIZE UI NO GEOMETRY SETTER bundle=%@ path=%@ settings=%@",
                           record.bundle, updaterName, NSStringFromClass([mutableSettings class]));
                     return;
                 }
                 record.resizeState = 1; record.submittedSize = target;
-                DPLog(@"RESIZE REQUEST bundle=%@ path=%@ settingsClass=%@ frame=%@",
-                      record.bundle, updaterName, NSStringFromClass([mutableSettings class]), NSStringFromCGRect(frame));
+                DPLog(@"RESIZE REQUEST bundle=%@ path=%@ settingsClass=%@ geometrySetters=%lu frame=%@",
+                      record.bundle, updaterName, NSStringFromClass([mutableSettings class]),
+                      (unsigned long)geometrySetterCount, NSStringFromCGRect(frame));
             } @catch (NSException *e) {
                 DPLog(@"RESIZE ERROR %@ %@", record.bundle, e.name);
             }
@@ -253,6 +339,11 @@ static void DPQueueResize(DPRecord *record, CGSize size) {
                     ((void(*)(id,SEL))objc_msgSend)(record.presentation, refresh);
                     DPLog(@"PRESENTATION GEOMETRY REFRESH bundle=%@ frame=%@ bounds=%@",
                           record.bundle, NSStringFromCGRect(record.presentation.frame), NSStringFromCGRect(record.presentation.bounds));
+                }
+                SEL geometryDidUpdate = NSSelectorFromString(@"_geometryDidUpdateWithTransitionContext:");
+                if ([record.presentation respondsToSelector:geometryDidUpdate]) {
+                    ((void(*)(id,SEL,id))objc_msgSend)(record.presentation, geometryDidUpdate, nil);
+                    DPLog(@"PRESENTATION GEOMETRY DIDUPDATE bundle=%@", record.bundle);
                 }
                 [record.presentation setNeedsLayout];
                 [record.presentation layoutIfNeeded];
@@ -935,6 +1026,25 @@ static void DPAppPollSceneBounds(NSUInteger remaining) {
         if ([@[@"com.apple.Maps", @"com.google.Maps", @"vn.vietmap.live", @"com.google.ios.youtubemusic"] containsObject:proc]) {
             gAppProbeEnabled = YES;
             DPLog(@"APPSIDE PROBE ACTIVE proc=%@", proc);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __block void (^scan)(NSUInteger);
+                scan = ^(NSUInteger left) {
+                    if (!gAppProbeEnabled || left == 0) return;
+                    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+                        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+                        UIWindowScene *ws = (UIWindowScene *)sc;
+                        NSString *role = ws.session.role ?: @"";
+                        NSString *sid = ws.session.persistentIdentifier ?: @"";
+                        @try {
+                            DPLog(@"APPSIDE-SCAN proc=%@ sid=%@ role=%@ coordBounds=%@ screenBounds=%@ active=%ld",
+                                  proc, sid, role, NSStringFromCGRect(ws.coordinateSpace.bounds),
+                                  NSStringFromCGRect(ws.screen.bounds), (long)ws.activationState);
+                        } @catch (__unused NSException *e) {}
+                    }
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ scan(left - 1); });
+                };
+                scan(30);
+            });
             return;
         }
         if (![proc isEqualToString:@"com.apple.CarPlayApp"]) return;
