@@ -1,4 +1,4 @@
-// DuoPhone V6.31-fullwidth-split — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.32-duodash-layout-polish — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.31-fullwidth-split %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.32-duodash-layout-polish %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -193,7 +193,15 @@ static void DPClientSafeAreaPatch(id mutableSettings, DPRecord *record, BOOL spl
                   record.bundle, key, NSStringFromUIEdgeInsets(current), NSStringFromClass([mutableSettings class]));
         }
         UIEdgeInsets desired = split ? current : record.originalClientSafeArea;
-        if (split) { desired.left = 0.0; desired.right = 0.0; }
+        if (split) {
+            desired.left = 0.0;
+            desired.right = 0.0;
+            // Google Maps still anchors the navigation camera slightly to the right
+            // after the physical CarPlay sidebar inset is reclaimed.  Compensate the
+            // client viewport only (not the host pane) so the vehicle target moves
+            // back toward the visual center.  Keep this app-specific and modest.
+            if ([record.bundle isEqualToString:@"com.google.Maps"]) desired.right = 36.0;
+        }
         if (DPEdgeInsetsSetter(mutableSettings, key, desired)) {
             UIEdgeInsets verify = UIEdgeInsetsZero;
             BOOL readable = DPEdgeInsetsGetter(mutableSettings, key, &verify);
@@ -1305,6 +1313,64 @@ static void DPTemplateHostVerticalReclaimController(UIViewController *vc, CGFloa
     }
 }
 
+
+static void DPTemplateHostPolishNarrowViewTree(UIView *view, NSString *sid, CGFloat paneW, NSUInteger depth) {
+    if (!view || depth > 10 || paneW <= 0.0 || paneW >= 300.0) return;
+    @try {
+        BOOL isYT = [sid containsString:@"com.google.ios.youtubemusic"];
+        NSString *cls = NSStringFromClass(view.class);
+
+        // DuoDash-like visual behavior: the narrow pane should use every horizontal
+        // point.  Several CarPlay template wrapper views keep margins inherited from
+        // the full-width template even after the scene itself has resized.  Clear only
+        // wrapper/container margins; do not touch controls or labels individually.
+        if ([cls isEqualToString:@"UILayoutContainerView"] ||
+            [cls isEqualToString:@"UINavigationTransitionView"] ||
+            [cls isEqualToString:@"UIViewControllerWrapperView"] ||
+            [cls isEqualToString:@"UITransitionView"]) {
+            UIEdgeInsets before = view.layoutMargins;
+            if (fabs(before.left) > 0.5 || fabs(before.right) > 0.5) {
+                view.preservesSuperviewLayoutMargins = NO;
+                view.layoutMargins = UIEdgeInsetsMake(before.top, 0.0, before.bottom, 0.0);
+                [view setNeedsLayout];
+                DPLog(@"NARROW-MARGINS sid=%@ depth=%lu class=%@ before=%@ after=%@ frame=%@",
+                      sid, (unsigned long)depth, cls, NSStringFromUIEdgeInsets(before),
+                      NSStringFromUIEdgeInsets(view.layoutMargins), NSStringFromCGRect(view.frame));
+            }
+        }
+
+        // YouTube Music exposes a vertical scroll indicator in the half-width layout.
+        // DuoDash does not show this chrome.  Hide only the indicator; preserve actual
+        // scrolling and contentSize so interaction remains native.
+        if (isYT && [view isKindOfClass:UIScrollView.class]) {
+            UIScrollView *sv = (UIScrollView *)view;
+            if (sv.showsVerticalScrollIndicator) {
+                sv.showsVerticalScrollIndicator = NO;
+                DPLog(@"YT-SCROLLBAR-HIDE sid=%@ depth=%lu class=%@ frame=%@ content=%@ inset=%@",
+                      sid, (unsigned long)depth, cls, NSStringFromCGRect(sv.frame),
+                      NSStringFromCGSize(sv.contentSize), NSStringFromUIEdgeInsets(sv.contentInset));
+            }
+            // Remove only horizontal content inset inherited from full-screen chrome.
+            UIEdgeInsets ci = sv.contentInset;
+            if (fabs(ci.left) > 0.5 || fabs(ci.right) > 0.5) {
+                UIEdgeInsets desired = UIEdgeInsetsMake(ci.top, 0.0, ci.bottom, 0.0);
+                sv.contentInset = desired;
+                sv.scrollIndicatorInsets = desired;
+                DPLog(@"YT-CONTENT-INSET sid=%@ depth=%lu class=%@ before=%@ after=%@",
+                      sid, (unsigned long)depth, cls, NSStringFromUIEdgeInsets(ci),
+                      NSStringFromUIEdgeInsets(sv.contentInset));
+            }
+        }
+
+        for (UIView *child in view.subviews) {
+            DPTemplateHostPolishNarrowViewTree(child, sid, paneW, depth + 1);
+        }
+    } @catch (NSException *e) {
+        DPLog(@"NARROW-POLISH ERROR sid=%@ depth=%lu class=%@ %@ %@",
+              sid, (unsigned long)depth, view ? NSStringFromClass(view.class) : @"nil", e.name, e.reason);
+    }
+}
+
 static void DPProbeTemplateHostHierarchy(UIWindowScene *ws, NSString *tag) {
     if (!ws) return;
     @try {
@@ -1322,6 +1388,7 @@ static void DPProbeTemplateHostHierarchy(UIWindowScene *ws, NSString *tag) {
             if (root && [NSStringFromClass(root.class) isEqualToString:@"CARTemplateUIApplicationSceneViewController"] &&
                 [sid containsString:@":com.apple.CarPlayTemplateUIHost:"]) {
                 DPTemplateHostVerticalReclaimController(root, ws.coordinateSpace.bounds.size.width, sid, 0);
+                DPTemplateHostPolishNarrowViewTree(root.view, sid, ws.coordinateSpace.bounds.size.width, 0);
             }
             DPLog(@"TEMPLATEHOST-WINDOW tag=%@ sid=%@ idx=%lu class=%@ frame=%@ bounds=%@ root=%@ rootViewFrame=%@",
                   tag, sid, (unsigned long)wi, NSStringFromClass(w.class), NSStringFromCGRect(w.frame),
