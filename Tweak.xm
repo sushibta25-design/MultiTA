@@ -1,4 +1,4 @@
-// DuoPhone V6.29-vertical-reclaim — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.31-fullwidth-split — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.29-vertical-reclaim %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.31-fullwidth-split %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -73,6 +73,9 @@ static NSString *DPBundle(NSString *sid) {
 @property(nonatomic) BOOL geometryChanged;
 @property(nonatomic) NSInteger resizeState; // 0 untested, 1 setter accepted, -1 unsupported
 @property(nonatomic) NSUInteger resizeAttempts;
+@property(nonatomic) BOOL clientSafeAreaCaptured;
+@property(nonatomic) UIEdgeInsets originalClientSafeArea;
+@property(nonatomic,copy) NSString *clientSafeAreaKey;
 @end
 @implementation DPRecord
 @end
@@ -138,6 +141,89 @@ static BOOL DPFrameSetter(id settings, CGRect frame) {
     ((void(*)(id,SEL,CGRect))objc_msgSend)(settings, setter, frame);
     return YES;
 }
+static BOOL DPEdgeInsetsGetter(id obj, NSString *key, UIEdgeInsets *outInsets) {
+    if (!obj || !key.length || !outInsets) return NO;
+    SEL getter = NSSelectorFromString(key);
+    NSMethodSignature *sig = [obj methodSignatureForSelector:getter];
+    if (sig && sig.numberOfArguments == 2 && !strcmp(sig.methodReturnType, @encode(UIEdgeInsets))) {
+        *outInsets = ((UIEdgeInsets(*)(id,SEL))objc_msgSend)(obj, getter);
+        return YES;
+    }
+    @try {
+        id value = [obj valueForKey:key];
+        if ([value isKindOfClass:NSValue.class] && !strcmp([value objCType], @encode(UIEdgeInsets))) {
+            [value getValue:outInsets];
+            return YES;
+        }
+    } @catch (__unused NSException *e) {}
+    return NO;
+}
+
+static BOOL DPEdgeInsetsSetter(id obj, NSString *key, UIEdgeInsets insets) {
+    if (!obj || !key.length) return NO;
+    NSString *setterName = [NSString stringWithFormat:@"set%@%@:",
+                            [[key substringToIndex:1] uppercaseString], [key substringFromIndex:1]];
+    SEL setter = NSSelectorFromString(setterName);
+    NSMethodSignature *sig = [obj methodSignatureForSelector:setter];
+    if (sig && sig.numberOfArguments == 3 && !strcmp(sig.methodReturnType, @encode(void)) &&
+        !strcmp([sig getArgumentTypeAtIndex:2], @encode(UIEdgeInsets))) {
+        ((void(*)(id,SEL,UIEdgeInsets))objc_msgSend)(obj, setter, insets);
+        return YES;
+    }
+    @try {
+        [obj setValue:[NSValue valueWithUIEdgeInsets:insets] forKey:key];
+        return YES;
+    } @catch (__unused NSException *e) {}
+    return NO;
+}
+
+static void DPClientSafeAreaPatch(id mutableSettings, DPRecord *record, BOOL split) {
+    if (!mutableSettings || !record) return;
+    NSArray<NSString *> *keys = record.clientSafeAreaKey.length ?
+        @[record.clientSafeAreaKey] : @[@"safeAreaInsetsPortrait", @"safeAreaInsets"];
+    BOOL touched = NO;
+    for (NSString *key in keys) {
+        UIEdgeInsets current = UIEdgeInsetsZero;
+        if (!DPEdgeInsetsGetter(mutableSettings, key, &current)) continue;
+        if (!record.clientSafeAreaCaptured) {
+            record.clientSafeAreaCaptured = YES;
+            record.originalClientSafeArea = current;
+            record.clientSafeAreaKey = key;
+            DPLog(@"CLIENT-SAFEAREA CAPTURE bundle=%@ key=%@ value=%@ settingsClass=%@",
+                  record.bundle, key, NSStringFromUIEdgeInsets(current), NSStringFromClass([mutableSettings class]));
+        }
+        UIEdgeInsets desired = split ? current : record.originalClientSafeArea;
+        if (split) { desired.left = 0.0; desired.right = 0.0; }
+        if (DPEdgeInsetsSetter(mutableSettings, key, desired)) {
+            UIEdgeInsets verify = UIEdgeInsetsZero;
+            BOOL readable = DPEdgeInsetsGetter(mutableSettings, key, &verify);
+            DPLog(@"CLIENT-SAFEAREA %@ bundle=%@ key=%@ before=%@ desired=%@ after=%@ readable=%d",
+                  split ? @"PATCH" : @"RESTORE", record.bundle, key,
+                  NSStringFromUIEdgeInsets(current), NSStringFromUIEdgeInsets(desired),
+                  readable ? NSStringFromUIEdgeInsets(verify) : @"?", readable);
+            touched = YES;
+            break;
+        }
+    }
+    if (!touched && split) {
+        static NSMutableSet *logged; static dispatch_once_t once; dispatch_once(&once, ^{ logged=[NSMutableSet set]; });
+        NSString *cls = NSStringFromClass([mutableSettings class]);
+        if (![logged containsObject:cls]) {
+            [logged addObject:cls];
+            DPLog(@"CLIENT-SAFEAREA UNSUPPORTED settingsClass=%@ bundle=%@", cls, record.bundle);
+            unsigned int count = 0; Method *methods = class_copyMethodList([mutableSettings class], &count);
+            for (unsigned int i=0;i<count;i++) {
+                NSString *name = NSStringFromSelector(method_getName(methods[i]));
+                NSString *lower = name.lowercaseString;
+                if ([lower containsString:@"safe"] || [lower containsString:@"inset"]) {
+                    DPLog(@"CLIENT-SAFEAREA METHOD class=%@ selector=%@ types=%s", cls, name, method_getTypeEncoding(methods[i]));
+                }
+            }
+            if (methods) free(methods);
+        }
+    }
+}
+
 static BOOL DPHasBlockUpdater(id scene, NSString *selectorName) {
     SEL sel = NSSelectorFromString(selectorName);
     NSMethodSignature *sig = [scene methodSignatureForSelector:sel];
@@ -242,6 +328,7 @@ static void DPRestoreFrame(DPRecord *record) {
         if (generation != gGeneration) return;
         @try {
             BOOL restored = DPFrameSetter(mutableSettings, frame);
+            DPClientSafeAreaPatch(mutableSettings, record, NO);
             DPLog(@"RESIZE RESTORE bundle=%@ path=%@ settingsClass=%@ setter=%d frame=%@",
                   record.bundle, updaterName, NSStringFromClass([mutableSettings class]), restored, NSStringFromCGRect(frame));
         } @catch (NSException *e) { DPLog(@"RESIZE RESTORE ERROR %@ %@", record.bundle, e.name); }
@@ -296,6 +383,11 @@ static void DPQueueResize(DPRecord *record, CGSize size) {
                           record.bundle, updaterName, NSStringFromClass([mutableSettings class]));
                     return;
                 }
+                // V6.30: the TemplateUIHost host safe-area was reclaimed in V6.28, but the
+                // remote CarPlay client can still receive the physical 45pt left safe-area.
+                // That makes map camera centering use (45 + paneWidth)/2, visually shifting
+                // the vehicle ~22.5pt to the right. Patch the client scene safe-area too.
+                DPClientSafeAreaPatch(mutableSettings, record, YES);
                 record.resizeState = 1; record.submittedSize = target;
                 DPLog(@"RESIZE REQUEST bundle=%@ path=%@ settingsClass=%@ frame=%@",
                       record.bundle, updaterName, NSStringFromClass([mutableSettings class]), NSStringFromCGRect(frame));
@@ -315,6 +407,7 @@ static void DPQueueResize(DPRecord *record, CGSize size) {
                 if (!gRunning || generation != gGeneration || !record.valid) return;
                 @try {
                     if (DPFrameSetter(mutableSettings, frame)) {
+                        DPClientSafeAreaPatch(mutableSettings, record, YES);
                         record.resizeState = 1; record.submittedSize = target;
                         DPLog(@"RESIZE FALLBACK bundle=%@ settingsClass=%@ frame=%@",
                               record.bundle, NSStringFromClass([mutableSettings class]), NSStringFromCGRect(frame));
@@ -402,7 +495,7 @@ static void DPFit(DPRecord *record, UIView *pane) {
 }
 static const CGFloat kDividerGrabWidth = 28.0;   // vùng chạm (không hiển thị hết)
 static const CGFloat kDividerVisualWidth = 5.0;  // vạch mảnh thực sự nhìn thấy
-static const CGFloat kPaneGap = 2.0;
+static const CGFloat kPaneGap = 0.0; // V6.31: divider overlays panes; do not throw away horizontal pixels
 static const NSUInteger kMaxCachedApps = 6;      // nhớ tối đa 6 app đã mở trong phiên
 static const CGFloat kPaneCornerRadius = 14.0;   // bo góc kiểu iPhone
 
@@ -629,7 +722,12 @@ static void DPInspect(NSUInteger generation) {
     for (DPRecord *record in gPair) record.restoreBackground = record.nativeBackgrounded;
     gNativeSize = bounds.size;
     gSplitWindow = [[UIWindow alloc] initWithWindowScene:gSession];
-    gSplitWindow.frame = CGRectMake(45, 0, MAX(1, bounds.size.width - 45), bounds.size.height);
+    // V6.31: use the whole CarPlay display width instead of starting after the
+    // physical 45pt sidebar reservation.  The split window sits above Dashboard, so
+    // each pane can receive ~213pt instead of ~191pt.  Client/template safe-area
+    // is patched to zero in split mode, so the old sidebar inset is not subtracted
+    // again inside each app.
+    gSplitWindow.frame = bounds;
     gSplitWindow.windowLevel = UIWindowLevelAlert + 70;
     gSplitWindow.rootViewController = [UIViewController new];
     UIView *root = gSplitWindow.rootViewController.view;
