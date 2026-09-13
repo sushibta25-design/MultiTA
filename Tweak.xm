@@ -1,4 +1,4 @@
-// DuoPhone V6.27-templateuihost-deep-layout — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.28-safearea-reclaim — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.27-templateuihost-deep-layout %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.28-safearea-reclaim %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -1112,6 +1112,49 @@ static void DPTemplateHostDumpControllerMethods(Class cls) {
     if (methods) free(methods);
 }
 
+static void DPTemplateHostApplySafeAreaFix(UIWindowScene *ws, UIWindow *w, UIViewController *root, NSString *sid) {
+    if (!ws || !w || !root || !root.view) return;
+    if (![NSStringFromClass(root.class) isEqualToString:@"CARTemplateUIApplicationSceneViewController"]) return;
+    if (![sid containsString:@":com.apple.CarPlayTemplateUIHost:"]) return;
+
+    @try {
+        CGFloat paneW = ws.coordinateSpace.bounds.size.width;
+        UIEdgeInsets inherited = root.view.safeAreaInsets;
+
+        // CarPlay's physical display reserves ~45 pt for the global sidebar.  When the
+        // application scene is resized to a ~189 pt pane, UIKit keeps propagating that
+        // same physical-display left safe-area into EACH pane.  The result is a second
+        // 45 pt subtraction (189 -> ~144), which is exactly the squeezed content seen in
+        // V6.27.  Reclaim only that inherited left inset for narrow application scenes.
+        if (paneW > 0.0 && paneW < 300.0 && inherited.left > 20.0) {
+            UIEdgeInsets add = root.additionalSafeAreaInsets;
+            CGFloat desiredLeft = -inherited.left;
+            if (fabs(add.left - desiredLeft) > 0.5 || fabs(add.top) > 0.5 || fabs(add.right) > 0.5 || fabs(add.bottom) > 0.5) {
+                root.additionalSafeAreaInsets = UIEdgeInsetsMake(0.0, desiredLeft, 0.0, 0.0);
+                [root.view setNeedsUpdateConstraints];
+                [root.view setNeedsLayout];
+                [root.view layoutIfNeeded];
+                DPLog(@"SAFEAREA-FIX APPLY sid=%@ paneW=%.2f inherited=%@ additional=%@ final=%@",
+                      sid, paneW, NSStringFromUIEdgeInsets(inherited),
+                      NSStringFromUIEdgeInsets(root.additionalSafeAreaInsets),
+                      NSStringFromUIEdgeInsets(root.view.safeAreaInsets));
+            }
+        } else if (paneW >= 300.0) {
+            UIEdgeInsets add = root.additionalSafeAreaInsets;
+            if (fabs(add.top) > 0.5 || fabs(add.left) > 0.5 || fabs(add.bottom) > 0.5 || fabs(add.right) > 0.5) {
+                root.additionalSafeAreaInsets = UIEdgeInsetsZero;
+                [root.view setNeedsUpdateConstraints];
+                [root.view setNeedsLayout];
+                [root.view layoutIfNeeded];
+                DPLog(@"SAFEAREA-FIX RESTORE sid=%@ paneW=%.2f final=%@",
+                      sid, paneW, NSStringFromUIEdgeInsets(root.view.safeAreaInsets));
+            }
+        }
+    } @catch (NSException *e) {
+        DPLog(@"SAFEAREA-FIX ERROR sid=%@ %@ %@", sid, e.name, e.reason);
+    }
+}
+
 static void DPProbeTemplateHostHierarchy(UIWindowScene *ws, NSString *tag) {
     if (!ws) return;
     @try {
@@ -1125,6 +1168,7 @@ static void DPProbeTemplateHostHierarchy(UIWindowScene *ws, NSString *tag) {
         NSUInteger wi = 0;
         for (UIWindow *w in ws.windows) {
             UIViewController *root = w.rootViewController;
+            DPTemplateHostApplySafeAreaFix(ws, w, root, sid);
             DPLog(@"TEMPLATEHOST-WINDOW tag=%@ sid=%@ idx=%lu class=%@ frame=%@ bounds=%@ root=%@ rootViewFrame=%@",
                   tag, sid, (unsigned long)wi, NSStringFromClass(w.class), NSStringFromCGRect(w.frame),
                   NSStringFromCGRect(w.bounds), root ? NSStringFromClass(root.class) : @"nil",
