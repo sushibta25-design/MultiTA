@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 6.34
+Version: 6.35
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.26 - probes CarPlayTemplateUIHost scene/window geometry after host-side pane resize to locate the final renderer layout bottleneck.
+Description: DuoPhone V6.35 - auto-hiding redesigned split controls, clean gap and movable divider, based on V6.34 geometry.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks

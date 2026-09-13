@@ -1,5 +1,6 @@
-// DuoPhone V6.33-dock-overlay-probe — scene-frame resize experiment on uploaded V6.7.
-// V6.34 movable split: invisible drag zone + clean visual gap. No presentation scaling.
+// DuoPhone V6.35-auto-hide-controls — based on V6.34 clean-gap movable split.
+// V6.35: redesigned four controls + auto-hide after 1s; any CarPlay touch reveals them.
+// Divider remains invisible and movable; pane geometry/resizing logic is unchanged.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
 // Saves/restores only the scene frame. Keeps picker, floating exit and app probes.
@@ -22,7 +23,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.33-dock-overlay-probe %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.35-auto-hide-controls %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -88,6 +89,7 @@ static DPControls *gControls;
 static UIWindow *gButtonWindow, *gSplitWindow, *gPickerWindow;
 static UIView *gLeftPane, *gRightPane, *gDivider, *gDockOverlay;
 static UIButton *gButton;
+static NSUInteger gControlsHideToken = 0;
 static NSMutableArray<NSString *> *gPickerBundles;   // snapshot khi mở picker
 static NSString *gPickerFirstPick = nil;             // app đã chọn làm bên trái
 static UILabel *gStatus;
@@ -550,15 +552,69 @@ static void DPDumpDockCandidates(void) {
     DPLog(@"========== DOCK-PROBE END =========");
 }
 
-static UIButton *DPDockButton(NSString *title, SEL action) {
+static UIButton *DPControlButton(NSString *symbolName, NSString *fallback, NSString *label, SEL action) {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    [b setTitle:title forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold];
+    UIImage *image = nil;
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightSemibold];
+        image = [[UIImage systemImageNamed:symbolName] imageWithConfiguration:cfg];
+    }
+    if (image) {
+        [b setImage:image forState:UIControlStateNormal];
+    } else {
+        [b setTitle:fallback forState:UIControlStateNormal];
+        b.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    }
+    b.accessibilityLabel = label;
     b.tintColor = UIColor.whiteColor;
-    b.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.72];
-    b.layer.cornerRadius = 8;
+    b.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.68];
+    b.layer.cornerRadius = 17.0;
+    b.layer.borderWidth = 0.6;
+    b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.22].CGColor;
+    b.layer.shadowColor = UIColor.blackColor.CGColor;
+    b.layer.shadowOpacity = 0.22;
+    b.layer.shadowRadius = 3.0;
+    b.layer.shadowOffset = CGSizeMake(0, 1);
+    b.layer.masksToBounds = NO;
     [b addTarget:gControls action:action forControlEvents:UIControlEventTouchUpInside];
     return b;
+}
+
+static UIButton *DPExitButton(void) {
+    UIButton *b = DPControlButton(@"xmark", @"×", @"Thoát chia màn hình", @selector(stop));
+    b.tag = 9002;
+    return b;
+}
+
+static void DPSetControlsVisible(BOOL visible, BOOL animated) {
+    if (!gSplitWindow) return;
+    UIButton *exitButton = (UIButton *)[gSplitWindow.rootViewController.view viewWithTag:9002];
+    NSArray *targets = @[(id)(gDockOverlay ?: [NSNull null]), (id)(exitButton ?: [NSNull null])];
+    void (^changes)(void) = ^{
+        for (id obj in targets) {
+            if (![obj isKindOfClass:UIView.class]) continue;
+            ((UIView *)obj).alpha = visible ? 1.0 : 0.0;
+        }
+    };
+    for (id obj in targets) if ([obj isKindOfClass:UIView.class]) ((UIView *)obj).userInteractionEnabled = visible;
+    if (animated) [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionBeginFromCurrentState|UIViewAnimationOptionAllowUserInteraction animations:changes completion:nil];
+    else changes();
+}
+
+static void DPScheduleControlsHide(void) {
+    if (!gRunning) return;
+    NSUInteger token = ++gControlsHideToken;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!gRunning || token != gControlsHideToken) return;
+        DPSetControlsVisible(NO, YES);
+        DPLog(@"CONTROLS AUTO-HIDE");
+    });
+}
+
+static void DPRevealControls(void) {
+    if (!gRunning || !gSplitWindow) return;
+    DPSetControlsVisible(YES, YES);
+    DPScheduleControlsHide();
 }
 
 static void DPLayout(void) {
@@ -575,21 +631,19 @@ static void DPLayout(void) {
     // Divider thật chỉ là hit-zone trong suốt để kéo. Khe giữa chính là dấu hiệu thị giác.
     gDivider.frame = CGRectMake(split - kDividerGrabWidth * 0.5, 0, kDividerGrabWidth, height);
 
-    // Nút Thoát: pill nhỏ nổi góc trên phải, không có label tên app.
-    CGFloat pillH = 26.0;
+    // V6.35: all four controls use the same compact circular visual language.
     UIButton *exitButton = (UIButton *)[gSplitWindow.rootViewController.view viewWithTag:9002];
-    exitButton.frame = CGRectMake(width - 68, 6, 60, pillH);
+    exitButton.frame = CGRectMake(width - 42.0, 7.0, 34.0, 34.0);
 
-    // V6.33: floating dock rail overlays the split instead of stealing pane width.
-    // Keep it compact so full-width geometry from V6.31/V6.32 remains untouched.
+    // Three left controls float independently; no bulky white square/rail.
     if (gDockOverlay) {
-        CGFloat dockW = 42.0, dockH = 138.0;
-        gDockOverlay.frame = CGRectMake(4.0, MAX(6.0, (height - dockH) * 0.5), dockW, dockH);
+        CGFloat dockW = 38.0, buttonD = 34.0, gap = 7.0;
+        CGFloat dockH = buttonD * 3.0 + gap * 2.0;
+        gDockOverlay.frame = CGRectMake(5.0, MAX(6.0, (height - dockH) * 0.5), dockW, dockH);
         NSArray *buttons = gDockOverlay.subviews;
-        CGFloat bh = 40.0, gap = 6.0;
         for (NSUInteger i = 0; i < buttons.count; i++) {
             UIView *v = buttons[i];
-            v.frame = CGRectMake(1, 1 + i * (bh + gap), dockW - 2, bh);
+            v.frame = CGRectMake(2.0, i * (buttonD + gap), buttonD, buttonD);
         }
     }
 
@@ -601,6 +655,7 @@ static void DPLayout(void) {
 static void DPStop(NSString *reason) {
     if (!gRunning) return;
     gRunning = NO;
+    ++gControlsHideToken; // cancel pending auto-hide callback
     ++gGeneration; // Cancel delayed creation and inspection from this attempt.
     DPLog(@"STOP %@", reason);
     gSplitWindow.hidden = YES;
@@ -650,6 +705,7 @@ static void DPStop(NSString *reason) {
 - (void)dockHome;
 - (void)dockApps;
 - (void)dividerPan:(UIPanGestureRecognizer *)pan;
+- (void)revealControls;
 @end
 static void DPInspect(NSUInteger generation) {
     if (!gRunning || generation != gGeneration) return;
@@ -672,6 +728,7 @@ static void DPInspect(NSUInteger generation) {
     // These are structural signals, never proof of live rendering/touch.
 }
 @implementation DPControls
+- (void)revealControls { DPRevealControls(); }
 - (void)stop { DPStop(@"user exit"); }
 - (void)dockHome { DPStop(@"dock home"); }
 - (void)dockApps {
@@ -681,6 +738,7 @@ static void DPInspect(NSUInteger generation) {
 
 - (void)dividerPan:(UIPanGestureRecognizer *)pan {
     if (!gRunning || !gSplitWindow || gPair.count != 2) return;
+    DPRevealControls();
     UIView *root = gSplitWindow.rootViewController.view;
     CGFloat width = root.bounds.size.width;
     if (width <= 1.0) return;
@@ -854,13 +912,7 @@ static void DPInspect(NSUInteger generation) {
     gStatus = [UILabel new];
     gStatus.hidden = YES;
 
-    UIButton *exit = [UIButton buttonWithType:UIButtonTypeSystem];
-    exit.tag = 9002;
-    [exit setTitle:@"Thoát" forState:UIControlStateNormal];
-    exit.tintColor = UIColor.whiteColor;
-    exit.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
-    exit.layer.cornerRadius = 6;
-    [exit addTarget:self action:@selector(stop) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *exit = DPExitButton();
     [root addSubview:exit];
     // V6.34: không vẽ thanh divider. Chỉ giữ hit-zone trong suốt phủ quanh khe 6pt.
     gDivider = [UIView new];
@@ -872,18 +924,26 @@ static void DPInspect(NSUInteger generation) {
     [gDivider addGestureRecognizer:dividerPan];
     [root addSubview:gDivider];
 
-    // Floating dock replacement. It does NOT reduce either pane's width.
-    // Home restores native Dashboard; Apps exits split and opens DuoPhone picker; ↔ swaps panes.
+    // V6.35 redesigned controls: Home / Apps / Swap are three dark glass circles.
+    // The fourth matching circle is Exit at top-right.
     gDockOverlay = [UIView new];
-    gDockOverlay.backgroundColor = [UIColor colorWithWhite:0.02 alpha:0.42];
-    gDockOverlay.layer.cornerRadius = 10;
-    gDockOverlay.layer.masksToBounds = YES;
-    [gDockOverlay addSubview:DPDockButton(@"⌂", @selector(dockHome))];
-    [gDockOverlay addSubview:DPDockButton(@"▦", @selector(dockApps))];
-    [gDockOverlay addSubview:DPDockButton(@"↔", @selector(swap))];
+    gDockOverlay.backgroundColor = UIColor.clearColor;
+    gDockOverlay.clipsToBounds = NO;
+    [gDockOverlay addSubview:DPControlButton(@"house.fill", @"⌂", @"Trang chủ", @selector(dockHome))];
+    [gDockOverlay addSubview:DPControlButton(@"square.grid.2x2.fill", @"▦", @"Chọn ứng dụng", @selector(dockApps))];
+    [gDockOverlay addSubview:DPControlButton(@"arrow.left.arrow.right", @"↔", @"Đổi vị trí hai ứng dụng", @selector(swap))];
     [root addSubview:gDockOverlay];
 
-    DPLayout(); gSplitWindow.hidden = NO; DPRefreshButton();
+    // Any tap in the split surface reveals both left dock and right exit without
+    // cancelling the app's own touch. UIApplication sendEvent: below is an extra
+    // safety net for touches routed through hosted scenes.
+    UITapGestureRecognizer *revealTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(revealControls)];
+    revealTap.cancelsTouchesInView = NO;
+    revealTap.delaysTouchesBegan = NO;
+    revealTap.delaysTouchesEnded = NO;
+    [root addGestureRecognizer:revealTap];
+
+    DPLayout(); gSplitWindow.hidden = NO; DPSetControlsVisible(YES, NO); DPScheduleControlsHide(); DPRefreshButton();
     DPDumpDockCandidates();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ if (gRunning) DPDumpDockCandidates(); });
     DPLog(@"START MOVABLE SPLIT ratio=%.3f gap=%.1f left=%@ right=%@ — unscaled scene resize", gSplitRatio, kPaneGap, left.bundle, right.bundle);
@@ -1553,6 +1613,20 @@ static void DPTemplateHostScan(NSUInteger remaining) {
 }
 
 %hook UIApplication
+- (void)sendEvent:(UIEvent *)event {
+    // CarPlayApp owns the split window. Reveal controls on the first touch anywhere
+    // on the CarPlay surface, while preserving normal event delivery.
+    if (gRunning && gSplitWindow && event.type == UIEventTypeTouches) {
+        for (UITouch *touch in event.allTouches) {
+            if (touch.phase == UITouchPhaseBegan) {
+                DPRevealControls();
+                break;
+            }
+        }
+    }
+    %orig;
+}
+
 - (void)_connectUIScene:(UIScene *)scene withOptions:(id)options {
     if (gAppProbeEnabled && [scene isKindOfClass:UIWindowScene.class]) {
         @try {
