@@ -1,5 +1,5 @@
 // DuoPhone V6.33-dock-overlay-probe — scene-frame resize experiment on uploaded V6.7.
-// Fixed equal panes; divider is visual only. No presentation scaling.
+// V6.34 movable split: invisible drag zone + clean visual gap. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
 // Saves/restores only the scene frame. Keeps picker, floating exit and app probes.
@@ -504,9 +504,11 @@ static void DPFit(DPRecord *record, UIView *pane) {
     view.center = CGPointMake(CGRectGetMinX(pane.bounds) + source.width * 0.5,
                               CGRectGetMinY(pane.bounds) + source.height * 0.5);
 }
-static const CGFloat kDividerGrabWidth = 28.0;   // vùng chạm (không hiển thị hết)
-static const CGFloat kDividerVisualWidth = 5.0;  // vạch mảnh thực sự nhìn thấy
-static const CGFloat kPaneGap = 0.0; // V6.31: divider overlays panes; do not throw away horizontal pixels
+static const CGFloat kDividerGrabWidth = 34.0;   // vùng chạm trong suốt quanh khe
+static const CGFloat kPaneGap = 6.0;              // tổng khoảng hở nhìn thấy giữa hai main
+static const CGFloat kMinSplitRatio = 0.30;       // tránh pane quá hẹp
+static const CGFloat kMaxSplitRatio = 0.70;
+static CGFloat gSplitRatio = 0.50;
 static const NSUInteger kMaxCachedApps = 6;      // nhớ tối đa 6 app đã mở trong phiên
 static const CGFloat kPaneCornerRadius = 14.0;   // bo góc kiểu iPhone
 
@@ -562,17 +564,16 @@ static UIButton *DPDockButton(NSString *title, SEL action) {
 static void DPLayout(void) {
     if (!gSplitWindow) return;
     CGFloat width = gSplitWindow.bounds.size.width, height = gSplitWindow.bounds.size.height;
-    CGFloat split = width * 0.5;
+    CGFloat ratio = MIN(kMaxSplitRatio, MAX(kMinSplitRatio, gSplitRatio));
+    CGFloat split = round(width * ratio * 3.0) / 3.0; // khớp lưới 3x của màn CarPlay hiện tại
+    CGFloat halfGap = kPaneGap * 0.5;
 
-    // Không còn chừa dải trên cùng: 2 pane chiếm full chiều cao CarPlay.
-    gLeftPane.frame = CGRectMake(0, 0, MAX(1, split - kPaneGap), height);
-    gRightPane.frame = CGRectMake(split + kPaneGap, 0, MAX(1, width - split - kPaneGap), height);
+    // Hai pane full chiều cao; ở giữa chỉ để một khe đen sạch, không còn vạch divider.
+    gLeftPane.frame = CGRectMake(0, 0, MAX(1, split - halfGap), height);
+    gRightPane.frame = CGRectMake(split + halfGap, 0, MAX(1, width - split - halfGap), height);
 
-    // Vùng CHẠM của divider vẫn rộng (dễ kéo), nhưng chỉ vẽ 1 vạch mảnh ở giữa.
+    // Divider thật chỉ là hit-zone trong suốt để kéo. Khe giữa chính là dấu hiệu thị giác.
     gDivider.frame = CGRectMake(split - kDividerGrabWidth * 0.5, 0, kDividerGrabWidth, height);
-    UIView *bar = [gDivider viewWithTag:9001];
-    bar.frame = CGRectMake((kDividerGrabWidth - kDividerVisualWidth) * 0.5, 0,
-                           kDividerVisualWidth, height);
 
     // Nút Thoát: pill nhỏ nổi góc trên phải, không có label tên app.
     CGFloat pillH = 26.0;
@@ -648,6 +649,7 @@ static void DPStop(NSString *reason) {
 - (void)swap;
 - (void)dockHome;
 - (void)dockApps;
+- (void)dividerPan:(UIPanGestureRecognizer *)pan;
 @end
 static void DPInspect(NSUInteger generation) {
     if (!gRunning || generation != gGeneration) return;
@@ -675,6 +677,32 @@ static void DPInspect(NSUInteger generation) {
 - (void)dockApps {
     DPStop(@"dock apps");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [gControls openPicker]; });
+}
+
+- (void)dividerPan:(UIPanGestureRecognizer *)pan {
+    if (!gRunning || !gSplitWindow || gPair.count != 2) return;
+    UIView *root = gSplitWindow.rootViewController.view;
+    CGFloat width = root.bounds.size.width;
+    if (width <= 1.0) return;
+
+    CGPoint point = [pan locationInView:root];
+    CGFloat ratio = point.x / width;
+    ratio = MIN(kMaxSplitRatio, MAX(kMinSplitRatio, ratio));
+
+    if (pan.state == UIGestureRecognizerStateBegan ||
+        pan.state == UIGestureRecognizerStateChanged) {
+        gSplitRatio = ratio;
+        DPLayout();
+    }
+    if (pan.state == UIGestureRecognizerStateEnded ||
+        pan.state == UIGestureRecognizerStateCancelled ||
+        pan.state == UIGestureRecognizerStateFailed) {
+        gSplitRatio = ratio;
+        DPLayout();
+        DPLog(@"DIVIDER MOVE END ratio=%.4f left=%.1f right=%.1f gap=%.1f",
+              gSplitRatio, gLeftPane.bounds.size.width, gRightPane.bounds.size.width, kPaneGap);
+        DPInspect(gGeneration);
+    }
 }
 
 - (void)closePicker {
@@ -834,16 +862,14 @@ static void DPInspect(NSUInteger generation) {
     exit.layer.cornerRadius = 6;
     [exit addTarget:self action:@selector(stop) forControlEvents:UIControlEventTouchUpInside];
     [root addSubview:exit];
-    // Vùng CHẠM trong suốt (rộng, dễ bấm trúng) chứa 1 vạch mảnh làm dấu hiệu thị giác.
+    // V6.34: không vẽ thanh divider. Chỉ giữ hit-zone trong suốt phủ quanh khe 6pt.
     gDivider = [UIView new];
     gDivider.backgroundColor = UIColor.clearColor;
-    UIView *dividerBar = [UIView new];
-    dividerBar.tag = 9001;
-    dividerBar.backgroundColor = [UIColor colorWithWhite:0.85 alpha:0.85];
-    dividerBar.layer.cornerRadius = kDividerVisualWidth * 0.5;
-    dividerBar.userInteractionEnabled = NO;
-    [gDivider addSubview:dividerBar];
-    gDivider.userInteractionEnabled = NO; // Fixed separator, no pan or swap gestures.
+    gDivider.userInteractionEnabled = YES;
+    UIPanGestureRecognizer *dividerPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dividerPan:)];
+    dividerPan.minimumNumberOfTouches = 1;
+    dividerPan.maximumNumberOfTouches = 1;
+    [gDivider addGestureRecognizer:dividerPan];
     [root addSubview:gDivider];
 
     // Floating dock replacement. It does NOT reduce either pane's width.
@@ -860,7 +886,7 @@ static void DPInspect(NSUInteger generation) {
     DPLayout(); gSplitWindow.hidden = NO; DPRefreshButton();
     DPDumpDockCandidates();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ if (gRunning) DPDumpDockCandidates(); });
-    DPLog(@"START FIXED 50/50 left=%@ right=%@ — unscaled scene resize", left.bundle, right.bundle);
+    DPLog(@"START MOVABLE SPLIT ratio=%.3f gap=%.1f left=%@ right=%@ — unscaled scene resize", gSplitRatio, kPaneGap, left.bundle, right.bundle);
     gOwnCall = YES;
     @try {
         for (DPRecord *record in gPair) {
