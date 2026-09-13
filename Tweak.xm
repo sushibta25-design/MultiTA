@@ -1,4 +1,4 @@
-// DuoPhone V6.28-safearea-reclaim — scene-frame resize experiment on uploaded V6.7.
+// DuoPhone V6.29-vertical-reclaim — scene-frame resize experiment on uploaded V6.7.
 // Fixed equal panes; divider is visual only. No presentation scaling.
 // Every app requests its pane width and full content height.
 // Native template layout still requires device validation.
@@ -22,7 +22,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.28-safearea-reclaim %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.29-vertical-reclaim %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -1155,6 +1155,58 @@ static void DPTemplateHostApplySafeAreaFix(UIWindowScene *ws, UIWindow *w, UIVie
     }
 }
 
+
+static void DPTemplateHostVerticalReclaimController(UIViewController *vc, CGFloat paneW, NSString *sid, NSUInteger depth) {
+    if (!vc || depth > 8) return;
+    @try {
+        UIView *view = vc.viewIfLoaded;
+        if (view && view.window) {
+            UIEdgeInsets safe = view.safeAreaInsets;
+            UIEdgeInsets add = vc.additionalSafeAreaInsets;
+
+            // V6.28 fixed the duplicate 45pt LEFT safe-area, but the template content
+            // still keeps a ~44pt TOP safe-area for the full-screen CarPlay chrome.
+            // In a narrow half-pane this leaves the real content around 180pt tall
+            // (e.g. y=52..232) even though the scene itself is 240pt tall.  Reclaim only
+            // the inherited TOP inset on nested content controllers.  The actual
+            // CPSNavigationBar / UITabBar remains on top, so background/main content can
+            // extend behind it instead of being vertically squeezed.
+            if (paneW > 0.0 && paneW < 300.0) {
+                if (safe.top > 20.0 && add.top > -1.0) {
+                    CGFloat desiredTop = -safe.top;
+                    vc.additionalSafeAreaInsets = UIEdgeInsetsMake(desiredTop, add.left, add.bottom, add.right);
+                    [view setNeedsUpdateConstraints];
+                    [view setNeedsLayout];
+                    [view layoutIfNeeded];
+                    DPLog(@"VERTICAL-RECLAIM APPLY sid=%@ depth=%lu vc=%@ inherited=%@ additional=%@ final=%@ frame=%@",
+                          sid, (unsigned long)depth, NSStringFromClass(vc.class), NSStringFromUIEdgeInsets(safe),
+                          NSStringFromUIEdgeInsets(vc.additionalSafeAreaInsets), NSStringFromUIEdgeInsets(view.safeAreaInsets),
+                          NSStringFromCGRect(view.frame));
+                }
+            } else if (paneW >= 300.0 && add.top < -0.5) {
+                vc.additionalSafeAreaInsets = UIEdgeInsetsMake(0.0, add.left, add.bottom, add.right);
+                [view setNeedsUpdateConstraints];
+                [view setNeedsLayout];
+                [view layoutIfNeeded];
+                DPLog(@"VERTICAL-RECLAIM RESTORE sid=%@ depth=%lu vc=%@ final=%@ frame=%@",
+                      sid, (unsigned long)depth, NSStringFromClass(vc.class),
+                      NSStringFromUIEdgeInsets(view.safeAreaInsets), NSStringFromCGRect(view.frame));
+            }
+        }
+
+        for (UIViewController *child in vc.childViewControllers) {
+            DPTemplateHostVerticalReclaimController(child, paneW, sid, depth + 1);
+        }
+        UIViewController *presented = vc.presentedViewController;
+        if (presented && presented.presentingViewController == vc) {
+            DPTemplateHostVerticalReclaimController(presented, paneW, sid, depth + 1);
+        }
+    } @catch (NSException *e) {
+        DPLog(@"VERTICAL-RECLAIM ERROR sid=%@ depth=%lu vc=%@ %@ %@",
+              sid, (unsigned long)depth, vc ? NSStringFromClass(vc.class) : @"nil", e.name, e.reason);
+    }
+}
+
 static void DPProbeTemplateHostHierarchy(UIWindowScene *ws, NSString *tag) {
     if (!ws) return;
     @try {
@@ -1169,6 +1221,10 @@ static void DPProbeTemplateHostHierarchy(UIWindowScene *ws, NSString *tag) {
         for (UIWindow *w in ws.windows) {
             UIViewController *root = w.rootViewController;
             DPTemplateHostApplySafeAreaFix(ws, w, root, sid);
+            if (root && [NSStringFromClass(root.class) isEqualToString:@"CARTemplateUIApplicationSceneViewController"] &&
+                [sid containsString:@":com.apple.CarPlayTemplateUIHost:"]) {
+                DPTemplateHostVerticalReclaimController(root, ws.coordinateSpace.bounds.size.width, sid, 0);
+            }
             DPLog(@"TEMPLATEHOST-WINDOW tag=%@ sid=%@ idx=%lu class=%@ frame=%@ bounds=%@ root=%@ rootViewFrame=%@",
                   tag, sid, (unsigned long)wi, NSStringFromClass(w.class), NSStringFromCGRect(w.frame),
                   NSStringFromCGRect(w.bounds), root ? NSStringFromClass(root.class) : @"nil",
