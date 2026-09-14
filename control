@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 6.35
+Version: 6.36
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.35 - auto-hiding redesigned split controls, clean gap and movable divider, based on V6.34 geometry.
+Description: DuoPhone V6.36 - scene-prime lifecycle gate for Google Maps + Vietmap, based on golden V6.35 traces; V6.35 split UI/geometry retained.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
