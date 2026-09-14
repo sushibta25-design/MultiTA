@@ -29,6 +29,12 @@ jobs:
           curl -L -o /tmp/iPhoneOS16.5.sdk.tar.xz https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
           tar -xf /tmp/iPhoneOS16.5.sdk.tar.xz -C $THEOS/sdks
 
+      - name: Generate V6.36 scene-prime source
+        run: |
+          python3 patch_scene_prime.py
+          grep -q "V6.36-scene-prime" TweakV636.xm
+          grep -q "SCENE-PRIME BEGIN" TweakV636.xm
+
       - name: Build package
         run: |
           make clean package FINALPACKAGE=1
