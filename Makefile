@@ -7,7 +7,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = DuoPhone
 
 DuoPhone_FILES = TweakV636.xm
-DuoPhone_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
+DuoPhone_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-error=arc-retain-cycles
 DuoPhone_FRAMEWORKS = UIKit Foundation QuartzCore
 
 include $(THEOS_MAKE_PATH)/tweak.mk
