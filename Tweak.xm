@@ -1,4 +1,12 @@
-// DuoPhone V6.35-auto-hide-controls — based on V6.34 clean-gap movable split.
+// V6.40: bo han co che tu dong ghep 2 app cung luc (V6.35 mo ca 2 lien
+// tiep, V6.36-scene-prime dung ca chuoi 4 buoc "golden trace") — ca 2 deu
+// tang so lan goi foreground lien tiep, tang rui ro app nay day app kia
+// xuong nen. Thay bang: bam "Chia" -> hien 2 pane trong ngay -> nguoi dung
+// TU CHAM chon app cho tung pane rieng biet, co khoang nghi that giua 2 lan
+// chon. Sau khi ben thu 2 on dinh, tu kiem tra lai ben dau tien (content-
+// check) va cuu ho bang tao lai presentation neu bi day xuong nen — khong
+// goi foreground lai (tranh vong day nhau qua lai).
+// DuoPhone V6.40-independent-slot-pick — based on V6.34 clean-gap movable split.
 // V6.35: redesigned four controls + auto-hide after 1s; any CarPlay touch reveals them.
 // Divider remains invisible and movable; pane geometry/resizing logic is unchanged.
 // Every app requests its pane width and full content height.
@@ -23,7 +31,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.35-auto-hide-controls %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.40-independent-slot-pick %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -77,6 +85,8 @@ static NSString *DPBundle(NSString *sid) {
 @property(nonatomic) BOOL clientSafeAreaCaptured;
 @property(nonatomic) UIEdgeInsets originalClientSafeArea;
 @property(nonatomic,copy) NSString *clientSafeAreaKey;
+@property(nonatomic) NSUInteger v636BlankChecks;
+@property(nonatomic) BOOL v636RecoveryAttempted;
 @end
 @implementation DPRecord
 @end
@@ -91,7 +101,8 @@ static UIView *gLeftPane, *gRightPane, *gDivider, *gDockOverlay;
 static UIButton *gButton;
 static NSUInteger gControlsHideToken = 0;
 static NSMutableArray<NSString *> *gPickerBundles;   // snapshot khi mở picker
-static NSString *gPickerFirstPick = nil;             // app đã chọn làm bên trái
+static NSInteger gPickerSlot = -1;                   // 0 = trái, 1 = phải, -1 = picker đang đóng
+static UIButton *gLeftSlotButton, *gRightSlotButton; // "chạm để chọn app" phủ lên từng pane trống
 static UILabel *gStatus;
 static __weak UIWindowScene *gSession;
 static BOOL gRunning, gOwnCall;
@@ -125,6 +136,99 @@ static BOOL DPSceneActive(DPRecord *record) {
     SEL selector = NSSelectorFromString(@"isActive");
     return [scene respondsToSelector:selector] && ((BOOL(*)(id,SEL))objc_msgSend)(scene, selector);
 }
+
+// V6.40: chụp nhanh view thành ảnh nhỏ, kiểm tra có phải toàn 1 màu (thường
+// là đen — chưa có nội dung thật) hay không. drawViewHierarchyInRect: dùng
+// được cả với nội dung cross-process (cùng cơ chế App Switcher chụp preview
+// app khác), nên áp dụng được cho presentation view remote-hosted ở đây.
+static BOOL DPSnapshotAppearsBlank(UIView *view) {
+    if (!view || view.bounds.size.width < 2 || view.bounds.size.height < 2) return YES;
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.opaque = YES;
+    format.scale = 1.0;
+    CGSize thumbSize = CGSizeMake(16, 16);
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:thumbSize format:format];
+
+    UIImage *snapshot = [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextRef cg = ctx.CGContext;
+        CGSize src = view.bounds.size;
+        CGContextScaleCTM(cg, thumbSize.width / MAX(src.width, 1), thumbSize.height / MAX(src.height, 1));
+        [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
+    }];
+
+    CGImageRef cgImage = snapshot.CGImage;
+    if (!cgImage) return YES;
+
+    CFDataRef rawData = CGDataProviderCopyData(CGImageGetDataProvider(cgImage));
+    if (!rawData) return YES;
+    const unsigned char *bytes = CFDataGetBytePtr(rawData);
+    NSUInteger length = (NSUInteger)CFDataGetLength(rawData);
+    NSUInteger bytesPerPixel = CGImageGetBitsPerPixel(cgImage) / 8;
+
+    BOOL uniform = YES;
+    if (bytesPerPixel >= 3 && length >= bytesPerPixel) {
+        unsigned char r0 = bytes[0], g0 = bytes[1], b0 = bytes[2];
+        for (NSUInteger off = 0; off + bytesPerPixel <= length; off += bytesPerPixel) {
+            int dr = (int)bytes[off] - r0, dg = (int)bytes[off + 1] - g0, db = (int)bytes[off + 2] - b0;
+            if (abs(dr) > 6 || abs(dg) > 6 || abs(db) > 6) { uniform = NO; break; }
+        }
+    }
+    CFRelease(rawData);
+    return uniform;
+}
+
+// V6.40: nếu presentation của 1 record vẫn trống sau vài giây, tạo lại
+// presentation MỚI (invalidate cái cũ + xin cái mới với identifier khác).
+// Không dùng foreground lại — vì gọi foreground cho bên KIA (bước vừa xảy
+// ra ngay trước khi hàm này được lên lịch) rất có thể chính là thứ đã đẩy
+// bên NÀY xuống nền; gọi foreground thêm 1 lần nữa cho bên này chỉ có nguy
+// cơ đẩy ngược lại bên kia, không giải quyết được gì.
+static void DPRecreatePresentationIfBlank(DPRecord *record, UIView *pane, NSUInteger generation) {
+    if (!gRunning || generation != gGeneration || !record.valid || !record.presentation) return;
+    if (record.v636RecoveryAttempted) return;
+
+    BOOL blank = DPSnapshotAppearsBlank(record.presentation);
+    if (!blank) { DPLog(@"CONTENT-CHECK bundle=%@ blank=0 (ổn)", record.bundle); return; }
+
+    record.v636BlankChecks++;
+    DPLog(@"CONTENT-CHECK bundle=%@ blank=1 lần thứ=%lu", record.bundle, (unsigned long)record.v636BlankChecks);
+    if (record.v636BlankChecks < 3) return; // vài lần trước khi cứu hộ, tránh phản ứng quá sớm
+
+    record.v636RecoveryAttempted = YES;
+    DPLog(@"RECREATE bundle=%@ — nội dung vẫn trống sau khi bên kia được gắn, tạo lại presentation", record.bundle);
+
+    BOOL previousOwnCall = gOwnCall;
+    gOwnCall = YES;
+    @try {
+        SEL invalidate = NSSelectorFromString(@"invalidatePresentationViewForIdentifier:");
+        if (record.presentationID && [record.controller respondsToSelector:invalidate])
+            ((void(*)(id,SEL,id))objc_msgSend)(record.controller, invalidate, record.presentationID);
+
+        [record.presentation removeFromSuperview];
+        record.presentation = nil;
+
+        NSString *newID = [record.presentationID stringByAppendingString:@".r"];
+        SEL create = NSSelectorFromString(@"presentationViewWithIdentifier:");
+        id result = [record.controller respondsToSelector:create]
+            ? ((id(*)(id,SEL,id))objc_msgSend)(record.controller, create, newID)
+            : nil;
+
+        if ([result isKindOfClass:UIView.class] && !((UIView *)result).superview) {
+            record.presentationID = newID;
+            record.presentation = result;
+            [pane addSubview:result];
+            DPLayout();
+            DPLog(@"RECREATE bundle=%@ OK identifier=%@", record.bundle, newID);
+        } else {
+            DPLog(@"RECREATE bundle=%@ FAIL result=%@", record.bundle, result ?: @"nil");
+        }
+    } @catch (NSException *e) {
+        DPLog(@"RECREATE bundle=%@ EXCEPTION %@ %@", record.bundle, e.name, e.reason);
+    }
+    gOwnCall = previousOwnCall;
+}
+
 static NSUInteger DPLayers(UIView *view, NSUInteger depth) {
     if (!view || depth > 12) return 0;
     NSUInteger count = [NSStringFromClass(view.class) containsString:@"_UISceneLayerHostContainerView"] ? 1 : 0;
@@ -261,7 +365,7 @@ static NSString *DPObjSummary(id obj) {
 // identifier/description, thay vì dựa vào controller đang hook. Cách này tránh
 // cross-fire giữa Maps và YouTube Music đã thấy trong log V6.24.
 static DPRecord *DPRecordForSceneObject(id scene) {
-    if (!scene || !gRunning || gPair.count != 2) return nil;
+    if (!scene || !gRunning || gPair.count == 0) return nil;
     NSString *desc = nil;
     @try { desc = [scene description]; } @catch (__unused NSException *e) {}
     if (!desc) desc = @"";
@@ -278,7 +382,7 @@ static DPRecord *DPRecordForSceneObject(id scene) {
     return nil;
 }
 static DPRecord *DPRecordForPresentation(id presentation) {
-    if (!presentation || !gRunning || gPair.count != 2) return nil;
+    if (!presentation || !gRunning || gPair.count == 0) return nil;
     for (DPRecord *record in gPair) if (record.valid && record.presentation == presentation) return record;
     return nil;
 }
@@ -627,6 +731,8 @@ static void DPLayout(void) {
     // Hai pane full chiều cao; ở giữa chỉ để một khe đen sạch, không còn vạch divider.
     gLeftPane.frame = CGRectMake(0, 0, MAX(1, split - halfGap), height);
     gRightPane.frame = CGRectMake(split + halfGap, 0, MAX(1, width - split - halfGap), height);
+    gLeftSlotButton.frame = gLeftPane.bounds;
+    gRightSlotButton.frame = gRightPane.bounds;
 
     // Divider thật chỉ là hit-zone trong suốt để kéo. Khe giữa chính là dấu hiệu thị giác.
     gDivider.frame = CGRectMake(split - kDividerGrabWidth * 0.5, 0, kDividerGrabWidth, height);
@@ -647,10 +753,8 @@ static void DPLayout(void) {
         }
     }
 
-    if (gPair.count == 2) {
-        DPFit(gPair[0], gLeftPane);
-        DPFit(gPair[1], gRightPane);
-    }
+    if (gPair.count > 0) DPFit(gPair[0], gLeftPane);
+    if (gPair.count > 1) DPFit(gPair[1], gRightPane);
 }
 static void DPStop(NSString *reason) {
     if (!gRunning) return;
@@ -669,6 +773,8 @@ static void DPStop(NSString *reason) {
         record.resizeState = 0;
         record.resizeAttempts = 0;
         record.submittedSize = CGSizeZero;
+        record.v636BlankChecks = 0;
+        record.v636RecoveryAttempted = NO;
         [record.presentation removeFromSuperview];
         record.presentation = nil;
         if (!record.valid) { record.presentationID = nil; continue; }
@@ -693,13 +799,16 @@ static void DPStop(NSString *reason) {
     gOwnCall = previousOwnCall;
     gPair = nil;
     gSplitWindow = nil; gLeftPane = nil; gRightPane = nil; gDivider = nil; gDockOverlay = nil; gStatus = nil;
+    gLeftSlotButton = nil; gRightSlotButton = nil;
+    gPickerSlot = -1;
     DPRefreshButton();
 }
 @interface DPControls : NSObject
-- (void)openPicker;
+- (void)startEmptySplit;
+- (void)tapLeftSlot;
+- (void)tapRightSlot;
 - (void)closePicker;
 - (void)pickerTap:(UIButton *)sender;
-- (void)startWithLeftBundle:(NSString *)leftBundle rightBundle:(NSString *)rightBundle;
 - (void)stop;
 - (void)swap;
 - (void)dockHome;
@@ -733,7 +842,7 @@ static void DPInspect(NSUInteger generation) {
 - (void)dockHome { DPStop(@"dock home"); }
 - (void)dockApps {
     DPStop(@"dock apps");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [gControls openPicker]; });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [gControls startEmptySplit]; });
 }
 
 - (void)dividerPan:(UIPanGestureRecognizer *)pan {
@@ -767,26 +876,130 @@ static void DPInspect(NSUInteger generation) {
     gPickerWindow.hidden = YES;
     gPickerWindow = nil;
     gPickerBundles = nil;
-    gPickerFirstPick = nil;
+    gPickerSlot = -1;
 }
 
-// Danh sách các app còn "sống" (controller vẫn hợp lệ), mới mở gần đây lên trước.
-- (NSArray<NSString *> *)validCachedBundlesNewestFirst {
+// Danh sách các app còn "sống" (controller vẫn hợp lệ), mới mở gần đây lên
+// trước. Loại bỏ bundle đã gắn ở PANE CÒN LẠI để không chọn trùng 1 app cho
+// cả 2 bên.
+- (NSArray<NSString *> *)validCachedBundlesExcluding:(NSString *)excludeBundle {
     NSMutableArray<NSString *> *result = [NSMutableArray array];
-    for (NSString *bundle in gOrder.reverseObjectEnumerator)
-        if (gRecords[bundle].valid) [result addObject:bundle];
+    for (NSString *bundle in gOrder.reverseObjectEnumerator) {
+        if (!gRecords[bundle].valid) continue;
+        if (excludeBundle && [bundle isEqualToString:excludeBundle]) continue;
+        [result addObject:bundle];
+    }
     return result;
 }
 
-// Nút "Chia" giờ mở 1 danh sách các app đã mở trong phiên lái xe (tối đa 6,
-// không chỉ 2 app cuối cùng) — chạm chọn app trái, chạm tiếp chọn app phải,
-// không cần quay lại Trang chủ mở lại app mỗi lần muốn đổi cặp chia màn.
-- (void)openPicker {
-    if (gRunning || !gSession) return;
-    [self closePicker];
+// V6.40: MỞ SPLIT RỖNG NGAY LẬP TỨC — 2 pane trống, mỗi pane có nút riêng
+// "chạm để chọn app". Không còn cố tự động hoá việc mở cả 2 app cùng lúc
+// bằng 1 kịch bản dựng sẵn (đã chứng minh dễ vỡ vì mỗi lần foreground là 1
+// lần rủi ro app kia bị đẩy xuống nền). Thay vào đó: người dùng chọn TỪNG
+// bên một cách tự nhiên, có thời gian nghỉ thật giữa 2 lần chọn — hệ thống
+// có cơ hội ổn định app vừa foreground trước khi app thứ 2 vào.
+- (void)startEmptySplit {
+    if (gRunning || !gSession || DPDashboard() != gSession) return;
+    CGRect bounds = gSession.coordinateSpace.bounds;
+    if (bounds.size.width <= 109 || bounds.size.height <= 60) return;
 
-    NSArray<NSString *> *bundles = [self validCachedBundlesNewestFirst];
-    if (bundles.count < 2) return;
+    gPair = @[];
+    gRunning = YES;
+    NSUInteger generation = ++gGeneration;
+    gNativeSize = bounds.size;
+
+    gSplitWindow = [[UIWindow alloc] initWithWindowScene:gSession];
+    gSplitWindow.frame = bounds;
+    gSplitWindow.windowLevel = UIWindowLevelAlert + 70;
+    gSplitWindow.rootViewController = [UIViewController new];
+    UIView *root = gSplitWindow.rootViewController.view;
+    root.backgroundColor = UIColor.blackColor; // chỉ lấp khe 2pt giữa 2 pane
+    gLeftPane = [UIView new]; gRightPane = [UIView new];
+    gLeftPane.clipsToBounds = YES; gRightPane.clipsToBounds = YES;
+    for (UIView *pane in @[gLeftPane, gRightPane]) {
+        pane.layer.cornerRadius = kPaneCornerRadius;
+        if (@available(iOS 13.0, *)) pane.layer.cornerCurve = kCACornerCurveContinuous;
+        pane.layer.masksToBounds = YES;
+    }
+    gLeftPane.backgroundColor = UIColor.blackColor;
+    gRightPane.backgroundColor = UIColor.blackColor;
+    [root addSubview:gLeftPane]; [root addSubview:gRightPane];
+
+    gStatus = [UILabel new];
+    gStatus.hidden = YES;
+
+    UIButton *exit = DPExitButton();
+    [root addSubview:exit];
+    gDivider = [UIView new];
+    gDivider.backgroundColor = UIColor.clearColor;
+    gDivider.userInteractionEnabled = YES;
+    UIPanGestureRecognizer *dividerPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dividerPan:)];
+    dividerPan.minimumNumberOfTouches = 1;
+    dividerPan.maximumNumberOfTouches = 1;
+    [gDivider addGestureRecognizer:dividerPan];
+    [root addSubview:gDivider];
+
+    gDockOverlay = [UIView new];
+    gDockOverlay.backgroundColor = UIColor.clearColor;
+    gDockOverlay.clipsToBounds = NO;
+    [gDockOverlay addSubview:DPControlButton(@"house.fill", @"⌂", @"Trang chủ", @selector(dockHome))];
+    [gDockOverlay addSubview:DPControlButton(@"square.grid.2x2.fill", @"▦", @"Chọn lại từ đầu", @selector(dockApps))];
+    [gDockOverlay addSubview:DPControlButton(@"arrow.left.arrow.right", @"↔", @"Đổi vị trí hai ứng dụng", @selector(swap))];
+    [root addSubview:gDockOverlay];
+
+    UITapGestureRecognizer *revealTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(revealControls)];
+    revealTap.cancelsTouchesInView = NO;
+    revealTap.delaysTouchesBegan = NO;
+    revealTap.delaysTouchesEnded = NO;
+    [root addGestureRecognizer:revealTap];
+
+    // 2 nút chọn app, mỗi cái phủ trọn 1 pane — đây là điểm khác biệt chính
+    // so với luồng cũ: không app nào được gắn tự động, người dùng chủ động
+    // chạm để mở picker cho TỪNG bên.
+    gLeftSlotButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [gLeftSlotButton setTitle:@"Chạm để chọn app" forState:UIControlStateNormal];
+    gLeftSlotButton.tintColor = UIColor.whiteColor;
+    gLeftSlotButton.titleLabel.font = [UIFont systemFontOfSize:14];
+    gLeftSlotButton.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1.0];
+    [gLeftSlotButton addTarget:self action:@selector(tapLeftSlot) forControlEvents:UIControlEventTouchUpInside];
+    [gLeftPane addSubview:gLeftSlotButton];
+
+    gRightSlotButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [gRightSlotButton setTitle:@"Chạm để chọn app" forState:UIControlStateNormal];
+    gRightSlotButton.tintColor = UIColor.whiteColor;
+    gRightSlotButton.titleLabel.font = [UIFont systemFontOfSize:14];
+    gRightSlotButton.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1.0];
+    [gRightSlotButton addTarget:self action:@selector(tapRightSlot) forControlEvents:UIControlEventTouchUpInside];
+    [gRightPane addSubview:gRightSlotButton];
+
+    DPLayout(); gSplitWindow.hidden = NO; DPSetControlsVisible(YES, NO); DPScheduleControlsHide(); DPRefreshButton();
+    DPDumpDockCandidates();
+    DPLog(@"START EMPTY SPLIT ratio=%.3f gap=%.1f generation=%lu", gSplitRatio, kPaneGap, (unsigned long)generation);
+
+    // Mở luôn picker cho pane trái để đỡ phải chạm thêm 1 lần — pane phải
+    // vẫn cần chạm thủ công (đây chính là "khoảng nghỉ thật" giữa 2 lần
+    // foreground, điểm mấu chốt của cách làm mới).
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (gRunning && generation == gGeneration) [self openPickerForSlot:0];
+    });
+}
+
+- (void)tapLeftSlot { [self openPickerForSlot:0]; }
+- (void)tapRightSlot { [self openPickerForSlot:1]; }
+
+// Picker CHỌN 1 LẦN — chạm là gắn ngay, không cần bước "chọn 2 rồi mới chạy"
+// như trước. Loại bỏ bundle đã gắn ở pane còn lại khỏi danh sách.
+- (void)openPickerForSlot:(NSInteger)slot {
+    if (!gRunning || !gSession || (slot != 0 && slot != 1)) return;
+    [self closePicker];
+    gPickerSlot = slot;
+
+    NSString *otherBundle = nil;
+    if (slot == 0 && gPair.count > 1) otherBundle = gPair[1].bundle;
+    if (slot == 1 && gPair.count > 0) otherBundle = gPair[0].bundle;
+
+    NSArray<NSString *> *bundles = [self validCachedBundlesExcluding:otherBundle];
+    if (bundles.count == 0) { gPickerSlot = -1; return; }
 
     gPickerBundles = [bundles mutableCopy];
 
@@ -799,7 +1012,7 @@ static void DPInspect(NSUInteger generation) {
     root.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.92];
 
     UILabel *hint = [UILabel new];
-    hint.text = @"Chạm chọn app bên trái, rồi chạm app bên phải";
+    hint.text = slot == 0 ? @"Chọn app cho bên trái" : @"Chọn app cho bên phải";
     hint.textColor = UIColor.whiteColor;
     hint.font = [UIFont systemFontOfSize:12];
     hint.textAlignment = NSTextAlignmentCenter;
@@ -835,18 +1048,9 @@ static void DPInspect(NSUInteger generation) {
 - (void)pickerTap:(UIButton *)sender {
     if (!gPickerBundles || sender.tag < 0 || (NSUInteger)sender.tag >= gPickerBundles.count) return;
     NSString *bundle = gPickerBundles[(NSUInteger)sender.tag];
-
-    if (!gPickerFirstPick) {
-        gPickerFirstPick = bundle;
-        sender.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:0.9 alpha:0.95];
-        return;
-    }
-
-    if ([gPickerFirstPick isEqualToString:bundle]) return; // không cho chọn trùng 1 app cho cả 2 bên
-
-    NSString *left = gPickerFirstPick, *right = bundle;
+    NSInteger slot = gPickerSlot;
     [self closePicker];
-    [self startWithLeftBundle:left rightBundle:right];
+    if (slot == 0 || slot == 1) [self attachBundle:bundle toSlot:slot];
 }
 
 - (void)swap {
@@ -858,139 +1062,108 @@ static void DPInspect(NSUInteger generation) {
     DPInspect(gGeneration);
     DPLog(@"SWAP left=%@ right=%@", gPair[0].bundle, gPair[1].bundle);
 }
-- (void)startWithLeftBundle:(NSString *)leftBundle rightBundle:(NSString *)rightBundle {
-    if (gRunning || !gSession || DPDashboard() != gSession) return;
-    DPRecord *left = gRecords[leftBundle], *right = gRecords[rightBundle];
-    if (!left.valid || !right.valid) {
-        DPLog(@"REFUSE invalid record left=%@(%d) right=%@(%d)",
-              leftBundle, left.valid, rightBundle, right.valid);
+
+// V6.40: gắn ĐÚNG 1 app vào ĐÚNG 1 slot — foreground 1 lần, chờ presentation
+// thật render xong, rồi hiện lên. Nếu đây là bên THỨ HAI được gắn, sau khi
+// nó ổn định, tự kiểm tra lại bên ĐẦU TIÊN xem có bị đẩy xuống nền không
+// (foreground app thứ 2 có thể làm việc đó) — cứu hộ bằng cách tạo lại
+// presentation, KHÔNG gọi foreground lần nữa (tránh vòng đẩy nhau qua lại).
+- (void)attachBundle:(NSString *)bundle toSlot:(NSInteger)slot {
+    if (!gRunning || !gSession || DPDashboard() != gSession) return;
+    if (slot != 0 && slot != 1) return;
+    DPRecord *record = gRecords[bundle];
+    if (!record.valid) { DPLog(@"REFUSE invalid record bundle=%@(%d)", bundle, record.valid); return; }
+
+    DPRecord *other = nil;
+    if (slot == 0 && gPair.count > 1) other = gPair[1];
+    if (slot == 1 && gPair.count > 0) other = gPair[0];
+    if (other && other.controller == record.controller) {
+        DPLog(@"REFUSE same controller=%p bundle=%@(cat=%@) other=%@(cat=%@) — có thể 2 app cùng 1 vai trò CarPlay (vd Navigation)",
+              (__bridge void *)record.controller, bundle, record.category, other.bundle, other.category);
         return;
     }
-    DPDumpConnectedScenes(@"start-attempt");
-    if (left.controller == right.controller) {
-        // Nếu 2 bundle khác nhau nhưng CÙNG 1 controller vật lý, nhiều khả năng
-        // CarPlay xếp cả 2 vào chung 1 "vai trò" (ví dụ Navigation) và chỉ cho
-        // 1 app thuộc vai trò đó active tại 1 thời điểm — giới hạn tầng OS,
-        // không phải lỗi ở logic ghép cặp của tweak.
-        DPLog(@"REFUSE same controller=%p left=%@(cat=%@) right=%@(cat=%@) — có thể 2 app cùng 1 vai trò CarPlay (vd Navigation)",
-              (__bridge void *)left.controller, leftBundle, left.category, rightBundle, right.category);
-        return;
+    if (other) {
+        NSString *recordDisplay = [record.sid componentsSeparatedByString:@":"].firstObject;
+        NSString *otherDisplay = [other.sid componentsSeparatedByString:@":"].firstObject;
+        if (![recordDisplay isEqual:otherDisplay]) { DPLog(@"REFUSE mismatched displays"); return; }
     }
-    NSString *leftDisplay = [left.sid componentsSeparatedByString:@":"].firstObject;
-    NSString *rightDisplay = [right.sid componentsSeparatedByString:@":"].firstObject;
-    if (![leftDisplay isEqual:rightDisplay]) { DPLog(@"REFUSE mismatched displays"); return; }
-    CGRect bounds = gSession.coordinateSpace.bounds;
-    if (bounds.size.width <= 109 || bounds.size.height <= 60) return;
-    gPair = @[left, right];
-    gRunning = YES;
-    NSUInteger generation = ++gGeneration;
-    for (DPRecord *record in gPair) record.restoreBackground = record.nativeBackgrounded;
-    gNativeSize = bounds.size;
-    gSplitWindow = [[UIWindow alloc] initWithWindowScene:gSession];
-    // V6.31: use the whole CarPlay display width instead of starting after the
-    // physical 45pt sidebar reservation.  The split window sits above Dashboard, so
-    // each pane can receive ~213pt instead of ~191pt.  Client/template safe-area
-    // is patched to zero in split mode, so the old sidebar inset is not subtracted
-    // again inside each app.
-    gSplitWindow.frame = bounds;
-    gSplitWindow.windowLevel = UIWindowLevelAlert + 70;
-    gSplitWindow.rootViewController = [UIViewController new];
-    UIView *root = gSplitWindow.rootViewController.view;
-    root.backgroundColor = UIColor.blackColor; // chỉ lấp khe 2pt giữa 2 pane
-    gLeftPane = [UIView new]; gRightPane = [UIView new];
-    gLeftPane.clipsToBounds = YES; gRightPane.clipsToBounds = YES;
-    for (UIView *pane in @[gLeftPane, gRightPane]) {
-        pane.layer.cornerRadius = kPaneCornerRadius;
-        if (@available(iOS 13.0, *)) pane.layer.cornerCurve = kCACornerCurveContinuous;
-        pane.layer.masksToBounds = YES;
-    }
-    gLeftPane.backgroundColor = UIColor.blackColor;
-    gRightPane.backgroundColor = UIColor.blackColor;
-    [root addSubview:gLeftPane]; [root addSubview:gRightPane];
 
-    // Không hiện tên app nữa theo yêu cầu — chỉ còn 1 pill Thoát nhỏ.
-    gStatus = [UILabel new];
-    gStatus.hidden = YES;
+    NSUInteger generation = gGeneration;
+    record.restoreBackground = record.nativeBackgrounded;
+    UIButton *placeholder = (slot == 0) ? gLeftSlotButton : gRightSlotButton;
+    UIView *pane = (slot == 0) ? gLeftPane : gRightPane;
 
-    UIButton *exit = DPExitButton();
-    [root addSubview:exit];
-    // V6.34: không vẽ thanh divider. Chỉ giữ hit-zone trong suốt phủ quanh khe 6pt.
-    gDivider = [UIView new];
-    gDivider.backgroundColor = UIColor.clearColor;
-    gDivider.userInteractionEnabled = YES;
-    UIPanGestureRecognizer *dividerPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dividerPan:)];
-    dividerPan.minimumNumberOfTouches = 1;
-    dividerPan.maximumNumberOfTouches = 1;
-    [gDivider addGestureRecognizer:dividerPan];
-    [root addSubview:gDivider];
-
-    // V6.35 redesigned controls: Home / Apps / Swap are three dark glass circles.
-    // The fourth matching circle is Exit at top-right.
-    gDockOverlay = [UIView new];
-    gDockOverlay.backgroundColor = UIColor.clearColor;
-    gDockOverlay.clipsToBounds = NO;
-    [gDockOverlay addSubview:DPControlButton(@"house.fill", @"⌂", @"Trang chủ", @selector(dockHome))];
-    [gDockOverlay addSubview:DPControlButton(@"square.grid.2x2.fill", @"▦", @"Chọn ứng dụng", @selector(dockApps))];
-    [gDockOverlay addSubview:DPControlButton(@"arrow.left.arrow.right", @"↔", @"Đổi vị trí hai ứng dụng", @selector(swap))];
-    [root addSubview:gDockOverlay];
-
-    // Any tap in the split surface reveals both left dock and right exit without
-    // cancelling the app's own touch. UIApplication sendEvent: below is an extra
-    // safety net for touches routed through hosted scenes.
-    UITapGestureRecognizer *revealTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(revealControls)];
-    revealTap.cancelsTouchesInView = NO;
-    revealTap.delaysTouchesBegan = NO;
-    revealTap.delaysTouchesEnded = NO;
-    [root addGestureRecognizer:revealTap];
-
-    DPLayout(); gSplitWindow.hidden = NO; DPSetControlsVisible(YES, NO); DPScheduleControlsHide(); DPRefreshButton();
-    DPDumpDockCandidates();
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ if (gRunning) DPDumpDockCandidates(); });
-    DPLog(@"START MOVABLE SPLIT ratio=%.3f gap=%.1f left=%@ right=%@ — unscaled scene resize", gSplitRatio, kPaneGap, left.bundle, right.bundle);
+    DPLog(@"ATTACH slot=%ld bundle=%@ — unscaled scene resize", (long)slot, bundle);
+    BOOL previousOwnCall = gOwnCall;
     gOwnCall = YES;
     @try {
-        for (DPRecord *record in gPair) {
-            SEL foreground = NSSelectorFromString(@"foregroundSceneWithSettings:completion:");
-            if (![record.controller respondsToSelector:foreground])
-                @throw [NSException exceptionWithName:@"MissingForegroundAPI" reason:record.bundle userInfo:nil];
-            ((void(*)(id,SEL,id,id))objc_msgSend)(record.controller, foreground, record.settings, nil);
-            if (!gRunning || generation != gGeneration) { gOwnCall = NO; return; }
-            record.nativeBackgrounded = NO;
-        }
+        SEL foreground = NSSelectorFromString(@"foregroundSceneWithSettings:completion:");
+        if (![record.controller respondsToSelector:foreground])
+            @throw [NSException exceptionWithName:@"MissingForegroundAPI" reason:record.bundle userInfo:nil];
+        ((void(*)(id,SEL,id,id))objc_msgSend)(record.controller, foreground, record.settings, nil);
+        record.nativeBackgrounded = NO;
     } @catch (NSException *e) {
-        DPLog(@"FOREGROUND ERROR %@", e.name); gOwnCall = NO; DPStop(@"foreground error"); return;
+        DPLog(@"FOREGROUND ERROR %@", e.name); gOwnCall = previousOwnCall; return;
     }
-    gOwnCall = NO;
+    gOwnCall = previousOwnCall;
+
+    // Gắn vào đúng slot trong gPair — chèn theo thứ tự để index 0 luôn là
+    // trái, index 1 luôn là phải, bất kể slot nào được điền trước.
+    NSMutableArray<DPRecord *> *newPair = [NSMutableArray array];
+    if (slot == 0) {
+        [newPair addObject:record];
+        if (gPair.count > 1) [newPair addObject:gPair[1]];
+    } else {
+        if (gPair.count > 0) [newPair addObject:gPair[0]];
+        else { gOwnCall = previousOwnCall; DPLog(@"ATTACH REFUSE right trước left chưa hỗ trợ trong bản này"); return; }
+        [newPair addObject:record];
+    }
+    gPair = newPair;
+
+    placeholder.hidden = YES;
+    [placeholder removeFromSuperview];
+    if (slot == 0) gLeftSlotButton = nil; else gRightSlotButton = nil;
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        if (!gRunning || generation != gGeneration) return;
+        if (!gRunning || generation != gGeneration || !record.valid) return;
+        BOOL previousOwnCall2 = gOwnCall;
         gOwnCall = YES;
         @try {
-            for (NSUInteger index = 0; index < gPair.count; index++) {
-                DPRecord *record = gPair[index];
-                record.presentationID = [NSString stringWithFormat:@"com.sushibta.duophone.%lu.%lu", (unsigned long)generation, (unsigned long)index];
-                SEL create = NSSelectorFromString(@"presentationViewWithIdentifier:");
-                if (![record.controller respondsToSelector:create])
-                    @throw [NSException exceptionWithName:@"MissingPresentationAPI" reason:record.bundle userInfo:nil];
-                id result = ((id(*)(id,SEL,id))objc_msgSend)(record.controller, create, record.presentationID);
-                if (!gRunning || generation != gGeneration) { gOwnCall = NO; return; }
-                // A fresh owned view is required. Never steal native attached UI.
-                if (![result isKindOfClass:UIView.class] || ((UIView *)result).superview)
-                    @throw [NSException exceptionWithName:@"PresentationNotIndependent" reason:record.bundle userInfo:nil];
-                record.presentation = result;
-                [(index == 0 ? gLeftPane : gRightPane) addSubview:result];
-                DPLog(@"CREATE bundle=%@ identifier=%@ class=%@ layers=%lu", record.bundle,
-                      record.presentationID, NSStringFromClass([result class]), (unsigned long)DPLayers(result,0));
-                DPProbeTemplateSurface(record);
-            }
+            record.presentationID = [NSString stringWithFormat:@"com.sushibta.duophone.%lu.%ld", (unsigned long)generation, (long)slot];
+            SEL create = NSSelectorFromString(@"presentationViewWithIdentifier:");
+            if (![record.controller respondsToSelector:create])
+                @throw [NSException exceptionWithName:@"MissingPresentationAPI" reason:record.bundle userInfo:nil];
+            id result = ((id(*)(id,SEL,id))objc_msgSend)(record.controller, create, record.presentationID);
+            if (!gRunning || generation != gGeneration) { gOwnCall = previousOwnCall2; return; }
+            if (![result isKindOfClass:UIView.class] || ((UIView *)result).superview)
+                @throw [NSException exceptionWithName:@"PresentationNotIndependent" reason:record.bundle userInfo:nil];
+            record.presentation = result;
+            [pane addSubview:result];
+            DPLog(@"CREATE bundle=%@ identifier=%@ class=%@ layers=%lu", record.bundle,
+                  record.presentationID, NSStringFromClass([result class]), (unsigned long)DPLayers(result,0));
+            DPProbeTemplateSurface(record);
             DPLayout();
         } @catch (NSException *e) {
-            DPLog(@"PRESENTATION ERROR %@", e.name); gOwnCall = NO; DPStop(@"presentation error"); return;
+            DPLog(@"PRESENTATION ERROR %@", e.name);
+            gOwnCall = previousOwnCall2;
+            return;
         }
-        gOwnCall = NO;
+        gOwnCall = previousOwnCall2;
+
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
+
+        // Đây là bên THỨ HAI: kiểm tra lại bên ĐẦU TIÊN sau vài giây, phòng
+        // trường hợp bị đẩy xuống nền bởi chính lệnh foreground vừa gọi ở trên.
+        if (gPair.count == 2) {
+            DPRecord *checkRecord = (slot == 0) ? gPair[1] : gPair[0];
+            UIView *checkPane = (slot == 0) ? gRightPane : gLeftPane;
+            for (NSUInteger i = 1; i <= 4; i++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.5 + i) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    DPRecreatePresentationIfBlank(checkRecord, checkPane, generation);
+                });
+            }
+        }
     });
 }
 @end
@@ -1146,7 +1319,7 @@ static void DPTick(void) {
         [gButton setTitle:@"Chia" forState:UIControlStateNormal];
         gButton.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.9];
         gButton.layer.cornerRadius = 8;
-        [gButton addTarget:gControls action:@selector(openPicker) forControlEvents:UIControlEventTouchUpInside];
+        [gButton addTarget:gControls action:@selector(startEmptySplit) forControlEvents:UIControlEventTouchUpInside];
         [gButtonWindow.rootViewController.view addSubview:gButton];
     }
     if (session) {

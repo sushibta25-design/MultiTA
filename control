@@ -1,8 +1,8 @@
 Package: com.sushibta.duophone
 Name: DuoPhone
-Version: 6.36.0
+Version: 6.40.0
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.36 - skips redundant foreground calls for an already-active app to avoid the two apps stealing exclusive active state from each other; recreates a persistently blank presentation once via invalidate+re-create.
+Description: DuoPhone V6.40 - replaces auto multi-app foreground sequencing with independent per-pane app picking (tap left, pick; tap right, pick), plus post-attach blank-content recovery for the first pane.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
