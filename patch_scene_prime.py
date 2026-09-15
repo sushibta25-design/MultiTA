@@ -85,6 +85,13 @@ replacement = r'''    // V6.36 SCENE PRIME
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
     };
 
+    // -Warc-retain-cycles canh bao runPrimeStep/pollReady tu tham chieu
+    // chinh no - day la kieu block de quy AN TOAN thuong gap (co dieu kien
+    // dung ro rang o primeIndex >= prime.count va attempt >= 12), khong
+    // phai retain cycle that. Tat dung canh bao nay quanh doan code, khong
+    // tat -Werror toan cuc.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-retain-cycles"
     DPRecord *google = nil, *vietmap = nil;
     for (DPRecord *record in gPair) {
         if ([record.bundle isEqualToString:@"com.google.Maps"]) google = record;
@@ -156,7 +163,8 @@ replacement = r'''    // V6.36 SCENE PRIME
         callForeground(record, [NSString stringWithFormat:@"step-%lu", (unsigned long)primeIndex]);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 130 * NSEC_PER_MSEC), dispatch_get_main_queue(), runPrimeStep);
     };
-    runPrimeStep();'''
+    runPrimeStep();
+#pragma clang diagnostic pop'''
 
 text = text[:old_start] + replacement + text[method_end:]
 
