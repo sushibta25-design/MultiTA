@@ -1,4 +1,4 @@
-// DuoPhone V6.36-skip-foreground-recreate — based on V6.34 clean-gap movable split.
+// DuoPhone V6.35-auto-hide-controls — based on V6.34 clean-gap movable split.
 // V6.35: redesigned four controls + auto-hide after 1s; any CarPlay touch reveals them.
 // Divider remains invisible and movable; pane geometry/resizing logic is unchanged.
 // Every app requests its pane width and full content height.
@@ -23,7 +23,7 @@ static void DPLog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.36-skip-foreground-recreate %@\n", getpid(), message]
+    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.35-auto-hide-controls %@\n", getpid(), message]
                    dataUsingEncoding:NSUTF8StringEncoding];
     @synchronized (DPTrace) {
         NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
@@ -77,8 +77,6 @@ static NSString *DPBundle(NSString *sid) {
 @property(nonatomic) BOOL clientSafeAreaCaptured;
 @property(nonatomic) UIEdgeInsets originalClientSafeArea;
 @property(nonatomic,copy) NSString *clientSafeAreaKey;
-@property(nonatomic) NSUInteger v636BlankChecks;
-@property(nonatomic) BOOL v636RecoveryAttempted;
 @end
 @implementation DPRecord
 @end
@@ -127,98 +125,6 @@ static BOOL DPSceneActive(DPRecord *record) {
     SEL selector = NSSelectorFromString(@"isActive");
     return [scene respondsToSelector:selector] && ((BOOL(*)(id,SEL))objc_msgSend)(scene, selector);
 }
-
-// V6.36: chụp nhanh view thành ảnh nhỏ, kiểm tra có phải toàn 1 màu (thường
-// là đen — chưa có nội dung thật) hay không. drawViewHierarchyInRect: dùng
-// được cả với nội dung cross-process (cùng cơ chế App Switcher chụp preview
-// app khác), nên áp dụng được cho presentation view remote-hosted ở đây.
-static BOOL DPV636SnapshotAppearsBlank(UIView *view) {
-    if (!view || view.bounds.size.width < 2 || view.bounds.size.height < 2) return YES;
-
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-    format.opaque = YES;
-    format.scale = 1.0;
-    CGSize thumbSize = CGSizeMake(16, 16);
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:thumbSize format:format];
-
-    UIImage *snapshot = [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        CGContextRef cg = ctx.CGContext;
-        CGSize src = view.bounds.size;
-        CGContextScaleCTM(cg, thumbSize.width / MAX(src.width, 1), thumbSize.height / MAX(src.height, 1));
-        [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
-    }];
-
-    CGImageRef cgImage = snapshot.CGImage;
-    if (!cgImage) return YES;
-
-    CFDataRef rawData = CGDataProviderCopyData(CGImageGetDataProvider(cgImage));
-    if (!rawData) return YES;
-    const unsigned char *bytes = CFDataGetBytePtr(rawData);
-    NSUInteger length = (NSUInteger)CFDataGetLength(rawData);
-    NSUInteger bytesPerPixel = CGImageGetBitsPerPixel(cgImage) / 8;
-
-    BOOL uniform = YES;
-    if (bytesPerPixel >= 3 && length >= bytesPerPixel) {
-        unsigned char r0 = bytes[0], g0 = bytes[1], b0 = bytes[2];
-        for (NSUInteger off = 0; off + bytesPerPixel <= length; off += bytesPerPixel) {
-            int dr = (int)bytes[off] - r0, dg = (int)bytes[off + 1] - g0, db = (int)bytes[off + 2] - b0;
-            if (abs(dr) > 6 || abs(dg) > 6 || abs(db) > 6) { uniform = NO; break; }
-        }
-    }
-    CFRelease(rawData);
-    return uniform;
-}
-
-// V6.36: nếu presentation của 1 record vẫn trống sau vài giây, tạo lại
-// presentation MỚI (invalidate cái cũ + xin cái mới với identifier khác) —
-// đây là cặp API "làm mới nội dung" tự nhiên nhất trong bản này (không có
-// bước resize từ xa riêng để gửi lại như nhánh V6.79, vì bản này chỉ
-// transform/scale cục bộ, không đụng geometry thật của app nguồn).
-static void DPV636RecreatePresentationIfBlank(DPRecord *record, UIView *pane, NSUInteger generation) {
-    if (!gRunning || generation != gGeneration || !record.valid || !record.presentation) return;
-    if (record.v636RecoveryAttempted) return;
-
-    BOOL blank = DPV636SnapshotAppearsBlank(record.presentation);
-    if (!blank) { DPLog(@"V636 CONTENT-CHECK bundle=%@ blank=0 (ổn)", record.bundle); return; }
-
-    record.v636BlankChecks++;
-    DPLog(@"V636 CONTENT-CHECK bundle=%@ blank=1 lần thứ=%lu", record.bundle, (unsigned long)record.v636BlankChecks);
-    if (record.v636BlankChecks < 3) return; // cho vài lần kiểm tra trước khi cứu hộ, tránh phản ứng quá sớm
-
-    record.v636RecoveryAttempted = YES;
-    DPLog(@"V636 RECREATE bundle=%@ — nội dung vẫn trống, tạo lại presentation mới", record.bundle);
-
-    BOOL previousOwnCall = gOwnCall;
-    gOwnCall = YES;
-    @try {
-        SEL invalidate = NSSelectorFromString(@"invalidatePresentationViewForIdentifier:");
-        if (record.presentationID && [record.controller respondsToSelector:invalidate])
-            ((void(*)(id,SEL,id))objc_msgSend)(record.controller, invalidate, record.presentationID);
-
-        [record.presentation removeFromSuperview];
-        record.presentation = nil;
-
-        NSString *newID = [record.presentationID stringByAppendingString:@".r"];
-        SEL create = NSSelectorFromString(@"presentationViewWithIdentifier:");
-        id result = [record.controller respondsToSelector:create]
-            ? ((id(*)(id,SEL,id))objc_msgSend)(record.controller, create, newID)
-            : nil;
-
-        if ([result isKindOfClass:UIView.class] && !((UIView *)result).superview) {
-            record.presentationID = newID;
-            record.presentation = result;
-            [pane addSubview:result];
-            DPLayout();
-            DPLog(@"V636 RECREATE bundle=%@ OK identifier=%@", record.bundle, newID);
-        } else {
-            DPLog(@"V636 RECREATE bundle=%@ FAIL result=%@", record.bundle, result ?: @"nil");
-        }
-    } @catch (NSException *e) {
-        DPLog(@"V636 RECREATE bundle=%@ EXCEPTION %@ %@", record.bundle, e.name, e.reason);
-    }
-    gOwnCall = previousOwnCall;
-}
-
 static NSUInteger DPLayers(UIView *view, NSUInteger depth) {
     if (!view || depth > 12) return 0;
     NSUInteger count = [NSStringFromClass(view.class) containsString:@"_UISceneLayerHostContainerView"] ? 1 : 0;
@@ -763,8 +669,6 @@ static void DPStop(NSString *reason) {
         record.resizeState = 0;
         record.resizeAttempts = 0;
         record.submittedSize = CGSizeZero;
-        record.v636BlankChecks = 0;
-        record.v636RecoveryAttempted = NO;
         [record.presentation removeFromSuperview];
         record.presentation = nil;
         if (!record.valid) { record.presentationID = nil; continue; }
@@ -1046,18 +950,6 @@ static void DPInspect(NSUInteger generation) {
     gOwnCall = YES;
     @try {
         for (DPRecord *record in gPair) {
-            // V6.36: nếu record NÀY đã sẵn đang active (app còn lại vừa mở
-            // trước đó, còn cái này là cái user đang xem ngay trước khi bấm
-            // Chia), gọi foreground thêm 1 lần nữa cho NÓ là thừa và có thể
-            // gây xáo trộn không cần thiết (mỗi lần foreground là 1 lần yêu
-            // cầu hệ thống coi app đó là "app chính", trong khi nó vốn đã
-            // là vậy rồi). Chỉ foreground app đang KHÔNG active — đây chính
-            // là app cần được "gọi" vào để tham gia màn chia.
-            if (DPSceneActive(record)) {
-                DPLog(@"START SKIP-FOREGROUND bundle=%@ — đã sẵn active, không gọi lại", record.bundle);
-                record.nativeBackgrounded = NO;
-                continue;
-            }
             SEL foreground = NSSelectorFromString(@"foregroundSceneWithSettings:completion:");
             if (![record.controller respondsToSelector:foreground])
                 @throw [NSException exceptionWithName:@"MissingForegroundAPI" reason:record.bundle userInfo:nil];
@@ -1095,17 +987,6 @@ static void DPInspect(NSUInteger generation) {
             DPLog(@"PRESENTATION ERROR %@", e.name); gOwnCall = NO; DPStop(@"presentation error"); return;
         }
         gOwnCall = NO;
-        // V6.36: kiểm tra nội dung thật ở 1.5s / 2.5s / 3.5s sau khi tạo
-        // presentation — 3 lần trống liên tiếp mới cứu hộ (recreate), tránh
-        // phản ứng quá sớm lúc app còn đang tải bản đồ bình thường.
-        for (NSUInteger i = 1; i <= 4; i++) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.5 + i) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (!gRunning || generation != gGeneration) return;
-                for (NSUInteger index = 0; index < gPair.count; index++) {
-                    DPV636RecreatePresentationIfBlank(gPair[index], index == 0 ? gLeftPane : gRightPane, generation);
-                }
-            });
-        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
