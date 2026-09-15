@@ -37,6 +37,12 @@ jobs:
           grep -q "WAIT-RECAPTURE begin" TweakV636.xm
           grep -q "SCENE-PRIME BEGIN" TweakV636.xm
 
+      - name: Use patched source for build
+        run: |
+          cp TweakV636.xm Tweak.xm
+          echo "Đã copy TweakV636.xm đè lên Tweak.xm — Makefile biên dịch Tweak.xm nên bắt buộc phải có bước này."
+          grep -c "SCENE-PRIME BEGIN" Tweak.xm
+
       - name: Build package
         run: |
           make clean package FINALPACKAGE=1
