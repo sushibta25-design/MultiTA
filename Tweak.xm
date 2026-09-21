@@ -231,7 +231,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
         choose[i] = TAButton(i == 0 ? @"Chọn app trái" : @"Chọn app phải", @selector(pick:));
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half - 78, bounds.size.height - 68, 156, 30)];
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half - 78, bounds.size.height / 2 - 49, 156, 30)];
     floatingActions.backgroundColor = UIColor.clearColor;
     NSArray *titles = @[@"Chia", @"Log", @"Thoát"];
     NSArray *actions = @[@"restartSplit", @"snapshot", @"stop"];
@@ -242,7 +242,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     }
     floatingActions.hidden = YES; [root addSubview:floatingActions];
     UIButton *menu = TAButton(@"•••", @selector(toggleActions));
-    menu.frame = CGRectMake(half - 16, bounds.size.height - 34, 32, 30);
+    menu.frame = CGRectMake(half - 16, bounds.size.height / 2 - 15, 32, 30);
     menu.layer.cornerRadius = 10; menu.accessibilityLabel = @"Tác vụ TAduo";
     [root addSubview:menu];
     buttonWindow.hidden = YES; splitWindow.hidden = NO;
