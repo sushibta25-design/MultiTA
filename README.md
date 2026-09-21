@@ -1,4 +1,4 @@
-# TAduo 0.19.0 — thử nghiệm 50/50
+# TAduo 0.20.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
 
@@ -129,3 +129,9 @@ Use bold system glyphs and visible Vietnamese labels (Đổi / Thu / Thoát) on 
 Serialize foreground/presentation attachment when the companion is still attaching (bounded 6s queue with generation/request cancellation), including pair resume and rapid picker choices. This removes overlapping TAduo activation requests; it does not establish the root cause of black rendered content or detect first rendered frames.
 
 Long-press Đổi offers Tải lại ô trái/phải and logs before rebuilding only that slot. Selecting its current app again also retries it. Initial rendering readiness still uses scene geometry; device validation and logs are required for black panes. Built from 0.17 (047f604a), without 0.18 launcher fallback or Dock diagnostics. Native Dock integration remains unverified; the previously reported missing-launcher issue from 0.17 is not claimed fixed.
+
+## 0.20 — launcher recovery on the 0.19 branch
+
+Keep the rounded panes, 6pt gap, labeled divider controls, per-pane retry and serialized attachment from 0.19. Add only an independent cyan/orange split launcher when the native Dock button is not visible/hittable; place the fallback at top-right and hide it during split. No captured apps required.
+
+Add bounded Dock hierarchy diagnostics at connection and on long-press launcher / manual log. Reset old Dock modifications on display change. Native Dock placement remains pending device evidence; the top-right launcher is a temporary recovery path. No new changes to scene activation or resize.
