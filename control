@@ -1,9 +1,10 @@
-Package: com.sushibta.duophone
-Name: DuoPhone
-Version: 6.40.0
+Package: com.sushibta.taduo
+Name: TAduo
+Version: 0.21.0
 Architecture: iphoneos-arm64
-Description: DuoPhone V6.40 - replaces auto multi-app foreground sequencing with independent per-pane app picking (tap left, pick; tap right, pick), plus post-attach blank-content recovery for the first pane.
+Description: Experimental fixed 50/50 CarPlay scenes with native geometry requests.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
-Depends: mobilesubstrate
+Depends: mobilesubstrate, firmware (>= 15.0)
+Conflicts: com.sushibta.duophone
