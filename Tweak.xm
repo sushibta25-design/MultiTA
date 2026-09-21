@@ -1,1859 +1,1329 @@
-// V6.40: bo han co che tu dong ghep 2 app cung luc (V6.35 mo ca 2 lien
-// tiep, V6.36-scene-prime dung ca chuoi 4 buoc "golden trace") — ca 2 deu
-// tang so lan goi foreground lien tiep, tang rui ro app nay day app kia
-// xuong nen. Thay bang: bam "Chia" -> hien 2 pane trong ngay -> nguoi dung
-// TU CHAM chon app cho tung pane rieng biet, co khoang nghi that giua 2 lan
-// chon. Sau khi ben thu 2 on dinh, tu kiem tra lai ben dau tien (content-
-// check) va cuu ho bang tao lai presentation neu bi day xuong nen — khong
-// goi foreground lai (tranh vong day nhau qua lai).
-// DuoPhone V6.40-independent-slot-pick — based on V6.34 clean-gap movable split.
-// V6.35: redesigned four controls + auto-hide after 1s; any CarPlay touch reveals them.
-// Divider remains invisible and movable; pane geometry/resizing logic is unchanged.
-// Every app requests its pane width and full content height.
-// Native template layout still requires device validation.
-// Saves/restores only the scene frame. Keeps picker, floating exit and app probes.
-// Runtime guards verify method signatures. Device-side redraw/touch still needs testing.
-// Inspect RESIZE REQUEST / OBSERVED / RESTORE in DuoPhoneV6Trace.txt.
-// Replace only Tweak.xm; existing package metadata is unchanged.
-// Observed device APIs: foregroundSceneWithSettings:completion:,
-// presentationViewWithIdentifier:, invalidatePresentationViewForIdentifier:.
-// Never reuse native animation identifiers or suppress native lifecycle callbacks.
+// TAduo 0.18.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
-#import <Foundation/Foundation.h>
 #import <objc/message.h>
-#import <unistd.h>
-#import <stdarg.h>
 #import <math.h>
 #import <string.h>
+#import <notify.h>
+#import <objc/runtime.h>
 
-static NSString *const DPTrace = @"/var/mobile/DuoPhoneV6Trace.txt";
-static void DPLog(NSString *format, ...) {
+static void TALog(NSString *format, ...) {
     va_list args; va_start(args, format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-    NSData *data = [[NSString stringWithFormat:@"[CarPlay:%d] V6.40-independent-slot-pick %@\n", getpid(), message]
-                   dataUsingEncoding:NSUTF8StringEncoding];
-    @synchronized (DPTrace) {
-        NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:DPTrace];
-        if (!file) { [data writeToFile:DPTrace atomically:YES]; return; }
-        @try { [file seekToEndOfFile]; [file writeData:data]; }
-        @catch (__unused NSException *e) {}
-        @finally { [file closeFile]; }
+    NSString *s = [[NSString alloc] initWithFormat:format arguments:args]; va_end(args);
+    @synchronized (NSFileManager.defaultManager) {
+        NSString *path = [NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/TAduo-template.log" : @"/var/mobile/TAduo.log";
+        NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+        if ([attrs fileSize] > 1024 * 1024) {
+            [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
+            [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
+        }
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.18] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!f) { [data writeToFile:path atomically:YES]; return; }
+        @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
     }
 }
-static id DPValue(id object, NSString *key) {
-    @try { return [object valueForKey:key]; }
-    @catch (__unused NSException *e) { return nil; }
+static id TAValue(id o, NSString *key) {
+    @try { return [o valueForKey:key]; } @catch (__unused NSException *e) { return nil; }
 }
-static NSString *DPCategoryToken(NSString *sid) {
-    if (![sid isKindOfClass:NSString.class]) return nil;
-    NSArray<NSString *> *parts = [sid componentsSeparatedByString:@":"];
-    if (parts.count < 2 || ![parts[0] hasPrefix:@"Car["] || ![parts[0] hasSuffix:@"]"]) return nil;
-    return [parts[0] substringWithRange:NSMakeRange(4, parts[0].length - 5)];
-}
-static NSString *DPBundle(NSString *sid) {
-    if (![sid isKindOfClass:NSString.class]) return nil;
+static NSString *TABundle(id controller) {
+    NSString *sid = TAValue(controller, @"sceneID");
+    if (![sid isKindOfClass:NSString.class] || ![sid hasPrefix:@"Car["]) return nil;
     NSArray *parts = [sid componentsSeparatedByString:@":"];
-    if (parts.count < 2 || ![parts[0] hasPrefix:@"Car["] || ![parts[0] hasSuffix:@"]"]) return nil;
-    NSString *bundle = nil;
-    if (parts.count == 2) bundle = parts[1];
-    else if (parts.count == 3 && [parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"]) bundle = parts[2];
-    if (![bundle containsString:@"."]) return nil;
-    if ([@[@"com.apple.CarPlayApp", @"com.apple.CarPlaySettings", @"com.apple.CarPlayWallpaper",
-           @"com.apple.CarPlayTemplateUIHost"] containsObject:bundle]) return nil;
+    NSString *bundle = parts.count == 2 ? parts[1] :
+        (parts.count == 3 && [parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"] ? parts[2] : nil);
+    if (![bundle containsString:@"."] || [@[@"com.apple.CarPlayApp", @"com.apple.CarPlaySettings", @"com.apple.CarPlayWallpaper", @"com.apple.CarPlayTemplateUIHost"] containsObject:bundle]) return nil;
     return bundle;
 }
-@interface DPRecord : NSObject
+@interface TARecord : NSObject
 @property(nonatomic,strong) id controller;
-@property(nonatomic,copy) NSString *sid;
-@property(nonatomic,copy) NSString *category;
 @property(nonatomic,copy) NSString *bundle;
-@property(nonatomic,copy) NSDictionary *settings;
-@property(nonatomic,copy) NSString *presentationID;
+@property(nonatomic,copy) NSDictionary *activation;
+@property(nonatomic,strong) id scene;
 @property(nonatomic,strong) UIView *presentation;
-@property(nonatomic) BOOL nativeBackgrounded;
-@property(nonatomic) BOOL restoreBackground;
-@property(nonatomic) BOOL valid;
-@property(nonatomic,strong) id resizeScene;
+@property(nonatomic,copy) NSString *presentationID;
+@property(nonatomic,copy) NSString *updater;
 @property(nonatomic) CGRect originalFrame;
-@property(nonatomic) CGSize requestedSize;
-@property(nonatomic) CGSize submittedSize;
-@property(nonatomic) BOOL resizeQueued;
-@property(nonatomic) BOOL geometryChanged;
-@property(nonatomic) NSInteger resizeState; // 0 untested, 1 setter accepted, -1 unsupported
-@property(nonatomic) NSUInteger resizeAttempts;
-@property(nonatomic) BOOL clientSafeAreaCaptured;
-@property(nonatomic) UIEdgeInsets originalClientSafeArea;
-@property(nonatomic,copy) NSString *clientSafeAreaKey;
-@property(nonatomic) NSUInteger v636BlankChecks;
-@property(nonatomic) BOOL v636RecoveryAttempted;
+@property(nonatomic) BOOL changed;
+@property(nonatomic) BOOL frameCaptured;
+@property(nonatomic) CGSize targetSize;
+@property(nonatomic) NSUInteger resizeSerial;
+@property(nonatomic) BOOL backgrounded;
+@property(nonatomic) BOOL restoreBackground;
+@property(nonatomic) BOOL attaching;
 @end
-@implementation DPRecord
+@implementation TARecord
 @end
-
-static NSMutableDictionary<NSString *, DPRecord *> *gRecords;
-static NSMutableArray<NSString *> *gOrder;
-static NSArray<DPRecord *> *gPair;
-@class DPControls;
-static DPControls *gControls;
-static UIWindow *gButtonWindow, *gSplitWindow, *gPickerWindow;
-static UIView *gLeftPane, *gRightPane, *gDivider, *gDockOverlay;
-static UIButton *gButton;
-static NSUInteger gControlsHideToken = 0;
-static NSMutableArray<NSString *> *gPickerBundles;   // snapshot khi mở picker
-static NSInteger gPickerSlot = -1;                   // 0 = trái, 1 = phải, -1 = picker đang đóng
-static UIButton *gLeftSlotButton, *gRightSlotButton; // "chạm để chọn app" phủ lên từng pane trống
-static UILabel *gStatus;
-static __weak UIWindowScene *gSession;
-static BOOL gRunning, gOwnCall;
-static NSUInteger gGeneration;
-static NSUInteger gSessionEpoch;
-static CGSize gNativeSize;
-static BOOL gAppProbeEnabled = NO;
-static void DPStop(NSString *reason);
-static void DPLayout(void);
-static void DPRefreshButton(void);
-static void DPInspect(NSUInteger generation);
-static void DPDumpConnectedScenes(NSString *tag);
-static void DPProbeTemplateSurface(DPRecord *record);
-static void DPDumpDockCandidates(void);
-static void DPTryPokeSceneUI(DPRecord *record);
-static NSString *DPName(DPRecord *record) {
-    if ([record.bundle isEqualToString:@"com.apple.Maps"]) return @"Maps";
-    if ([record.bundle isEqualToString:@"com.google.ios.youtubemusic"]) return @"YouTube Music";
-    return [record.bundle componentsSeparatedByString:@"."].lastObject ?: @"App";
-}
-
-static UIWindowScene *DPDashboard(void) {
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes)
-        if ([scene isKindOfClass:UIWindowScene.class] &&
-            [scene.session.persistentIdentifier containsString:@"DBDashboard-Car"])
-            return (UIWindowScene *)scene;
+static NSMutableDictionary<NSString *, TARecord *> *records;
+static NSMutableArray<NSString *> *order;
+static TARecord *slots[2];
+static UIView *panes[2];
+static UIButton *choose[2];
+static UIWindow *splitWindow, *buttonWindow;
+static UIView *floatingActions;
+static __weak UIWindowScene *dashboard;
+static BOOL running, ownCall;
+static NSArray<NSString *> *resumeBundles;
+static NSString *resumeCandidate;
+static NSUInteger generation;
+static NSUInteger slotRequests[2];
+static NSMutableArray<NSArray<NSString *> *> *recentPairs;
+static void TAStop(NSString *reason);
+static void TAClearSlot(NSInteger slot, NSString *reason);
+static BOOL TAAttachPending(void) { return slots[0].attaching || slots[1].attaching; }
+static NSArray<NSString *> *TAClientBundles(void);
+static void TASetLayoutTarget(NSString *bundle, CGSize size);
+static UIWindowScene *TADashboard(void) {
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
+        if ([s isKindOfClass:UIWindowScene.class] && [s.session.persistentIdentifier containsString:@"DBDashboard-Car"])
+            return (UIWindowScene *)s;
     return nil;
 }
-static BOOL DPSceneActive(DPRecord *record) {
-    id scene = DPValue(record.controller, @"scene");
-    SEL selector = NSSelectorFromString(@"isActive");
-    return [scene respondsToSelector:selector] && ((BOOL(*)(id,SEL))objc_msgSend)(scene, selector);
+static BOOL TAReadFrame(id scene, CGRect *frame) {
+    id v = TAValue(TAValue(scene, @"settings"), @"frame");
+    if (![v isKindOfClass:NSValue.class] || strcmp([v objCType], @encode(CGRect))) return NO;
+    *frame = [v CGRectValue];
+    return isfinite(frame->size.width) && isfinite(frame->size.height) && frame->size.width > 0 && frame->size.height > 0;
 }
-
-// V6.40: chụp nhanh view thành ảnh nhỏ, kiểm tra có phải toàn 1 màu (thường
-// là đen — chưa có nội dung thật) hay không. drawViewHierarchyInRect: dùng
-// được cả với nội dung cross-process (cùng cơ chế App Switcher chụp preview
-// app khác), nên áp dụng được cho presentation view remote-hosted ở đây.
-static BOOL DPSnapshotAppearsBlank(UIView *view) {
-    if (!view || view.bounds.size.width < 2 || view.bounds.size.height < 2) return YES;
-
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-    format.opaque = YES;
-    format.scale = 1.0;
-    CGSize thumbSize = CGSizeMake(16, 16);
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:thumbSize format:format];
-
-    UIImage *snapshot = [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        CGContextRef cg = ctx.CGContext;
-        CGSize src = view.bounds.size;
-        CGContextScaleCTM(cg, thumbSize.width / MAX(src.width, 1), thumbSize.height / MAX(src.height, 1));
-        [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
-    }];
-
-    CGImageRef cgImage = snapshot.CGImage;
-    if (!cgImage) return YES;
-
-    CFDataRef rawData = CGDataProviderCopyData(CGImageGetDataProvider(cgImage));
-    if (!rawData) return YES;
-    const unsigned char *bytes = CFDataGetBytePtr(rawData);
-    NSUInteger length = (NSUInteger)CFDataGetLength(rawData);
-    NSUInteger bytesPerPixel = CGImageGetBitsPerPixel(cgImage) / 8;
-
-    BOOL uniform = YES;
-    if (bytesPerPixel >= 3 && length >= bytesPerPixel) {
-        unsigned char r0 = bytes[0], g0 = bytes[1], b0 = bytes[2];
-        for (NSUInteger off = 0; off + bytesPerPixel <= length; off += bytesPerPixel) {
-            int dr = (int)bytes[off] - r0, dg = (int)bytes[off + 1] - g0, db = (int)bytes[off + 2] - b0;
-            if (abs(dr) > 6 || abs(dg) > 6 || abs(db) > 6) { uniform = NO; break; }
-        }
+static BOOL TASetFrame(id settings, CGRect frame) {
+    SEL sel = NSSelectorFromString(@"setFrame:");
+    NSMethodSignature *sig = [settings methodSignatureForSelector:sel];
+    if (!sig || sig.numberOfArguments != 3 || strcmp(sig.methodReturnType, @encode(void)) || strcmp([sig getArgumentTypeAtIndex:2], @encode(CGRect))) return NO;
+    ((void(*)(id,SEL,CGRect))objc_msgSend)(settings, sel, frame); return YES;
+}
+// Do not confuse the existence of a UI updater with its ability to mutate a
+// scene frame. Prefer the native scene-settings transaction; fall back only
+// after the chosen callback explicitly rejects the frame setter.
+static BOOL TAHasUpdater(id scene, NSString *name) {
+    NSMethodSignature *sig = [scene methodSignatureForSelector:NSSelectorFromString(name)];
+    return sig && sig.numberOfArguments == 3 && !strcmp(sig.methodReturnType, @encode(void)) && !strcmp([sig getArgumentTypeAtIndex:2], "@?");
+}
+static void TAInvokeVoid(id object, NSString *name) {
+    SEL sel = NSSelectorFromString(name);
+    NSMethodSignature *sig = [object methodSignatureForSelector:sel];
+    if (sig && sig.numberOfArguments == 2 && !strcmp(sig.methodReturnType, @encode(void)))
+        ((void(*)(id,SEL))objc_msgSend)(object, sel);
+}
+static void TAObserve(TARecord *r, NSUInteger token, NSUInteger serial, NSString *phase) {
+    if (!running || generation != token || r.resizeSerial != serial) return;
+    CGRect actual = CGRectZero; BOOL readable = TAReadFrame(r.scene, &actual);
+    TALog(@"HOST %@ bundle=%@ target=%@ settings=%@ readable=%d presentation=%@ transform=%@", phase, r.bundle,
+          NSStringFromCGSize(r.targetSize), NSStringFromCGRect(actual), readable,
+          NSStringFromCGRect(r.presentation.bounds), NSStringFromCGAffineTransform(r.presentation.transform));
+}
+static void TATransact(TARecord *r, NSUInteger token, NSUInteger serial, NSUInteger index) {
+    NSArray *paths = @[@"updateSettingsWithBlock:", @"updateUISettingsWithBlock:"];
+    if (!running || generation != token || r.resizeSerial != serial) return;
+    if (index >= paths.count) { TALog(@"RESIZE UNSUPPORTED %@", r.bundle); return; }
+    NSString *path = paths[index];
+    if (!TAHasUpdater(r.scene, path)) { TATransact(r, token, serial, index + 1); return; }
+    __block BOOL called = NO;
+    void (^change)(id) = ^(id settings) {
+        called = YES;
+        if (!running || generation != token || r.resizeSerial != serial || r.scene != TAValue(r.controller, @"scene")) return;
+        @try {
+            BOOL accepted = TASetFrame(settings, (CGRect){CGPointZero, r.targetSize});
+            TALog(@"RESIZE REQUEST %@ target=%@ setter=%d path=%@ settingsClass=%@", r.bundle,
+                  NSStringFromCGSize(r.targetSize), accepted, path, NSStringFromClass([settings class]));
+            if (accepted) { r.changed = YES; r.updater = path; }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!running || generation != token || r.resizeSerial != serial) return;
+                if (!accepted) { TATransact(r, token, serial, index + 1); return; }
+                @try {
+                    TAInvokeVoid(r.controller, @"_updateSceneUI");
+                    TAInvokeVoid(r.presentation, @"_updateFrameAndTransform");
+                    [r.presentation setNeedsLayout];
+                } @catch (NSException *e) { TALog(@"REFRESH ERROR %@", e.name); }
+                TAObserve(r, token, serial, @"after-transaction");
+            });
+        } @catch (NSException *e) { TALog(@"RESIZE ERROR %@ %@", r.bundle, e.name); }
+    };
+    @try { ((void(*)(id,SEL,id))objc_msgSend)(r.scene, NSSelectorFromString(path), change); }
+    @catch (NSException *e) { TALog(@"TRANSACTION ERROR %@ %@", r.bundle, e.name); }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (running && generation == token && r.resizeSerial == serial && !called)
+            TALog(@"RESIZE NO CALLBACK %@ path=%@ (no speculative fallback)", r.bundle, path);
+    });
+}
+static void TAResize(TARecord *r, CGSize size) {
+    id scene = TAValue(r.controller, @"scene");
+    if (!r.frameCaptured) {
+        CGRect original = CGRectZero;
+        if (!TAReadFrame(scene, &original)) { TALog(@"RESIZE NO FRAME %@", r.bundle); return; }
+        r.scene = scene; r.originalFrame = original; r.frameCaptured = YES;
     }
-    CFRelease(rawData);
-    return uniform;
+    if (r.scene != scene) { for (NSInteger i=0;i<2;i++) if (slots[i]==r) TAClearSlot(i,@"resize scene changed"); return; }
+    r.targetSize = size;
+    TASetLayoutTarget(r.bundle, size);
+    NSUInteger token = generation, serial = ++r.resizeSerial;
+    TATransact(r, token, serial, 0);
+    for (NSNumber *delay in @[@0.25, @1.0, @3.0]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            TAObserve(r, token, serial, [NSString stringWithFormat:@"after-%@s", delay]);
+        });
+    }
 }
-
-// V6.40: nếu presentation của 1 record vẫn trống sau vài giây, tạo lại
-// presentation MỚI (invalidate cái cũ + xin cái mới với identifier khác).
-// Không dùng foreground lại — vì gọi foreground cho bên KIA (bước vừa xảy
-// ra ngay trước khi hàm này được lên lịch) rất có thể chính là thứ đã đẩy
-// bên NÀY xuống nền; gọi foreground thêm 1 lần nữa cho bên này chỉ có nguy
-// cơ đẩy ngược lại bên kia, không giải quyết được gì.
-static void DPRecreatePresentationIfBlank(DPRecord *record, UIView *pane, NSUInteger generation) {
-    if (!gRunning || generation != gGeneration || !record.valid || !record.presentation) return;
-    if (record.v636RecoveryAttempted) return;
-
-    BOOL blank = DPSnapshotAppearsBlank(record.presentation);
-    if (!blank) { DPLog(@"CONTENT-CHECK bundle=%@ blank=0 (ổn)", record.bundle); return; }
-
-    record.v636BlankChecks++;
-    DPLog(@"CONTENT-CHECK bundle=%@ blank=1 lần thứ=%lu", record.bundle, (unsigned long)record.v636BlankChecks);
-    if (record.v636BlankChecks < 3) return; // vài lần trước khi cứu hộ, tránh phản ứng quá sớm
-
-    record.v636RecoveryAttempted = YES;
-    DPLog(@"RECREATE bundle=%@ — nội dung vẫn trống sau khi bên kia được gắn, tạo lại presentation", record.bundle);
-
-    BOOL previousOwnCall = gOwnCall;
-    gOwnCall = YES;
+static void TACleanup(TARecord *r) {
+    if (!r) return;
+    TASetLayoutTarget(r.bundle, CGSizeZero);
+    if (r.changed && r.scene == TAValue(r.controller, @"scene")) {
+        CGRect original = r.originalFrame;
+        void (^restore)(id) = ^(id settings) { @try { TALog(@"RESTORE %@ ok=%d", r.bundle, TASetFrame(settings, original)); } @catch (__unused NSException *e) {} };
+        @try { ((void(*)(id,SEL,id))objc_msgSend)(r.scene, NSSelectorFromString(r.updater), restore); } @catch (__unused NSException *e) {}
+    }
+    [r.presentation removeFromSuperview]; r.presentation = nil;
     @try {
         SEL invalidate = NSSelectorFromString(@"invalidatePresentationViewForIdentifier:");
-        if (record.presentationID && [record.controller respondsToSelector:invalidate])
-            ((void(*)(id,SEL,id))objc_msgSend)(record.controller, invalidate, record.presentationID);
-
-        [record.presentation removeFromSuperview];
-        record.presentation = nil;
-
-        NSString *newID = [record.presentationID stringByAppendingString:@".r"];
-        SEL create = NSSelectorFromString(@"presentationViewWithIdentifier:");
-        id result = [record.controller respondsToSelector:create]
-            ? ((id(*)(id,SEL,id))objc_msgSend)(record.controller, create, newID)
-            : nil;
-
-        if ([result isKindOfClass:UIView.class] && !((UIView *)result).superview) {
-            record.presentationID = newID;
-            record.presentation = result;
-            [pane addSubview:result];
-            DPLayout();
-            DPLog(@"RECREATE bundle=%@ OK identifier=%@", record.bundle, newID);
-        } else {
-            DPLog(@"RECREATE bundle=%@ FAIL result=%@", record.bundle, result ?: @"nil");
-        }
-    } @catch (NSException *e) {
-        DPLog(@"RECREATE bundle=%@ EXCEPTION %@ %@", record.bundle, e.name, e.reason);
-    }
-    gOwnCall = previousOwnCall;
-}
-
-static NSUInteger DPLayers(UIView *view, NSUInteger depth) {
-    if (!view || depth > 12) return 0;
-    NSUInteger count = [NSStringFromClass(view.class) containsString:@"_UISceneLayerHostContainerView"] ? 1 : 0;
-    for (UIView *child in view.subviews) count += DPLayers(child, depth + 1);
-    return count;
-}
-static BOOL DPReadFrame(id scene, CGRect *frame) {
-    id value = DPValue(DPValue(scene, @"settings"), @"frame");
-    if (![value isKindOfClass:NSValue.class] || strcmp([value objCType], @encode(CGRect))) return NO;
-    *frame = [value CGRectValue];
-    return isfinite(frame->size.width) && isfinite(frame->size.height) &&
-           frame->size.width > 0 && frame->size.height > 0;
-}
-static BOOL DPFrameSetter(id settings, CGRect frame) {
-    SEL setter = NSSelectorFromString(@"setFrame:");
-    NSMethodSignature *sig = [settings methodSignatureForSelector:setter];
-    if (!sig || sig.numberOfArguments != 3 || strcmp(sig.methodReturnType, @encode(void)) ||
-        strcmp([sig getArgumentTypeAtIndex:2], @encode(CGRect))) return NO;
-    ((void(*)(id,SEL,CGRect))objc_msgSend)(settings, setter, frame);
-    return YES;
-}
-static BOOL DPEdgeInsetsGetter(id obj, NSString *key, UIEdgeInsets *outInsets) {
-    if (!obj || !key.length || !outInsets) return NO;
-    SEL getter = NSSelectorFromString(key);
-    NSMethodSignature *sig = [obj methodSignatureForSelector:getter];
-    if (sig && sig.numberOfArguments == 2 && !strcmp(sig.methodReturnType, @encode(UIEdgeInsets))) {
-        *outInsets = ((UIEdgeInsets(*)(id,SEL))objc_msgSend)(obj, getter);
-        return YES;
-    }
-    @try {
-        id value = [obj valueForKey:key];
-        if ([value isKindOfClass:NSValue.class] && !strcmp([value objCType], @encode(UIEdgeInsets))) {
-            [value getValue:outInsets];
-            return YES;
-        }
+        if (r.presentationID && [r.controller respondsToSelector:invalidate]) ((void(*)(id,SEL,id))objc_msgSend)(r.controller, invalidate, r.presentationID);
     } @catch (__unused NSException *e) {}
-    return NO;
-}
-
-static BOOL DPEdgeInsetsSetter(id obj, NSString *key, UIEdgeInsets insets) {
-    if (!obj || !key.length) return NO;
-    NSString *setterName = [NSString stringWithFormat:@"set%@%@:",
-                            [[key substringToIndex:1] uppercaseString], [key substringFromIndex:1]];
-    SEL setter = NSSelectorFromString(setterName);
-    NSMethodSignature *sig = [obj methodSignatureForSelector:setter];
-    if (sig && sig.numberOfArguments == 3 && !strcmp(sig.methodReturnType, @encode(void)) &&
-        !strcmp([sig getArgumentTypeAtIndex:2], @encode(UIEdgeInsets))) {
-        ((void(*)(id,SEL,UIEdgeInsets))objc_msgSend)(obj, setter, insets);
-        return YES;
-    }
     @try {
-        [obj setValue:[NSValue valueWithUIEdgeInsets:insets] forKey:key];
-        return YES;
+        SEL bg = NSSelectorFromString(@"backgroundSceneWithCompletion:");
+        if (r.restoreBackground && [r.controller respondsToSelector:bg]) ((void(*)(id,SEL,id))objc_msgSend)(r.controller, bg, nil);
     } @catch (__unused NSException *e) {}
-    return NO;
+    r.backgrounded = r.restoreBackground;
+    r.presentationID = nil; r.scene = nil; r.changed = NO; r.frameCaptured = NO; ++r.resizeSerial;
 }
-
-static void DPClientSafeAreaPatch(id mutableSettings, DPRecord *record, BOOL split) {
-    if (!mutableSettings || !record) return;
-    NSArray<NSString *> *keys = record.clientSafeAreaKey.length ?
-        @[record.clientSafeAreaKey] : @[@"safeAreaInsetsPortrait", @"safeAreaInsets"];
-    BOOL touched = NO;
-    for (NSString *key in keys) {
-        UIEdgeInsets current = UIEdgeInsetsZero;
-        if (!DPEdgeInsetsGetter(mutableSettings, key, &current)) continue;
-        if (!record.clientSafeAreaCaptured) {
-            record.clientSafeAreaCaptured = YES;
-            record.originalClientSafeArea = current;
-            record.clientSafeAreaKey = key;
-            DPLog(@"CLIENT-SAFEAREA CAPTURE bundle=%@ key=%@ value=%@ settingsClass=%@",
-                  record.bundle, key, NSStringFromUIEdgeInsets(current), NSStringFromClass([mutableSettings class]));
-        }
-        UIEdgeInsets desired = split ? current : record.originalClientSafeArea;
-        if (split) {
-            desired.left = 0.0;
-            desired.right = 0.0;
-            // Google Maps still anchors the navigation camera slightly to the right
-            // after the physical CarPlay sidebar inset is reclaimed.  Compensate the
-            // client viewport only (not the host pane) so the vehicle target moves
-            // back toward the visual center.  Keep this app-specific and modest.
-            if ([record.bundle isEqualToString:@"com.google.Maps"]) desired.right = 36.0;
-        }
-        if (DPEdgeInsetsSetter(mutableSettings, key, desired)) {
-            UIEdgeInsets verify = UIEdgeInsetsZero;
-            BOOL readable = DPEdgeInsetsGetter(mutableSettings, key, &verify);
-            DPLog(@"CLIENT-SAFEAREA %@ bundle=%@ key=%@ before=%@ desired=%@ after=%@ readable=%d",
-                  split ? @"PATCH" : @"RESTORE", record.bundle, key,
-                  NSStringFromUIEdgeInsets(current), NSStringFromUIEdgeInsets(desired),
-                  readable ? NSStringFromUIEdgeInsets(verify) : @"?", readable);
-            touched = YES;
-            break;
-        }
-    }
-    if (!touched && split) {
-        static NSMutableSet *logged; static dispatch_once_t once; dispatch_once(&once, ^{ logged=[NSMutableSet set]; });
-        NSString *cls = NSStringFromClass([mutableSettings class]);
-        if (![logged containsObject:cls]) {
-            [logged addObject:cls];
-            DPLog(@"CLIENT-SAFEAREA UNSUPPORTED settingsClass=%@ bundle=%@", cls, record.bundle);
-            unsigned int count = 0; Method *methods = class_copyMethodList([mutableSettings class], &count);
-            for (unsigned int i=0;i<count;i++) {
-                NSString *name = NSStringFromSelector(method_getName(methods[i]));
-                NSString *lower = name.lowercaseString;
-                if ([lower containsString:@"safe"] || [lower containsString:@"inset"]) {
-                    DPLog(@"CLIENT-SAFEAREA METHOD class=%@ selector=%@ types=%s", cls, name, method_getTypeEncoding(methods[i]));
-                }
-            }
-            if (methods) free(methods);
-        }
-    }
+static NSString *TAAppName(NSString *bundle) {
+    return @{@"com.apple.Maps":@"Apple Maps",@"com.google.Maps":@"Google Maps",@"vn.vietmap.live":@"Vietmap Live",@"com.google.ios.youtubemusic":@"YouTube Music",@"com.google.ios.youtube":@"YouTube",@"com.apple.Music":@"Nhạc"}[bundle] ?: bundle;
 }
-
-static BOOL DPHasBlockUpdater(id scene, NSString *selectorName) {
-    SEL sel = NSSelectorFromString(selectorName);
-    NSMethodSignature *sig = [scene methodSignatureForSelector:sel];
-    return sig && sig.numberOfArguments == 3 && !strcmp(sig.methodReturnType, @encode(void)) &&
-           !strcmp([sig getArgumentTypeAtIndex:2], "@?");
+static void TARememberPair(void) {
+    if (!slots[0].presentation || !slots[1].presentation) return;
+    NSArray *pair=@[slots[0].bundle,slots[1].bundle];
+    if (!recentPairs) recentPairs=[NSMutableArray new];
+    [recentPairs removeObject:pair]; [recentPairs insertObject:pair atIndex:0];
+    while (recentPairs.count>4) [recentPairs removeLastObject];
 }
-static BOOL DPHasFrameUpdater(id scene) {
-    return DPHasBlockUpdater(scene, @"updateUISettingsWithBlock:") ||
-           DPHasBlockUpdater(scene, @"updateSettingsWithBlock:");
-}
-
-static NSString *DPObjSummary(id obj) {
-    if (!obj) return @"(nil)";
-    NSString *desc = nil;
-    @try { desc = [obj description]; } @catch (__unused NSException *e) {}
-    if (!desc) desc = @"?";
-    if (desc.length > 500) desc = [[desc substringToIndex:500] stringByAppendingString:@"…"];
-    return [NSString stringWithFormat:@"<%@:%p> %@", NSStringFromClass([obj class]), (__bridge void *)obj, desc];
-}
-
-// V6.25: map một FBScene / presentation object về record bằng chính scene
-// identifier/description, thay vì dựa vào controller đang hook. Cách này tránh
-// cross-fire giữa Maps và YouTube Music đã thấy trong log V6.24.
-static DPRecord *DPRecordForSceneObject(id scene) {
-    if (!scene || !gRunning || gPair.count == 0) return nil;
-    NSString *desc = nil;
-    @try { desc = [scene description]; } @catch (__unused NSException *e) {}
-    if (!desc) desc = @"";
-    for (DPRecord *record in gPair) {
-        if (record.valid && record.bundle.length && [desc containsString:record.bundle]) return record;
-    }
-    for (NSString *key in @[@"identifier", @"sceneID", @"workspaceIdentifier", @"persistentIdentifier"]) {
-        id value = DPValue(scene, key);
-        if (![value isKindOfClass:NSString.class]) continue;
-        for (DPRecord *record in gPair) {
-            if (record.valid && [value containsString:record.bundle]) return record;
-        }
-    }
-    return nil;
-}
-static DPRecord *DPRecordForPresentation(id presentation) {
-    if (!presentation || !gRunning || gPair.count == 0) return nil;
-    for (DPRecord *record in gPair) if (record.valid && record.presentation == presentation) return record;
-    return nil;
-}
-static void DPDumpClientObject(DPRecord *record, NSString *tag, id object) {
-    if (!record || !object) return;
-    DPLog(@"CLIENT-OBJECT bundle=%@ tag=%@ class=%@ value=%@",
-          record.bundle, tag, NSStringFromClass([object class]), DPObjSummary(object));
-    for (NSString *key in @[@"frame", @"bounds", @"geometry", @"settings", @"sceneSettings",
-                             @"clientSettings", @"displayConfiguration", @"interfaceOrientation",
-                             @"safeAreaInsets", @"transitionContext"]) {
-        id v = DPValue(object, key);
-        if (v) DPLog(@"CLIENT-OBJECT-KVC bundle=%@ tag=%@ key=%@ value=%@",
-                     record.bundle, tag, key, DPObjSummary(v));
-    }
-}
-static void DPDumpSceneUpdateState(DPRecord *record, NSString *tag) {
-    if (!record.controller) return;
-    @try {
-        id scene = DPValue(record.controller, @"scene");
-        id current = nil;
-        SEL curSel = NSSelectorFromString(@"currentSceneUpdate");
-        if ([record.controller respondsToSelector:curSel])
-            current = ((id(*)(id,SEL))objc_msgSend)(record.controller, curSel);
-        id settings = DPValue(scene, @"settings");
-        id frameObj = DPValue(settings, @"frame");
-        DPLog(@"SCENE-UPDATE-STATE bundle=%@ tag=%@ scene=%@ settingsClass=%@ frame=%@ current=%@",
-              record.bundle, tag, NSStringFromClass([scene class]), NSStringFromClass([settings class]),
-              frameObj, DPObjSummary(current));
-        if (current) {
-            for (NSString *key in @[@"frame", @"bounds", @"geometry", @"settings", @"context", @"sceneSettings", @"clientSettings", @"transitionContext"]) {
-                id v = DPValue(current, key);
-                if (v) DPLog(@"SCENE-UPDATE-KVC bundle=%@ tag=%@ key=%@ value=%@", record.bundle, tag, key, DPObjSummary(v));
-            }
-        }
-    } @catch (NSException *e) { DPLog(@"SCENE-UPDATE-STATE ERROR %@ %@", record.bundle, e.name); }
-}
-static void DPTryPropagateSceneUpdate(DPRecord *record, NSString *tag) {
-    if (!record.controller || !record.valid) return;
-    DPDumpSceneUpdateState(record, [tag stringByAppendingString:@"-before"]);
-    @try {
-        SEL updateUI = NSSelectorFromString(@"_updateSceneUI");
-        if ([record.controller respondsToSelector:updateUI]) {
-            ((void(*)(id,SEL))objc_msgSend)(record.controller, updateUI);
-            DPLog(@"SCENE-UPDATE-POKE bundle=%@ tag=%@ selector=_updateSceneUI", record.bundle, tag);
-        } else {
-            DPLog(@"SCENE-UPDATE-POKE bundle=%@ tag=%@ selector=_updateSceneUI unsupported", record.bundle, tag);
-        }
-    } @catch (NSException *e) { DPLog(@"SCENE-UPDATE-POKE ERROR %@ %@", record.bundle, e.name); }
-    DPDumpSceneUpdateState(record, [tag stringByAppendingString:@"-after"]);
-}
-static void DPRestoreFrame(DPRecord *record) {
-    if (!record.geometryChanged || !record.valid || !record.resizeScene) return;
-    id scene = record.resizeScene;
-    CGRect frame = record.originalFrame;
-    NSUInteger generation = gGeneration;
-    if (DPValue(record.controller, @"scene") != scene || !DPHasFrameUpdater(scene)) return;
-    NSString *updaterName = DPHasBlockUpdater(scene, @"updateUISettingsWithBlock:") ?
-                            @"updateUISettingsWithBlock:" : @"updateSettingsWithBlock:";
-    void (^change)(id) = ^(id mutableSettings) {
-        if (generation != gGeneration) return;
-        @try {
-            BOOL restored = DPFrameSetter(mutableSettings, frame);
-            DPClientSafeAreaPatch(mutableSettings, record, NO);
-            DPLog(@"RESIZE RESTORE bundle=%@ path=%@ settingsClass=%@ setter=%d frame=%@",
-                  record.bundle, updaterName, NSStringFromClass([mutableSettings class]), restored, NSStringFromCGRect(frame));
-        } @catch (NSException *e) { DPLog(@"RESIZE RESTORE ERROR %@ %@", record.bundle, e.name); }
-    };
-    @try {
-        ((void(*)(id,SEL,id))objc_msgSend)(scene, NSSelectorFromString(updaterName), change);
-    } @catch (NSException *e) { DPLog(@"RESIZE RESTORE ERROR %@ %@", record.bundle, e.name); }
-}
-static void DPQueueResize(DPRecord *record, CGSize size) {
-    if (!record.presentation || !record.valid || record.resizeState < 0) return;
-    record.requestedSize = size;
-    if (record.resizeQueued || CGSizeEqualToSize(size, record.submittedSize)) return;
-    record.resizeQueued = YES;
-    NSUInteger generation = gGeneration;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-        if (!gRunning || generation != gGeneration || !record.valid) return;
-        record.resizeQueued = NO;
-        if (record.resizeState == 0 && ++record.resizeAttempts > 3) {
-            record.resizeState = -1;
-            DPLog(@"RESIZE NO CALLBACK bundle=%@", record.bundle);
-            return;
-        }
-        id scene = DPValue(record.controller, @"scene");
-        if (!record.resizeScene) {
-            CGRect original;
-            if (!scene || !DPHasFrameUpdater(scene) || !DPReadFrame(scene, &original)) {
-                record.resizeState = -1;
-                DPLog(@"RESIZE UNSUPPORTED bundle=%@ sceneClass=%@", record.bundle, NSStringFromClass([scene class]));
-                DPLayout(); return;
-            }
-            record.resizeScene = scene; record.originalFrame = original;
-        }
-        if (record.resizeScene != scene) { DPStop(@"resize scene replaced"); return; }
-        CGSize target = record.requestedSize;
-        CGRect frame = (CGRect){CGPointZero, target};
-
-        // V6.22: ưu tiên UI settings. V6.20 đã chứng minh updateSettingsWithBlock:
-        // thay được scene.settings.frame nhưng remote app KHÔNG relayout. Scene này
-        // còn expose updateUISettingsWithBlock:, đây mới là đường có khả năng tạo
-        // geometry diff gửi tới client UIWindowScene.
-        NSString *updaterName = DPHasBlockUpdater(scene, @"updateUISettingsWithBlock:") ?
-                                @"updateUISettingsWithBlock:" : @"updateSettingsWithBlock:";
-        __block BOOL setterWorked = NO;
-        void (^change)(id) = ^(id mutableSettings) {
-            if (![NSThread isMainThread]) { DPLog(@"RESIZE CALLBACK OFF MAIN — skipped"); return; }
-            if (!gRunning || generation != gGeneration || !record.valid) return;
-            @try {
-                record.geometryChanged = YES;
-                setterWorked = DPFrameSetter(mutableSettings, frame);
-                if (!setterWorked) {
-                    DPLog(@"RESIZE UI NO FRAME SETTER bundle=%@ path=%@ settings=%@",
-                          record.bundle, updaterName, NSStringFromClass([mutableSettings class]));
-                    return;
-                }
-                // V6.30: the TemplateUIHost host safe-area was reclaimed in V6.28, but the
-                // remote CarPlay client can still receive the physical 45pt left safe-area.
-                // That makes map camera centering use (45 + paneWidth)/2, visually shifting
-                // the vehicle ~22.5pt to the right. Patch the client scene safe-area too.
-                DPClientSafeAreaPatch(mutableSettings, record, YES);
-                record.resizeState = 1; record.submittedSize = target;
-                DPLog(@"RESIZE REQUEST bundle=%@ path=%@ settingsClass=%@ frame=%@",
-                      record.bundle, updaterName, NSStringFromClass([mutableSettings class]), NSStringFromCGRect(frame));
-            } @catch (NSException *e) {
-                DPLog(@"RESIZE ERROR %@ %@", record.bundle, e.name);
-            }
-        };
-        @try {
-            ((void(*)(id,SEL,id))objc_msgSend)(scene, NSSelectorFromString(updaterName), change);
-        } @catch (NSException *e) { DPLog(@"RESIZE UPDATE ERROR %@ %@", record.bundle, e.name); }
-
-        // Nếu UI-settings object không có frame setter thì fallback về đường cũ,
-        // để V6.22 vẫn chạy được thay vì vô hiệu hóa split.
-        if (!setterWorked && ![updaterName isEqualToString:@"updateSettingsWithBlock:"] &&
-            DPHasBlockUpdater(scene, @"updateSettingsWithBlock:")) {
-            void (^fallback)(id) = ^(id mutableSettings) {
-                if (!gRunning || generation != gGeneration || !record.valid) return;
-                @try {
-                    if (DPFrameSetter(mutableSettings, frame)) {
-                        DPClientSafeAreaPatch(mutableSettings, record, YES);
-                        record.resizeState = 1; record.submittedSize = target;
-                        DPLog(@"RESIZE FALLBACK bundle=%@ settingsClass=%@ frame=%@",
-                              record.bundle, NSStringFromClass([mutableSettings class]), NSStringFromCGRect(frame));
-                    }
-                } @catch (__unused NSException *e) {}
-            };
-            @try { ((void(*)(id,SEL,id))objc_msgSend)(scene, NSSelectorFromString(@"updateSettingsWithBlock:"), fallback); }
-            @catch (__unused NSException *e) {}
-        }
-
-        // V6.24: frame trong scene settings đã được V6.22 xác nhận thay đổi đúng,
-        // nhưng client content chưa relayout. Sau transaction, ép controller chạy
-        // đúng đường scene-update mà Dashboard dùng và quan sát currentSceneUpdate.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-            if (!gRunning || generation != gGeneration || !record.valid) return;
-            DPTryPropagateSceneUpdate(record, @"post-settings-25ms");
-        });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-            if (!gRunning || generation != gGeneration || !record.valid) return;
-            DPTryPropagateSceneUpdate(record, @"post-settings-120ms");
-        });
-
-        // Presentation có hook nội bộ này (đã probe được). Gọi lại sau geometry
-        // update để host view cập nhật transform/frame từ presentation context mới.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 40 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-            if (!gRunning || generation != gGeneration || !record.presentation) return;
-            @try {
-                SEL refresh = NSSelectorFromString(@"_updateFrameAndTransform");
-                if ([record.presentation respondsToSelector:refresh]) {
-                    ((void(*)(id,SEL))objc_msgSend)(record.presentation, refresh);
-                    DPLog(@"PRESENTATION GEOMETRY REFRESH bundle=%@ frame=%@ bounds=%@",
-                          record.bundle, NSStringFromCGRect(record.presentation.frame), NSStringFromCGRect(record.presentation.bounds));
-                }
-                [record.presentation setNeedsLayout];
-                [record.presentation layoutIfNeeded];
-            } @catch (NSException *e) { DPLog(@"PRESENTATION REFRESH ERROR %@ %@", record.bundle, e.name); }
-        });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-            if (!gRunning || generation != gGeneration || !record.valid) return;
-            CGRect actual = CGRectZero;
-            BOOL readable = DPReadFrame(scene, &actual);
-            DPLog(@"RESIZE OBSERVED bundle=%@ requested=%@ actual=%@ readable=%d setterState=%ld",
-                  record.bundle, NSStringFromCGSize(target), NSStringFromCGRect(actual), readable, (long)record.resizeState);
-            DPTryPokeSceneUI(record);
-            // Observed settings are not proof that the remote application has redrawn.
-            DPLayout();
-        });
-    });
-}
-static void DPFit(DPRecord *record, UIView *pane) {
-    UIView *view = record.presentation;
-    CGSize target = pane.bounds.size;
-    if (!view || target.width <= 0 || target.height <= 0) return;
-    DPQueueResize(record, target); // Identical submitted sizes are deduplicated.
-    view.transform = CGAffineTransformIdentity;
-
-    // TRƯỚC ĐÂY: trong lúc chờ vòng resize round-trip hoàn tất (~300ms),
-    // source rơi về gNativeSize (kích thước FULL màn hình gốc của app,
-    // ví dụ 426.67x240) — khiến view.bounds bị đặt to hơn hẳn pane (chỉ
-    // ~188.83x240), rồi bị pane.clipsToBounds cắt bớt, hiện ra như đang
-    // xem một PHẦN app full-size bị crop, không phải app đã resize đúng.
-    //
-    // GIỜ: mặc định dùng luôn kích thước PANE làm bounds ngay từ đầu (lạc
-    // quan là app sẽ tự vẽ lại vừa khít) — đảm bảo hình luôn full kín pane,
-    // không tràn/không hở, kể cả trước khi resize round-trip xác nhận xong.
-    CGSize source = target;
-
-    // Chỉ đổi sang kích thước THỰC TẾ mà hệ thống đã xác nhận (actual quan
-    // sát được qua DPReadFrame) khi nó khác đáng kể so với target — nghĩa là
-    // OS/app đã tự điều chỉnh về 1 kích thước khác thay vì chấp nhận nguyên
-    // yêu cầu. Trường hợp đó ưu tiên khớp với cái THẬT để không bị lệch.
-    CGRect observed = CGRectZero;
-    if (record.resizeScene && DPReadFrame(record.resizeScene, &observed) &&
-        (fabs(observed.size.width - target.width) > 0.5 ||
-         fabs(observed.size.height - target.height) > 0.5)) {
-        source = observed.size;
-        DPLog(@"FIT MISMATCH bundle=%@ target=%@ actualObserved=%@ — dùng kích thước thật",
-              record.bundle, NSStringFromCGSize(target), NSStringFromCGSize(observed.size));
-    }
-
-    if (source.width <= 0 || source.height <= 0) return;
-    view.bounds = (CGRect){CGPointZero, source};
-    view.center = CGPointMake(CGRectGetMinX(pane.bounds) + source.width * 0.5,
-                              CGRectGetMinY(pane.bounds) + source.height * 0.5);
-}
-static const CGFloat kDividerGrabWidth = 34.0;   // vùng chạm trong suốt quanh khe
-static const CGFloat kPaneGap = 6.0;              // tổng khoảng hở nhìn thấy giữa hai main
-static const CGFloat kMinSplitRatio = 0.30;       // tránh pane quá hẹp
-static const CGFloat kMaxSplitRatio = 0.70;
-static CGFloat gSplitRatio = 0.50;
-static const NSUInteger kMaxCachedApps = 6;      // nhớ tối đa 6 app đã mở trong phiên
-static const CGFloat kPaneCornerRadius = 14.0;   // bo góc kiểu iPhone
-
-static BOOL DPDockClassLooksUseful(NSString *name) {
-    if (!name.length) return NO;
-    NSString *l = name.lowercaseString;
-    return [l containsString:@"dock"] || [l containsString:@"sidebar"] ||
-           [l containsString:@"home"] || [l containsString:@"status"] ||
-           [l containsString:@"dashboard"] || [l containsString:@"appgrid"];
-}
-
-static void DPWalkDockViews(UIView *view, NSUInteger depth) {
-    if (!view || depth > 8) return;
-    NSString *name = NSStringFromClass(view.class);
-    CGRect f = view.frame;
-    // Native CarPlay dock/sidebar is normally narrow and hugs one display edge.
-    BOOL edgeish = (f.size.width > 0 && f.size.width <= 90 && f.size.height >= 80) ||
-                   (f.size.height > 0 && f.size.height <= 90 && f.size.width >= 120);
-    if (DPDockClassLooksUseful(name) || edgeish) {
-        DPLog(@"DOCK-CANDIDATE depth=%lu class=%@ frame=%@ bounds=%@ hidden=%d alpha=%.2f windowLevel=%.1f super=%@",
-              (unsigned long)depth, name, NSStringFromCGRect(f), NSStringFromCGRect(view.bounds),
-              view.hidden, view.alpha, view.window.windowLevel,
-              view.superview ? NSStringFromClass(view.superview.class) : @"nil");
-    }
-    for (UIView *child in view.subviews) DPWalkDockViews(child, depth + 1);
-}
-
-static void DPDumpDockCandidates(void) {
-    UIWindowScene *scene = gSession ?: DPDashboard();
-    if (!scene) return;
-    DPLog(@"========== DOCK-PROBE windows=%lu =========", (unsigned long)scene.windows.count);
-    for (UIWindow *w in scene.windows) {
-        if (w == gSplitWindow || w == gButtonWindow || w == gPickerWindow) continue;
-        DPLog(@"DOCK-WINDOW class=%@ level=%.1f hidden=%d frame=%@ root=%@",
-              NSStringFromClass(w.class), w.windowLevel, w.hidden, NSStringFromCGRect(w.frame),
-              w.rootViewController ? NSStringFromClass(w.rootViewController.class) : @"nil");
-        DPWalkDockViews(w.rootViewController.view ?: w, 0);
-    }
-    DPLog(@"========== DOCK-PROBE END =========");
-}
-
-static UIButton *DPControlButton(NSString *symbolName, NSString *fallback, NSString *label, SEL action) {
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    UIImage *image = nil;
-    if (@available(iOS 13.0, *)) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightSemibold];
-        image = [[UIImage systemImageNamed:symbolName] imageWithConfiguration:cfg];
-    }
-    if (image) {
-        [b setImage:image forState:UIControlStateNormal];
+// Vector controls: minimal ivory/orange family, cyan/orange split glyph.
+static UIColor *TACyan(void) { return [UIColor colorWithRed:0 green:0.83 blue:1 alpha:1]; }
+static UIColor *TAOrange(void) { return [UIColor colorWithRed:1 green:0.48 blue:0.05 alpha:1]; }
+static UIImage *TAGlyph(NSInteger kind) {
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(32,32), NO, 0);
+    UIColor *white=[UIColor colorWithWhite:0.95 alpha:1];
+    CGContextRef c=UIGraphicsGetCurrentContext();
+    CGContextSetLineWidth(c,3); CGContextSetLineCap(c,kCGLineCapRound); CGContextSetLineJoin(c,kCGLineJoinRound);
+    if (kind==0) {
+        [TACyan() setStroke]; [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(3,6,12,20) cornerRadius:3] stroke];
+        [TAOrange() setStroke]; [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(17,6,12,20) cornerRadius:3] stroke];
+    } else if (kind==1) {
+        [white setStroke]; CGContextMoveToPoint(c,27,10); CGContextAddLineToPoint(c,5,10); CGContextAddLineToPoint(c,11,4); CGContextMoveToPoint(c,5,10); CGContextAddLineToPoint(c,11,16); CGContextStrokePath(c);
+        [TAOrange() setStroke]; CGContextMoveToPoint(c,5,23); CGContextAddLineToPoint(c,27,23); CGContextAddLineToPoint(c,21,17); CGContextMoveToPoint(c,27,23); CGContextAddLineToPoint(c,21,29); CGContextStrokePath(c);
+    } else if (kind==2) {
+        [white setStroke]; UIBezierPath *p=[UIBezierPath bezierPath]; p.lineWidth=3; p.lineCapStyle=kCGLineCapRound;
+        [p moveToPoint:CGPointMake(8,11)]; [p addCurveToPoint:CGPointMake(9,26) controlPoint1:CGPointMake(32,-2) controlPoint2:CGPointMake(34,31)]; [p stroke];
+        [TAOrange() setStroke]; CGContextMoveToPoint(c,8,4); CGContextAddLineToPoint(c,7,12); CGContextAddLineToPoint(c,15,12); CGContextStrokePath(c);
     } else {
-        [b setTitle:fallback forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+        [white setStroke]; CGContextMoveToPoint(c,16,4); CGContextAddLineToPoint(c,5,4); CGContextAddLineToPoint(c,5,28); CGContextAddLineToPoint(c,16,28); CGContextStrokePath(c);
+        [TAOrange() setStroke]; CGContextMoveToPoint(c,13,16); CGContextAddLineToPoint(c,29,16); CGContextAddLineToPoint(c,23,10); CGContextMoveToPoint(c,29,16); CGContextAddLineToPoint(c,23,22); CGContextStrokePath(c);
     }
-    b.accessibilityLabel = label;
-    b.tintColor = UIColor.whiteColor;
-    b.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.68];
-    b.layer.cornerRadius = 17.0;
-    b.layer.borderWidth = 0.6;
-    b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.22].CGColor;
-    b.layer.shadowColor = UIColor.blackColor.CGColor;
-    b.layer.shadowOpacity = 0.22;
-    b.layer.shadowRadius = 3.0;
-    b.layer.shadowOffset = CGSizeMake(0, 1);
-    b.layer.masksToBounds = NO;
-    [b addTarget:gControls action:action forControlEvents:UIControlEventTouchUpInside];
-    return b;
+    UIImage *image=UIGraphicsGetImageFromCurrentImageContext(); UIGraphicsEndImageContext();
+    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
 }
-
-static UIButton *DPExitButton(void) {
-    UIButton *b = DPControlButton(@"xmark", @"×", @"Thoát chia màn hình", @selector(stop));
-    b.tag = 9002;
-    return b;
+static UIImage *TAAppIcon(NSString *bundle) {
+    static NSMutableDictionary *cache; if (!cache) cache=[NSMutableDictionary new];
+    UIImage *image=cache[bundle]; if (image) return image;
+    SEL sel=NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
+    @try {
+        if ([UIImage respondsToSelector:sel]) image=((id(*)(id,SEL,id,NSInteger,CGFloat))objc_msgSend)(UIImage.class,sel,bundle,2,UIScreen.mainScreen.scale);
+    } @catch (__unused NSException *e) {}
+    if (image) cache[bundle]=image;
+    return image;
 }
-
-static void DPSetControlsVisible(BOOL visible, BOOL animated) {
-    if (!gSplitWindow) return;
-    UIButton *exitButton = (UIButton *)[gSplitWindow.rootViewController.view viewWithTag:9002];
-    NSArray *targets = @[(id)(gDockOverlay ?: [NSNull null]), (id)(exitButton ?: [NSNull null])];
-    void (^changes)(void) = ^{
-        for (id obj in targets) {
-            if (![obj isKindOfClass:UIView.class]) continue;
-            ((UIView *)obj).alpha = visible ? 1.0 : 0.0;
-        }
-    };
-    for (id obj in targets) if ([obj isKindOfClass:UIView.class]) ((UIView *)obj).userInteractionEnabled = visible;
-    if (animated) [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionBeginFromCurrentState|UIViewAnimationOptionAllowUserInteraction animations:changes completion:nil];
-    else changes();
-}
-
-static void DPScheduleControlsHide(void) {
-    if (!gRunning) return;
-    NSUInteger token = ++gControlsHideToken;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!gRunning || token != gControlsHideToken) return;
-        DPSetControlsVisible(NO, YES);
-        DPLog(@"CONTROLS AUTO-HIDE");
+static NSUInteger actionVisibilitySerial;
+static void TARevealActions(void) {
+    if (!running || !floatingActions) return;
+    floatingActions.hidden=NO;
+    NSUInteger serial=++actionVisibilitySerial, token=generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(), ^{
+        if (running && generation==token && actionVisibilitySerial==serial) floatingActions.hidden=YES;
     });
 }
-
-static void DPRevealControls(void) {
-    if (!gRunning || !gSplitWindow) return;
-    DPSetControlsVisible(YES, YES);
-    DPScheduleControlsHide();
-}
-
-static void DPLayout(void) {
-    if (!gSplitWindow) return;
-    CGFloat width = gSplitWindow.bounds.size.width, height = gSplitWindow.bounds.size.height;
-    CGFloat ratio = MIN(kMaxSplitRatio, MAX(kMinSplitRatio, gSplitRatio));
-    CGFloat split = round(width * ratio * 3.0) / 3.0; // khớp lưới 3x của màn CarPlay hiện tại
-    CGFloat halfGap = kPaneGap * 0.5;
-
-    // Hai pane full chiều cao; ở giữa chỉ để một khe đen sạch, không còn vạch divider.
-    gLeftPane.frame = CGRectMake(0, 0, MAX(1, split - halfGap), height);
-    gRightPane.frame = CGRectMake(split + halfGap, 0, MAX(1, width - split - halfGap), height);
-    gLeftSlotButton.frame = gLeftPane.bounds;
-    gRightSlotButton.frame = gRightPane.bounds;
-
-    // Divider thật chỉ là hit-zone trong suốt để kéo. Khe giữa chính là dấu hiệu thị giác.
-    gDivider.frame = CGRectMake(split - kDividerGrabWidth * 0.5, 0, kDividerGrabWidth, height);
-
-    // V6.35: all four controls use the same compact circular visual language.
-    UIButton *exitButton = (UIButton *)[gSplitWindow.rootViewController.view viewWithTag:9002];
-    exitButton.frame = CGRectMake(width - 42.0, 7.0, 34.0, 34.0);
-
-    // Three left controls float independently; no bulky white square/rail.
-    if (gDockOverlay) {
-        CGFloat dockW = 38.0, buttonD = 34.0, gap = 7.0;
-        CGFloat dockH = buttonD * 3.0 + gap * 2.0;
-        gDockOverlay.frame = CGRectMake(5.0, MAX(6.0, (height - dockH) * 0.5), dockW, dockH);
-        NSArray *buttons = gDockOverlay.subviews;
-        for (NSUInteger i = 0; i < buttons.count; i++) {
-            UIView *v = buttons[i];
-            v.frame = CGRectMake(2.0, i * (buttonD + gap), buttonD, buttonD);
-        }
-    }
-
-    if (gPair.count > 0) DPFit(gPair[0], gLeftPane);
-    if (gPair.count > 1) DPFit(gPair[1], gRightPane);
-}
-static void DPStop(NSString *reason) {
-    if (!gRunning) return;
-    gRunning = NO;
-    ++gControlsHideToken; // cancel pending auto-hide callback
-    ++gGeneration; // Cancel delayed creation and inspection from this attempt.
-    DPLog(@"STOP %@", reason);
-    gSplitWindow.hidden = YES;
-    BOOL previousOwnCall = gOwnCall;
-    gOwnCall = YES;
-    for (DPRecord *record in gPair) {
-        DPRestoreFrame(record);
-        record.resizeQueued = NO;
-        record.resizeScene = nil;
-        record.geometryChanged = NO;
-        record.resizeState = 0;
-        record.resizeAttempts = 0;
-        record.submittedSize = CGSizeZero;
-        record.v636BlankChecks = 0;
-        record.v636RecoveryAttempted = NO;
-        [record.presentation removeFromSuperview];
-        record.presentation = nil;
-        if (!record.valid) { record.presentationID = nil; continue; }
-        @try {
-            SEL invalidate = NSSelectorFromString(@"invalidatePresentationViewForIdentifier:");
-            if (record.presentationID && [record.controller respondsToSelector:invalidate])
-                ((void(*)(id,SEL,id))objc_msgSend)(record.controller, invalidate, record.presentationID);
-        } @catch (NSException *e) { DPLog(@"INVALIDATE ERROR %@ %@", record.bundle, e.name); }
-        @try {
-            // Restore even if invalidating the presentation failed.
-            // Restore the observed native lifecycle, not FBScene.isActive:
-            // an active FBScene need not be the foreground application.
-            if (record.valid && record.restoreBackground) {
-                SEL background = NSSelectorFromString(@"backgroundSceneWithCompletion:");
-                if ([record.controller respondsToSelector:background])
-                    ((void(*)(id,SEL,id))objc_msgSend)(record.controller, background, nil);
-            }
-        } @catch (NSException *e) { DPLog(@"CLEANUP ERROR %@ %@", record.bundle, e.name); }
-        record.nativeBackgrounded = record.restoreBackground;
-        record.presentationID = nil;
-    }
-    gOwnCall = previousOwnCall;
-    gPair = nil;
-    gSplitWindow = nil; gLeftPane = nil; gRightPane = nil; gDivider = nil; gDockOverlay = nil; gStatus = nil;
-    gLeftSlotButton = nil; gRightSlotButton = nil;
-    gPickerSlot = -1;
-    DPRefreshButton();
-}
-@interface DPControls : NSObject
-- (void)startEmptySplit;
-- (void)tapLeftSlot;
-- (void)tapRightSlot;
-- (void)closePicker;
-- (void)pickerTap:(UIButton *)sender;
-- (void)stop;
-- (void)swap;
-- (void)dockHome;
-- (void)dockApps;
-- (void)dividerPan:(UIPanGestureRecognizer *)pan;
-- (void)revealControls;
+@interface TASplitWindow : UIWindow
 @end
-static void DPInspect(NSUInteger generation) {
-    if (!gRunning || generation != gGeneration) return;
-    BOOL allAttached = YES;
-    for (DPRecord *record in gPair) {
-        NSUInteger layers = DPLayers(record.presentation, 0);
-        BOOL active = DPSceneActive(record);
-        DPLog(@"RESULT bundle=%@ active=%d window=%p layers=%lu presentation=%@",
-              record.bundle, active, (__bridge void *)record.presentation.window,
-              (unsigned long)layers, record.presentationID);
-        if (!active || !record.presentation.window || !layers) allAttached = NO;
-        DPLog(@"VIEWPORT bundle=%@ logical=%@ bounds=%@ scaleX=%.3f scaleY=%.3f",
-              record.bundle, NSStringFromCGSize(record.submittedSize),
-              NSStringFromCGRect(record.presentation.bounds),
-              record.presentation.transform.a, record.presentation.transform.d);
+@implementation TASplitWindow
+- (void)sendEvent:(UIEvent *)event {
+    [super sendEvent:event];
+    if (event.type==UIEventTypeTouches && event.allTouches.count) TARevealActions();
+}
+@end
+@interface TAAppTile : UIButton
+@property(nonatomic,copy) NSString *bundle;
+@property(nonatomic) NSInteger slot;
+@property(nonatomic) NSUInteger token;
+@end
+@implementation TAAppTile
+@end
+static UIView *appPickers[2];
+static UIButton *dockButton;
+static __weak UIView *mountedDock;
+// Original native Dock geometry, restored before each compaction. Uniform
+// scaling preserves icon aspect ratio and UIKit's touch coordinate mapping.
+static NSMapTable *dockGeometry;
+static BOOL dockAdjusting;
+static void TARestoreDock(void) {
+    for (UIView *v in dockGeometry) {
+        NSDictionary *saved=[dockGeometry objectForKey:v];
+        CGAffineTransform applied=[saved[@"applied"] CGAffineTransformValue];
+        if (CGAffineTransformEqualToTransform(v.transform,applied)) {
+            v.transform=[saved[@"transform"] CGAffineTransformValue];
+            if (CGPointEqualToPoint(v.center,[saved[@"appliedCenter"] CGPointValue])) v.center=[saved[@"center"] CGPointValue];
+        }
     }
-    gStatus.text = allAttached && gPair.count == 2
-        ? [NSString stringWithFormat:@"%@ | %@", DPName(gPair[0]), DPName(gPair[1])]
-        : @"Chưa hiển thị đủ hai app";
-    // These are structural signals, never proof of live rendering/touch.
+    [dockGeometry removeAllObjects];
 }
-@implementation DPControls
-- (void)revealControls { DPRevealControls(); }
-- (void)stop { DPStop(@"user exit"); }
-- (void)dockHome { DPStop(@"dock home"); }
-- (void)dockApps {
-    DPStop(@"dock apps");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [gControls startEmptySplit]; });
+static UIView *TAFindDock(UIView *view, NSUInteger depth) {
+    if (!view || depth>14 || view.hidden || view.alpha<0.01) return nil;
+    NSString *name=NSStringFromClass(view.class);
+    if ([name hasPrefix:@"DB"] && [name containsString:@"Dock"] && view.bounds.size.width>=32 && view.bounds.size.width<=100 && view.bounds.size.height>=140) return view;
+    for (UIView *child in view.subviews) { UIView *found=TAFindDock(child,depth+1); if (found) return found; }
+    return nil;
 }
 
-- (void)dividerPan:(UIPanGestureRecognizer *)pan {
-    if (!gRunning || !gSplitWindow || gPair.count != 2) return;
-    DPRevealControls();
-    UIView *root = gSplitWindow.rootViewController.view;
-    CGFloat width = root.bounds.size.width;
-    if (width <= 1.0) return;
-
-    CGPoint point = [pan locationInView:root];
-    CGFloat ratio = point.x / width;
-    ratio = MIN(kMaxSplitRatio, MAX(kMinSplitRatio, ratio));
-
-    if (pan.state == UIGestureRecognizerStateBegan ||
-        pan.state == UIGestureRecognizerStateChanged) {
-        gSplitRatio = ratio;
-        DPLayout();
+static BOOL TADockButtonVisible(void) {
+    if (!dockButton.window || dockButton.window.hidden || dockButton.hidden) return NO;
+    CGRect visible=[dockButton convertRect:dockButton.bounds toView:dockButton.window];
+    if (!CGRectIntersectsRect(visible,dockButton.window.bounds)) return NO;
+    for (UIView *parent=dockButton;parent;parent=parent.superview) {
+        if (parent.hidden || parent.alpha<0.01 || !parent.userInteractionEnabled) return NO;
+        if (parent.clipsToBounds) {
+            CGRect clip=[parent convertRect:parent.bounds toView:dockButton.window];
+            visible=CGRectIntersection(visible,clip);
+            if (CGRectIsNull(visible) || CGRectIsEmpty(visible)) return NO;
+        }
     }
-    if (pan.state == UIGestureRecognizerStateEnded ||
-        pan.state == UIGestureRecognizerStateCancelled ||
-        pan.state == UIGestureRecognizerStateFailed) {
-        gSplitRatio = ratio;
-        DPLayout();
-        DPLog(@"DIVIDER MOVE END ratio=%.4f left=%.1f right=%.1f gap=%.1f",
-              gSplitRatio, gLeftPane.bounds.size.width, gRightPane.bounds.size.width, kPaneGap);
-        DPInspect(gGeneration);
+    CGPoint center=[dockButton convertPoint:CGPointMake(CGRectGetMidX(dockButton.bounds),CGRectGetMidY(dockButton.bounds)) toView:dockButton.window];
+    UIView *hit=[dockButton.window hitTest:center withEvent:nil];
+    return hit==dockButton || [hit isDescendantOfView:dockButton];
+}
+static void TADumpDockTree(UIView *view, NSUInteger depth, NSInteger *budget) {
+    if (!view || depth>12 || *budget<=0) return;
+    --*budget;
+    NSString *name=NSStringFromClass(view.class);
+    if (depth<3 || [name hasPrefix:@"DB"] || [name containsString:@"Dock"] || [name containsString:@"Sidebar"]) {
+        TALog(@"DOCK TREE depth=%lu class=%@ frame=%@ bounds=%@ hidden=%d alpha=%.2f interactive=%d",(unsigned long)depth,name,NSStringFromCGRect(view.frame),NSStringFromCGRect(view.bounds),view.hidden,view.alpha,view.userInteractionEnabled);
+    }
+    for (UIView *child in view.subviews) TADumpDockTree(child,depth+1,budget);
+}
+static void TADumpDock(void) {
+    NSInteger budget=180;
+    for (UIWindow *window in dashboard.windows) {
+        if (window==splitWindow || window==buttonWindow) continue;
+        TALog(@"DOCK WINDOW class=%@ level=%.1f hidden=%d",NSStringFromClass(window.class),window.windowLevel,window.hidden);
+        TADumpDockTree(window,0,&budget);
     }
 }
 
-- (void)closePicker {
-    gPickerWindow.hidden = YES;
-    gPickerWindow = nil;
-    gPickerBundles = nil;
-    gPickerSlot = -1;
+static void TAClearSlot(NSInteger slot, NSString *reason) {
+    ++slotRequests[slot];
+    TARecord *r=slots[slot]; r.attaching=NO; slots[slot]=nil;
+    BOOL previous=ownCall; ownCall=YES; TACleanup(r); ownCall=previous;
+    choose[slot].hidden=NO; choose[slot].enabled=YES;
+    [choose[slot] setImage:nil forState:UIControlStateNormal];
+    [choose[slot] setTitle:@"Chạm để chọn ứng dụng" forState:UIControlStateNormal];
+    TALog(@"SLOT CLEAR side=%ld reason=%@",(long)slot,reason);
 }
-
-// Danh sách các app còn "sống" (controller vẫn hợp lệ), mới mở gần đây lên
-// trước. Loại bỏ bundle đã gắn ở PANE CÒN LẠI để không chọn trùng 1 app cho
-// cả 2 bên.
-- (NSArray<NSString *> *)validCachedBundlesExcluding:(NSString *)excludeBundle {
-    NSMutableArray<NSString *> *result = [NSMutableArray array];
-    for (NSString *bundle in gOrder.reverseObjectEnumerator) {
-        if (!gRecords[bundle].valid) continue;
-        if (excludeBundle && [bundle isEqualToString:excludeBundle]) continue;
-        [result addObject:bundle];
+static void TAStop(NSString *reason) {
+    resumeBundles=nil; resumeCandidate=nil;
+    if (!running) return;
+    running = NO; ++generation; ++actionVisibilitySerial;
+    for (NSInteger i=0;i<2;i++) { [appPickers[i] removeFromSuperview]; appPickers[i]=nil; }
+    TALog(@"STOP %@", reason);
+    BOOL previous = ownCall; ownCall = YES;
+    for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
+    ownCall = previous;
+    splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
+    buttonWindow.hidden = order.count < 1;
+}
+// Native Home releases presentations and restores geometry, but retains the
+// selected bundle IDs. Never retain old scene pointers as a resume snapshot.
+static void TASuspend(NSString *reason) {
+    if (!running) return;
+    NSArray *selection=@[slots[0].bundle ?: @"",slots[1].bundle ?: @""];
+    TAStop(reason);
+    resumeBundles=selection;
+    TALog(@"SESSION SAVED left=%@ right=%@",selection[0],selection[1]);
+    buttonWindow.hidden=NO;
+}
+@interface TAControls : NSObject
+- (void)start;
+- (void)enter;
+- (void)selectTile:(TAAppTile *)tile;
+- (void)closePicker:(UIButton *)sender;
+- (void)holdSwap:(UILongPressGestureRecognizer *)gesture;
+- (void)holdDock:(UILongPressGestureRecognizer *)gesture;
+- (void)offerNative:(NSString *)bundle;
+- (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
+- (void)fold;
+- (void)changeLeft;
+- (void)changeRight;
+- (void)swapSides;
+- (void)showPairs;
+- (void)replace:(NSString *)bundle slot:(NSInteger)slot;
+- (void)restoreSelection:(NSArray<NSString *> *)selection;
+- (void)stop;
+- (void)restartSplit;
+- (void)toggleActions;
+- (void)snapshot;
+- (void)pick:(UIButton *)sender;
+- (void)attach:(NSString *)bundle slot:(NSInteger)slot;
+@end
+static TAControls *controls;
+static UIButton *TAButton(NSString *title, SEL action) {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    [b setTitle:title forState:UIControlStateNormal]; b.tintColor = UIColor.whiteColor;
+    b.backgroundColor = [UIColor colorWithWhite:0.16 alpha:0.95];
+    [b addTarget:controls action:action forControlEvents:UIControlEventTouchUpInside]; return b;
+}
+@implementation TAControls
+- (void)restoreSelection:(NSArray<NSString *> *)selection {
+    if (!running || selection.count!=2) return;
+    for (NSInteger i=0;i<2;i++) {
+        NSString *bundle=selection[i];
+        if (!bundle.length) continue;
+        if (records[bundle]) [self attach:bundle slot:i];
+        else TALog(@"RESUME missing slot=%ld bundle=%@",(long)i,bundle);
     }
-    return result;
 }
-
-// V6.40: MỞ SPLIT RỖNG NGAY LẬP TỨC — 2 pane trống, mỗi pane có nút riêng
-// "chạm để chọn app". Không còn cố tự động hoá việc mở cả 2 app cùng lúc
-// bằng 1 kịch bản dựng sẵn (đã chứng minh dễ vỡ vì mỗi lần foreground là 1
-// lần rủi ro app kia bị đẩy xuống nền). Thay vào đó: người dùng chọn TỪNG
-// bên một cách tự nhiên, có thời gian nghỉ thật giữa 2 lần chọn — hệ thống
-// có cơ hội ổn định app vừa foreground trước khi app thứ 2 vào.
-- (void)startEmptySplit {
-    if (gRunning || !gSession || DPDashboard() != gSession) return;
-    CGRect bounds = gSession.coordinateSpace.bounds;
-    if (bounds.size.width <= 109 || bounds.size.height <= 60) return;
-
-    gPair = @[];
-    gRunning = YES;
-    NSUInteger generation = ++gGeneration;
-    gNativeSize = bounds.size;
-
-    gSplitWindow = [[UIWindow alloc] initWithWindowScene:gSession];
-    gSplitWindow.frame = bounds;
-    gSplitWindow.windowLevel = UIWindowLevelAlert + 70;
-    gSplitWindow.rootViewController = [UIViewController new];
-    UIView *root = gSplitWindow.rootViewController.view;
-    root.backgroundColor = UIColor.blackColor; // chỉ lấp khe 2pt giữa 2 pane
-    gLeftPane = [UIView new]; gRightPane = [UIView new];
-    gLeftPane.clipsToBounds = YES; gRightPane.clipsToBounds = YES;
-    for (UIView *pane in @[gLeftPane, gRightPane]) {
-        pane.layer.cornerRadius = kPaneCornerRadius;
-        if (@available(iOS 13.0, *)) pane.layer.cornerCurve = kCACornerCurveContinuous;
-        pane.layer.masksToBounds = YES;
+- (void)enter {
+    if (running) { TARevealActions(); return; }
+    NSArray<NSString *> *selection=[resumeBundles copy];
+    NSString *candidate=[resumeCandidate copy];
+    [self start];
+    if (!running) return;
+    resumeBundles=nil; resumeCandidate=nil;
+    if (selection.count!=2) return;
+    if (!candidate.length || [selection containsObject:candidate] || !records[candidate]) {
+        [self restoreSelection:selection]; return;
     }
-    gLeftPane.backgroundColor = UIColor.blackColor;
-    gRightPane.backgroundColor = UIColor.blackColor;
-    [root addSubview:gLeftPane]; [root addSubview:gRightPane];
-
-    gStatus = [UILabel new];
-    gStatus.hidden = YES;
-
-    UIButton *exit = DPExitButton();
-    [root addSubview:exit];
-    gDivider = [UIView new];
-    gDivider.backgroundColor = UIColor.clearColor;
-    gDivider.userInteractionEnabled = YES;
-    UIPanGestureRecognizer *dividerPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dividerPan:)];
-    dividerPan.minimumNumberOfTouches = 1;
-    dividerPan.maximumNumberOfTouches = 1;
-    [gDivider addGestureRecognizer:dividerPan];
-    [root addSubview:gDivider];
-
-    gDockOverlay = [UIView new];
-    gDockOverlay.backgroundColor = UIColor.clearColor;
-    gDockOverlay.clipsToBounds = NO;
-    [gDockOverlay addSubview:DPControlButton(@"house.fill", @"⌂", @"Trang chủ", @selector(dockHome))];
-    [gDockOverlay addSubview:DPControlButton(@"square.grid.2x2.fill", @"▦", @"Chọn lại từ đầu", @selector(dockApps))];
-    [gDockOverlay addSubview:DPControlButton(@"arrow.left.arrow.right", @"↔", @"Đổi vị trí hai ứng dụng", @selector(swap))];
-    [root addSubview:gDockOverlay];
-
-    UITapGestureRecognizer *revealTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(revealControls)];
-    revealTap.cancelsTouchesInView = NO;
-    revealTap.delaysTouchesBegan = NO;
-    revealTap.delaysTouchesEnded = NO;
-    [root addGestureRecognizer:revealTap];
-
-    // 2 nút chọn app, mỗi cái phủ trọn 1 pane — đây là điểm khác biệt chính
-    // so với luồng cũ: không app nào được gắn tự động, người dùng chủ động
-    // chạm để mở picker cho TỪNG bên.
-    gLeftSlotButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [gLeftSlotButton setTitle:@"Chạm để chọn app" forState:UIControlStateNormal];
-    gLeftSlotButton.tintColor = UIColor.whiteColor;
-    gLeftSlotButton.titleLabel.font = [UIFont systemFontOfSize:14];
-    gLeftSlotButton.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1.0];
-    [gLeftSlotButton addTarget:self action:@selector(tapLeftSlot) forControlEvents:UIControlEventTouchUpInside];
-    [gLeftPane addSubview:gLeftSlotButton];
-
-    gRightSlotButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [gRightSlotButton setTitle:@"Chạm để chọn app" forState:UIControlStateNormal];
-    gRightSlotButton.tintColor = UIColor.whiteColor;
-    gRightSlotButton.titleLabel.font = [UIFont systemFontOfSize:14];
-    gRightSlotButton.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1.0];
-    [gRightSlotButton addTarget:self action:@selector(tapRightSlot) forControlEvents:UIControlEventTouchUpInside];
-    [gRightPane addSubview:gRightSlotButton];
-
-    DPLayout(); gSplitWindow.hidden = NO; DPSetControlsVisible(YES, NO); DPScheduleControlsHide(); DPRefreshButton();
-    DPDumpDockCandidates();
-    DPLog(@"START EMPTY SPLIT ratio=%.3f gap=%.1f generation=%lu", gSplitRatio, kPaneGap, (unsigned long)generation);
-
-    // Mở luôn picker cho pane trái để đỡ phải chạm thêm 1 lần — pane phải
-    // vẫn cần chạm thủ công (đây chính là "khoảng nghỉ thật" giữa 2 lần
-    // foreground, điểm mấu chốt của cách làm mới).
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-        if (gRunning && generation == gGeneration) [self openPickerForSlot:0];
-    });
-}
-
-- (void)tapLeftSlot { [self openPickerForSlot:0]; }
-- (void)tapRightSlot { [self openPickerForSlot:1]; }
-
-// Picker CHỌN 1 LẦN — chạm là gắn ngay, không cần bước "chọn 2 rồi mới chạy"
-// như trước. Loại bỏ bundle đã gắn ở pane còn lại khỏi danh sách.
-- (void)openPickerForSlot:(NSInteger)slot {
-    if (!gRunning || !gSession || (slot != 0 && slot != 1)) return;
-    [self closePicker];
-    gPickerSlot = slot;
-
-    NSString *otherBundle = nil;
-    if (slot == 0 && gPair.count > 1) otherBundle = gPair[1].bundle;
-    if (slot == 1 && gPair.count > 0) otherBundle = gPair[0].bundle;
-
-    NSArray<NSString *> *bundles = [self validCachedBundlesExcluding:otherBundle];
-    if (bundles.count == 0) { gPickerSlot = -1; return; }
-
-    gPickerBundles = [bundles mutableCopy];
-
-    CGRect bounds = gSession.coordinateSpace.bounds;
-    gPickerWindow = [[UIWindow alloc] initWithWindowScene:gSession];
-    gPickerWindow.windowLevel = UIWindowLevelAlert + 85;
-    gPickerWindow.frame = CGRectMake(45, 0, MAX(1, bounds.size.width - 45), bounds.size.height);
-    gPickerWindow.rootViewController = [UIViewController new];
-    UIView *root = gPickerWindow.rootViewController.view;
-    root.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.92];
-
-    UILabel *hint = [UILabel new];
-    hint.text = slot == 0 ? @"Chọn app cho bên trái" : @"Chọn app cho bên phải";
-    hint.textColor = UIColor.whiteColor;
-    hint.font = [UIFont systemFontOfSize:12];
-    hint.textAlignment = NSTextAlignmentCenter;
-    hint.frame = CGRectMake(8, 6, root.bounds.size.width - 16, 20);
-    hint.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [root addSubview:hint];
-
-    CGFloat rowH = 34, gap = 6, top = 32;
-    for (NSUInteger i = 0; i < gPickerBundles.count; i++) {
-        UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
-        row.tag = (NSInteger)i;
-        row.backgroundColor = [UIColor colorWithWhite:0.2 alpha:0.9];
-        row.layer.cornerRadius = 6;
-        row.tintColor = UIColor.whiteColor;
-        [row setTitle:DPName(gRecords[gPickerBundles[i]]) forState:UIControlStateNormal];
-        row.frame = CGRectMake(12, top + i * (rowH + gap), root.bounds.size.width - 24, rowH);
-        row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-        [row addTarget:self action:@selector(pickerTap:) forControlEvents:UIControlEventTouchUpInside];
-        [root addSubview:row];
+    NSDictionary *names=@{@"com.apple.Maps":@"Apple Maps",@"com.google.Maps":@"Google Maps",@"vn.vietmap.live":@"Vietmap Live",@"com.google.ios.youtubemusic":@"YouTube Music",@"com.google.ios.youtube":@"YouTube"};
+    UIAlertController *picker=[UIAlertController alertControllerWithTitle:@"Đưa app vừa mở vào đâu?" message:names[candidate] ?: @"App ở bên còn lại sẽ được giữ nguyên." preferredStyle:UIAlertControllerStyleAlert];
+    NSUInteger token=generation;
+    for (NSInteger side=0;side<2;side++) {
+        [picker addAction:[UIAlertAction actionWithTitle:side==0 ? @"Bên trái" : @"Bên phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!running || generation!=token) return;
+                NSMutableArray *next=[selection mutableCopy]; next[side]=candidate;
+                [self restoreSelection:next];
+            });
+        }]];
     }
-
-    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
-    [cancel setTitle:@"Huỷ" forState:UIControlStateNormal];
-    cancel.tintColor = UIColor.whiteColor;
-    cancel.frame = CGRectMake(root.bounds.size.width - 60, 4, 52, 24);
-    cancel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
-    [cancel addTarget:self action:@selector(closePicker) forControlEvents:UIControlEventTouchUpInside];
-    [root addSubview:cancel];
-
-    gPickerWindow.hidden = NO;
+    [picker addAction:[UIAlertAction actionWithTitle:@"Giữ cặp cũ" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
+        dispatch_async(dispatch_get_main_queue(), ^{ if (running && generation==token) [self restoreSelection:selection]; });
+    }]];
+    [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
 }
-
-- (void)pickerTap:(UIButton *)sender {
-    if (!gPickerBundles || sender.tag < 0 || (NSUInteger)sender.tag >= gPickerBundles.count) return;
-    NSString *bundle = gPickerBundles[(NSUInteger)sender.tag];
-    NSInteger slot = gPickerSlot;
-    [self closePicker];
-    if (slot == 0 || slot == 1) [self attachBundle:bundle toSlot:slot];
+- (void)offerNative:(NSString *)bundle {
+    if (!running || !records[bundle] || TAAttachPending() || [slots[0].bundle isEqual:bundle] || [slots[1].bundle isEqual:bundle]) return;
+    if (splitWindow.rootViewController.presentedViewController) { TALog(@"NATIVE OFFER deferred to picker bundle=%@",bundle); return; }
+    floatingActions.hidden=YES;
+    UIAlertController *picker=[UIAlertController alertControllerWithTitle:TAAppName(bundle) message:@"Đưa app vào bên nào?" preferredStyle:UIAlertControllerStyleAlert];
+    NSUInteger token=generation;
+    for (NSInteger side=0;side<2;side++) {
+        [picker addAction:[UIAlertAction actionWithTitle:side==0 ? @"Bên trái" : @"Bên phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (running && generation==token) [self replace:bundle slot:side];
+            });
+        }]];
+    }
+    [picker addAction:[UIAlertAction actionWithTitle:@"Giữ nguyên" style:UIAlertActionStyleCancel handler:nil]];
+    TALog(@"NATIVE OFFER bundle=%@",bundle);
+    [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
 }
-
-- (void)swap {
-    if (gPair.count != 2 || !gPair[0].presentation || !gPair[1].presentation) return;
-    gPair = @[gPair[1], gPair[0]];
-    [gLeftPane addSubview:gPair[0].presentation];
-    [gRightPane addSubview:gPair[1].presentation];
-    DPLayout();
-    DPInspect(gGeneration);
-    DPLog(@"SWAP left=%@ right=%@", gPair[0].bundle, gPair[1].bundle);
+- (void)fold { floatingActions.hidden=YES; TARememberPair(); TASuspend(@"fold"); }
+- (void)changeLeft { [self pick:choose[0]]; }
+- (void)changeRight { [self pick:choose[1]]; }
+- (void)replace:(NSString *)bundle slot:(NSInteger)slot {
+    if (!running || slot<0 || slot>1 || !records[bundle]) return;
+    if ([slots[slot].bundle isEqual:bundle]) return;
+    if ([slots[1-slot].bundle isEqual:bundle]) return;
+    TAClearSlot(slot,@"replace"); [self attach:bundle slot:slot];
 }
-
-// V6.40: gắn ĐÚNG 1 app vào ĐÚNG 1 slot — foreground 1 lần, chờ presentation
-// thật render xong, rồi hiện lên. Nếu đây là bên THỨ HAI được gắn, sau khi
-// nó ổn định, tự kiểm tra lại bên ĐẦU TIÊN xem có bị đẩy xuống nền không
-// (foreground app thứ 2 có thể làm việc đó) — cứu hộ bằng cách tạo lại
-// presentation, KHÔNG gọi foreground lần nữa (tránh vòng đẩy nhau qua lại).
-- (void)attachBundle:(NSString *)bundle toSlot:(NSInteger)slot {
-    if (!gRunning || !gSession || DPDashboard() != gSession) return;
-    if (slot != 0 && slot != 1) return;
-    DPRecord *record = gRecords[bundle];
-    if (!record.valid) { DPLog(@"REFUSE invalid record bundle=%@(%d)", bundle, record.valid); return; }
-
-    DPRecord *other = nil;
-    if (slot == 0 && gPair.count > 1) other = gPair[1];
-    if (slot == 1 && gPair.count > 0) other = gPair[0];
-    if (other && other.controller == record.controller) {
-        DPLog(@"REFUSE same controller=%p bundle=%@(cat=%@) other=%@(cat=%@) — có thể 2 app cùng 1 vai trò CarPlay (vd Navigation)",
-              (__bridge void *)record.controller, bundle, record.category, other.bundle, other.category);
+- (void)swapSides {
+    if (!running || !slots[0].presentation || !slots[1].presentation) return;
+    for (NSInteger i=0;i<2;i++) { [appPickers[i] removeFromSuperview]; appPickers[i]=nil; }
+    TARecord *left=slots[0]; slots[0]=slots[1]; slots[1]=left;
+    ++slotRequests[0]; ++slotRequests[1];
+    for (NSInteger i=0;i<2;i++) {
+        [panes[i] addSubview:slots[i].presentation]; slots[i].presentation.frame=panes[i].bounds;
+    }
+    floatingActions.hidden=YES; TARememberPair(); TALog(@"SWAP completed");
+}
+- (void)showPairs {
+    if (!running || splitWindow.rootViewController.presentedViewController) return;
+    floatingActions.hidden=YES;
+    UIAlertController *picker=[UIAlertController alertControllerWithTitle:@"Cặp gần dùng" message:recentPairs.count ? nil : @"Ghép hai app để lưu cặp gần dùng." preferredStyle:UIAlertControllerStyleAlert];
+    NSUInteger token=generation;
+    for (NSArray *pair in [recentPairs copy]) {
+        NSString *title=[NSString stringWithFormat:@"%@ + %@",TAAppName(pair[0]),TAAppName(pair[1])];
+        UIAlertAction *action=[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!running || generation!=token) return;
+                TAClearSlot(0,@"recent pair"); TAClearSlot(1,@"recent pair"); [self restoreSelection:pair];
+            });
+        }];
+        action.enabled=records[pair[0]]!=nil && records[pair[1]]!=nil; [picker addAction:action];
+    }
+    [picker addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+    [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
+}
+- (void)stop { TARememberPair(); TAStop(@"user"); }
+- (void)toggleActions { TARevealActions(); }
+- (void)snapshot {
+    floatingActions.hidden = YES;
+    TALog(@"MANUAL SNAPSHOT REQUEST");
+    TADumpDock();
+    notify_post("com.sushibta.taduo.snapshot");
+}
+- (void)restartSplit {
+    if (!running || splitWindow.rootViewController.presentedViewController) return;
+    TAStop(@"choose apps again");
+    dispatch_async(dispatch_get_main_queue(), ^{ [self start]; });
+}
+- (void)start {
+    if (running || !dashboard || TADashboard() != dashboard) return;
+    CGRect bounds = dashboard.coordinateSpace.bounds;
+    if (bounds.size.width < 150 || bounds.size.height < 100) return;
+    running = YES; ++generation;
+    splitWindow = [[TASplitWindow alloc] initWithWindowScene:dashboard];
+    splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
+    splitWindow.rootViewController = [UIViewController new];
+    UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.blackColor;
+    // Both scenes occupy full display height. Only floating button hit areas
+    // cover content; no toolbar strip is reserved in scene geometry.
+    CGFloat half = bounds.size.width / 2;
+    for (NSInteger i = 0; i < 2; i++) {
+        panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * half, 0, half, bounds.size.height)];
+        panes[i].clipsToBounds = YES; [root addSubview:panes[i]];
+        choose[i] = TAButton(@"Chạm để chọn ứng dụng", @selector(pick:));
+        choose[i].titleLabel.font=[UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        choose[i].titleLabel.numberOfLines=2; choose[i].titleLabel.textAlignment=NSTextAlignmentCenter;
+        choose[i].backgroundColor=[UIColor colorWithWhite:0.065 alpha:1];
+        choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
+    }
+    UIView *divider=[[UIView alloc] initWithFrame:CGRectMake(half-1,0,2,bounds.size.height)];
+    divider.backgroundColor=[UIColor colorWithWhite:0.25 alpha:1]; divider.userInteractionEnabled=NO; [root addSubview:divider];
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-20,MAX(4,(bounds.size.height-124)/2),40,124)];
+    floatingActions.backgroundColor=[UIColor colorWithWhite:0.06 alpha:0.94]; floatingActions.layer.cornerRadius=12;
+    NSArray *titles=@[@"Đổi trái phải",@"Thu về CarPlay",@"Thoát chia màn"];
+    NSArray *actions=@[@"swapSides",@"fold",@"stop"];
+    for (NSUInteger i=0;i<3;i++) {
+        UIButton *b=TAButton(@"",NSSelectorFromString(actions[i]));
+        b.frame=CGRectMake(0,i*42,40,40); b.backgroundColor=UIColor.clearColor;
+        [b setImage:TAGlyph(i+1) forState:UIControlStateNormal]; b.accessibilityLabel=titles[i];
+        if (i==0) [b addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(holdSwap:)]];
+        [floatingActions addSubview:b];
+    }
+    floatingActions.hidden=YES; [root addSubview:floatingActions];
+    buttonWindow.hidden = YES; splitWindow.hidden = NO;
+    TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
+}
+- (void)holdDock:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state==UIGestureRecognizerStateBegan) [self snapshot];
+}
+- (void)holdSwap:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state!=UIGestureRecognizerStateBegan || !running || splitWindow.rootViewController.presentedViewController) return;
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"Đổi ứng dụng" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    NSUInteger token=generation;
+    for (NSInteger i=0;i<2;i++) [menu addAction:[UIAlertAction actionWithTitle:i==0 ? @"Đổi app trái" : @"Đổi app phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+        dispatch_async(dispatch_get_main_queue(), ^{ if (running && generation==token) [self pick:choose[i]]; });
+    }]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"Lấy log" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { [self snapshot]; }]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+    [splitWindow.rootViewController presentViewController:menu animated:YES completion:nil];
+}
+- (void)closePicker:(UIButton *)sender {
+    NSInteger slot=sender.tag; if (slot<0 || slot>1) return;
+    [appPickers[slot] removeFromSuperview]; appPickers[slot]=nil;
+}
+- (void)selectTile:(TAAppTile *)tile {
+    if (!running || tile.token!=generation || tile.slot<0 || tile.slot>1 || [slots[1-tile.slot].bundle isEqual:tile.bundle]) return;
+    NSInteger slot=tile.slot; NSString *bundle=tile.bundle;
+    [appPickers[slot] removeFromSuperview]; appPickers[slot]=nil;
+    TALog(@"PICK SELECT side=%ld bundle=%@",(long)slot,bundle);
+    [self replace:bundle slot:slot];
+    NSInteger other=1-slot;
+    if (appPickers[other]) [self pick:choose[other]];
+}
+- (void)pick:(UIButton *)sender {
+    NSInteger slot=sender.tag;
+    if (!running || slot<0 || slot>1 || splitWindow.rootViewController.presentedViewController) return;
+    TALog(@"ICON PICKER side=%ld count=%lu",(long)slot,(unsigned long)order.count);
+    [appPickers[slot] removeFromSuperview];
+    UIView *panel=[[UIView alloc] initWithFrame:panes[slot].frame]; panel.backgroundColor=[UIColor colorWithWhite:0.055 alpha:1];
+    appPickers[slot]=panel; [splitWindow.rootViewController.view insertSubview:panel belowSubview:floatingActions];
+    UILabel *title=[[UILabel alloc] initWithFrame:CGRectMake(10,6,panel.bounds.size.width-46,28)];
+    title.text=slot==0 ? @"Ứng dụng bên trái" : @"Ứng dụng bên phải"; title.font=[UIFont systemFontOfSize:12 weight:UIFontWeightSemibold]; title.textColor=UIColor.whiteColor; [panel addSubview:title];
+    UIButton *close=TAButton(@"×",@selector(closePicker:)); close.tag=slot; close.frame=CGRectMake(panel.bounds.size.width-34,4,30,30); close.accessibilityLabel=@"Đóng chọn ứng dụng"; [panel addSubview:close];
+    UIScrollView *grid=[[UIScrollView alloc] initWithFrame:CGRectMake(6,38,panel.bounds.size.width-12,panel.bounds.size.height-42)]; [panel addSubview:grid];
+    CGFloat width=grid.bounds.size.width/2; NSUInteger index=0;
+    for (NSString *bundle in [[order copy] reverseObjectEnumerator]) {
+        TARecord *r=records[bundle]; if (!r) continue;
+        BOOL used=[slots[1-slot].bundle isEqual:bundle] || (slots[1-slot] && slots[1-slot].controller==r.controller);
+        TAAppTile *tile=[TAAppTile buttonWithType:UIButtonTypeCustom]; tile.bundle=bundle; tile.slot=slot; tile.token=generation;
+        tile.frame=CGRectMake((index%2)*width,(index/2)*80,width,76); tile.enabled=!used; tile.alpha=used ? 0.25 : 1;
+        tile.accessibilityLabel=[TAAppName(bundle) stringByAppendingString:used ? @", đang dùng ở ô kia" : @""];
+        UIImageView *icon=[[UIImageView alloc] initWithFrame:CGRectMake((width-44)/2,3,44,44)]; icon.image=TAAppIcon(bundle); icon.contentMode=UIViewContentModeScaleAspectFit; icon.layer.cornerRadius=10; icon.clipsToBounds=YES; [tile addSubview:icon];
+        if (!icon.image) {
+            icon.backgroundColor=[UIColor colorWithWhite:0.2 alpha:1];
+            UILabel *fallback=[[UILabel alloc] initWithFrame:icon.bounds]; fallback.text=[[TAAppName(bundle) substringToIndex:1] uppercaseString]; fallback.font=[UIFont boldSystemFontOfSize:24]; fallback.textAlignment=NSTextAlignmentCenter; fallback.textColor=UIColor.whiteColor; [icon addSubview:fallback];
+        }
+        if ([slots[slot].bundle isEqual:bundle]) { icon.layer.borderWidth=2; icon.layer.borderColor=TACyan().CGColor; }
+        UILabel *label=[[UILabel alloc] initWithFrame:CGRectMake(2,50,width-4,24)]; label.text=TAAppName(bundle); label.textColor=UIColor.whiteColor; label.font=[UIFont systemFontOfSize:10 weight:UIFontWeightMedium]; label.textAlignment=NSTextAlignmentCenter; label.numberOfLines=2; [tile addSubview:label];
+        [tile addTarget:self action:@selector(selectTile:) forControlEvents:UIControlEventTouchUpInside]; [grid addSubview:tile]; index++;
+    }
+    grid.contentSize=CGSizeMake(grid.bounds.size.width,((index+1)/2)*80);
+    if (!index) {
+        UILabel *empty=[[UILabel alloc] initWithFrame:grid.bounds]; empty.text=@"Mở ứng dụng trên CarPlay một lần, rồi quay lại chọn."; empty.textColor=UIColor.lightGrayColor; empty.font=[UIFont systemFontOfSize:13]; empty.numberOfLines=0; empty.textAlignment=NSTextAlignmentCenter; [grid addSubview:empty];
+    }
+}
+- (void)attach:(NSString *)bundle slot:(NSInteger)slot {
+    TARecord *r = records[bundle], *other = slots[1-slot];
+    if (!running || slots[slot] || !r || (other && (other == r || other.controller == r.controller))) return;
+    NSString *sid = TAValue(r.controller, @"sceneID"), *otherSID = TAValue(other.controller, @"sceneID");
+    if (other && ![[sid componentsSeparatedByString:@":"].firstObject isEqual:[otherSID componentsSeparatedByString:@":"].firstObject]) return;
+    slots[slot] = r; r.restoreBackground = r.backgrounded; r.attaching=YES;
+    NSUInteger token = generation, request=++slotRequests[slot];
+    TALog(@"ATTACH BEGIN side=%ld bundle=%@",(long)slot,bundle);
+    BOOL previous = ownCall; ownCall = YES;
+    @try {
+        SEL fg = NSSelectorFromString(@"foregroundSceneWithSettings:completion:");
+        if (![r.controller respondsToSelector:fg]) @throw [NSException exceptionWithName:@"MissingForegroundAPI" reason:bundle userInfo:nil];
+        ((void(*)(id,SEL,id,id))objc_msgSend)(r.controller, fg, r.activation, nil);
+        r.backgrounded = NO;
+    } @catch (NSException *e) { TALog(@"ATTACH ERROR %@", e.name); TAClearSlot(slot,@"foreground failed"); ownCall = previous; return; }
+    ownCall = previous;
+    UIImage *icon=TAAppIcon(bundle);
+    if (icon) { UIGraphicsBeginImageContextWithOptions(CGSizeMake(36,36),NO,0); [icon drawInRect:CGRectMake(0,0,36,36)]; UIImage *small=UIGraphicsGetImageFromCurrentImageContext(); UIGraphicsEndImageContext(); [choose[slot] setImage:[small imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] forState:UIControlStateNormal]; }
+    choose[slot].enabled = NO; [choose[slot] setTitle:@"Đang mở…" forState:UIControlStateNormal];
+    [self finishAttach:slot generation:token request:request attempt:0];
+}
+- (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt {
+    if (!running || generation!=token || slotRequests[slot]!=request || !slots[slot].attaching) return;
+    TARecord *r=slots[slot];
+    CGRect frame=CGRectZero;
+    BOOL ready=TAReadFrame(TAValue(r.controller,@"scene"),&frame);
+    // Give native activation time to settle; re-read the current controller
+    // every time. Foreground is requested once, never polled/replayed.
+    if (attempt<2 || !ready) {
+        if (attempt>=16) { TALog(@"ATTACH TIMEOUT side=%ld bundle=%@",(long)slot,r.bundle); TAClearSlot(slot,@"scene timeout"); return; }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(), ^{
+            [self finishAttach:slot generation:token request:request attempt:attempt+1];
+        });
         return;
     }
-    if (other) {
-        NSString *recordDisplay = [record.sid componentsSeparatedByString:@":"].firstObject;
-        NSString *otherDisplay = [other.sid componentsSeparatedByString:@":"].firstObject;
-        if (![recordDisplay isEqual:otherDisplay]) { DPLog(@"REFUSE mismatched displays"); return; }
-    }
-
-    NSUInteger generation = gGeneration;
-    record.restoreBackground = record.nativeBackgrounded;
-    UIButton *placeholder = (slot == 0) ? gLeftSlotButton : gRightSlotButton;
-    UIView *pane = (slot == 0) ? gLeftPane : gRightPane;
-
-    DPLog(@"ATTACH slot=%ld bundle=%@ — unscaled scene resize", (long)slot, bundle);
-    BOOL previousOwnCall = gOwnCall;
-    gOwnCall = YES;
+    BOOL old=ownCall; ownCall=YES;
     @try {
-        SEL foreground = NSSelectorFromString(@"foregroundSceneWithSettings:completion:");
-        if (![record.controller respondsToSelector:foreground])
-            @throw [NSException exceptionWithName:@"MissingForegroundAPI" reason:record.bundle userInfo:nil];
-        ((void(*)(id,SEL,id,id))objc_msgSend)(record.controller, foreground, record.settings, nil);
-        record.nativeBackgrounded = NO;
+        TAResize(r,panes[slot].bounds.size);
+        if (!running || slots[slot]!=r || !r.frameCaptured) @throw [NSException exceptionWithName:@"SceneNotReady" reason:r.bundle userInfo:nil];
+        SEL create=NSSelectorFromString(@"presentationViewWithIdentifier:");
+        if (![r.controller respondsToSelector:create]) @throw [NSException exceptionWithName:@"MissingPresentationAPI" reason:r.bundle userInfo:nil];
+        r.presentationID=[NSString stringWithFormat:@"com.sushibta.taduo.%lu.%ld.%lu",(unsigned long)token,(long)slot,(unsigned long)request];
+        id v=((id(*)(id,SEL,id))objc_msgSend)(r.controller,create,r.presentationID);
+        if (![v isKindOfClass:UIView.class] || ((UIView *)v).superview) @throw [NSException exceptionWithName:@"NotIndependent" reason:r.bundle userInfo:nil];
+        r.presentation=v; r.presentation.transform=CGAffineTransformIdentity; r.presentation.frame=panes[slot].bounds;
+        [panes[slot] addSubview:r.presentation]; choose[slot].hidden=YES; r.attaching=NO;
+        TALog(@"ATTACHED slot=%ld bundle=%@ attempt=%lu",(long)slot,r.bundle,(unsigned long)attempt); TARememberPair();
     } @catch (NSException *e) {
-        DPLog(@"FOREGROUND ERROR %@", e.name); gOwnCall = previousOwnCall; return;
+        TALog(@"PRESENTATION ERROR %@ bundle=%@",e.name,r.bundle);
+        if (running && slots[slot]==r) TAClearSlot(slot,@"presentation failed");
+    } @finally { ownCall=old; }
+
+}
+@end
+static void TAInstallDock(UIView *dock) {
+    if (dockAdjusting || !dock || dock.bounds.size.height<140) return;
+    dockAdjusting=YES;
+    if (!dockGeometry) dockGeometry=[NSMapTable weakToStrongObjectsMapTable];
+    TARestoreDock();
+    if (mountedDock!=dock) { [dockButton removeFromSuperview]; mountedDock=dock; TALog(@"DOCK mounted class=%@ bounds=%@",NSStringFromClass(dock.class),NSStringFromCGRect(dock.bounds)); }
+    if (!dockButton) {
+        dockButton=TAButton(@"",@selector(enter)); [dockButton setImage:TAGlyph(0) forState:UIControlStateNormal];
+        dockButton.backgroundColor=UIColor.clearColor; dockButton.accessibilityLabel=@"TAduo — Chia màn hình";
+        [dockButton addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:controls action:@selector(holdDock:)]];
     }
-    gOwnCall = previousOwnCall;
-
-    // Gắn vào đúng slot trong gPair — chèn theo thứ tự để index 0 luôn là
-    // trái, index 1 luôn là phải, bất kể slot nào được điền trước.
-    NSMutableArray<DPRecord *> *newPair = [NSMutableArray array];
-    if (slot == 0) {
-        [newPair addObject:record];
-        if (gPair.count > 1) [newPair addObject:gPair[1]];
-    } else {
-        if (gPair.count > 0) [newPair addObject:gPair[0]];
-        else { gOwnCall = previousOwnCall; DPLog(@"ATTACH REFUSE right trước left chưa hỗ trợ trong bản này"); return; }
-        [newPair addObject:record];
+    CGFloat height=dock.bounds.size.height, width=dock.bounds.size.width;
+    CGFloat factor=(height-38)/height;
+    for (UIView *child in dock.subviews) {
+        if (child==dockButton || child.hidden || !child.userInteractionEnabled) continue;
+        CGAffineTransform original=child.transform; CGPoint center=child.center;
+        CGAffineTransform applied=CGAffineTransformScale(original,factor,factor);
+        CGPoint compressed=CGPointMake(width/2+(center.x-width/2)*factor,center.y*factor);
+        [dockGeometry setObject:@{@"transform":[NSValue valueWithCGAffineTransform:original],@"center":[NSValue valueWithCGPoint:center],@"applied":[NSValue valueWithCGAffineTransform:applied],@"appliedCenter":[NSValue valueWithCGPoint:compressed]} forKey:child];
+        child.transform=applied; child.center=compressed;
     }
-    gPair = newPair;
-
-    placeholder.hidden = YES;
-    [placeholder removeFromSuperview];
-    if (slot == 0) gLeftSlotButton = nil; else gRightSlotButton = nil;
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        if (!gRunning || generation != gGeneration || !record.valid) return;
-        BOOL previousOwnCall2 = gOwnCall;
-        gOwnCall = YES;
-        @try {
-            record.presentationID = [NSString stringWithFormat:@"com.sushibta.duophone.%lu.%ld", (unsigned long)generation, (long)slot];
-            SEL create = NSSelectorFromString(@"presentationViewWithIdentifier:");
-            if (![record.controller respondsToSelector:create])
-                @throw [NSException exceptionWithName:@"MissingPresentationAPI" reason:record.bundle userInfo:nil];
-            id result = ((id(*)(id,SEL,id))objc_msgSend)(record.controller, create, record.presentationID);
-            if (!gRunning || generation != gGeneration) { gOwnCall = previousOwnCall2; return; }
-            if (![result isKindOfClass:UIView.class] || ((UIView *)result).superview)
-                @throw [NSException exceptionWithName:@"PresentationNotIndependent" reason:record.bundle userInfo:nil];
-            record.presentation = result;
-            [pane addSubview:result];
-            DPLog(@"CREATE bundle=%@ identifier=%@ class=%@ layers=%lu", record.bundle,
-                  record.presentationID, NSStringFromClass([result class]), (unsigned long)DPLayers(result,0));
-            DPProbeTemplateSurface(record);
-            DPLayout();
-        } @catch (NSException *e) {
-            DPLog(@"PRESENTATION ERROR %@", e.name);
-            gOwnCall = previousOwnCall2;
-            return;
-        }
-        gOwnCall = previousOwnCall2;
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPInspect(generation); });
-
-        // Đây là bên THỨ HAI: kiểm tra lại bên ĐẦU TIÊN sau vài giây, phòng
-        // trường hợp bị đẩy xuống nền bởi chính lệnh foreground vừa gọi ở trên.
-        if (gPair.count == 2) {
-            DPRecord *checkRecord = (slot == 0) ? gPair[1] : gPair[0];
-            UIView *checkPane = (slot == 0) ? gRightPane : gLeftPane;
-            for (NSUInteger i = 1; i <= 4; i++) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.5 + i) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    DPRecreatePresentationIfBlank(checkRecord, checkPane, generation);
-                });
+    dockButton.frame=CGRectMake((width-36)/2,height-37,36,36); [dock addSubview:dockButton]; dockButton.hidden=NO;
+    dockAdjusting=NO;
+}
+static void TACapture(id controller, id settings) {
+    if (ownCall || !NSThread.isMainThread || !dashboard || TADashboard()!=dashboard) return;
+    NSString *bundle=TABundle(controller);
+    if (!bundle || ![settings isKindOfClass:NSDictionary.class]) return;
+    NSString *sid=TAValue(controller,@"sceneID");
+    NSString *display=[sid componentsSeparatedByString:@":"].firstObject;
+    if (![dashboard.session.persistentIdentifier hasSuffix:display]) return;
+    BOOL launch=settings[@"DBActivationSettingLaunchSource"]!=nil;
+    // Some navigation foreground callbacks omit launch-source. Preserve their
+    // actual activation dictionary rather than inventing one.
+    if (!launch && ![TAClientBundles() containsObject:bundle]) return;
+    TARecord *r=records[bundle];
+    for (NSInteger i=0;i<2;i++) {
+        TARecord *pending=slots[i];
+        if (running && pending.attaching && [pending.bundle isEqual:bundle]) {
+            if (pending.controller!=controller) {
+                TALog(@"ATTACH REBIND side=%ld bundle=%@",(long)i,bundle);
+                pending.controller=controller;
             }
+            if (launch || !pending.activation) pending.activation=[settings copy];
+            records[bundle]=pending; return;
+        }
+    }
+    if (running && (slots[0].controller==controller || slots[1].controller==controller)) {
+        if (launch && r.controller==controller) r.activation=[settings copy];
+        return;
+    }
+    if (!r || r.controller!=controller) {
+        r=[TARecord new]; r.controller=controller; r.bundle=bundle;
+    }
+    if (launch || !r.activation) r.activation=[settings copy]; records[bundle]=r;
+    [order removeObject:bundle]; [order addObject:bundle];
+    // Keep resumable/active apps pinned when trimming recently seen apps.
+    while (order.count>24) {
+        NSString *victim=nil;
+        for (NSString *entry in order) {
+            if ([resumeBundles containsObject:entry] || [resumeCandidate isEqual:entry] || [slots[0].bundle isEqual:entry] || [slots[1].bundle isEqual:entry] || [entry isEqual:bundle]) continue;
+            victim=entry; break;
+        }
+        if (!victim) break;
+        [records removeObjectForKey:victim]; [order removeObject:victim];
+    }
+    if (resumeBundles && (launch || [TAClientBundles() containsObject:bundle])) resumeCandidate=bundle;
+    TALog(@"CAPTURE %@ sid=%@ launchSource=%d",bundle,sid,launch);
+    if (!running) buttonWindow.hidden=NO;
+}
+static void TATick(void) {
+    UIWindowScene *s = TADashboard();
+    if (s != dashboard) {
+        TAStop(@"display changed"); buttonWindow.hidden = YES; buttonWindow = nil;
+        TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil;
+        [records removeAllObjects]; [order removeAllObjects]; dashboard = s;
+        TALog(@"DISPLAY %@", s.session.persistentIdentifier);
+    }
+    if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
+    UIView *dock=nil;
+    for (UIWindow *window in s.windows) {
+        if (window==splitWindow || window==buttonWindow) continue;
+        dock=TAFindDock(window,0); if (dock) break;
+    }
+    if (dock) TAInstallDock(dock);
+    if (s && !buttonWindow) {
+        buttonWindow=[[UIWindow alloc] initWithWindowScene:s];
+        buttonWindow.windowLevel=UIWindowLevelAlert+80;
+        buttonWindow.rootViewController=[UIViewController new];
+        buttonWindow.rootViewController.view.backgroundColor=UIColor.clearColor;
+        UIButton *button=TAButton(@"",@selector(enter));
+        button.tag=1818; [button setImage:TAGlyph(0) forState:UIControlStateNormal];
+        button.layer.cornerRadius=10; button.accessibilityLabel=@"TAduo 0.18 — Chia màn hình";
+        [button addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:controls action:@selector(holdDock:)]];
+        [buttonWindow.rootViewController.view addSubview:button];
+    }
+    if (s) {
+        CGRect bounds=s.coordinateSpace.bounds;
+        buttonWindow.frame=CGRectMake(CGRectGetMaxX(bounds)-42,CGRectGetMinY(bounds)+4,38,38);
+        [buttonWindow.rootViewController.view viewWithTag:1818].frame=buttonWindow.bounds;
+        BOOL fallback=!running && !TADockButtonVisible();
+        buttonWindow.hidden=!fallback;
+        static __weak UIWindowScene *lastScene;
+        static BOOL lastFallback;
+        static NSUInteger attempts;
+        if (lastScene!=s) { lastScene=s; attempts=0; }
+        if (lastFallback!=fallback || attempts==0) TALog(@"LAUNCHER fallback=%d dockVisible=%d running=%d",fallback,TADockButtonVisible(),running);
+        lastFallback=fallback;
+        if (!running && (attempts==0 || attempts==3)) TADumpDock();
+        if (attempts<4) attempts++;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
+}
+// Darwin state channels carry only dimensions, never application content.
+// The host logs receipt as an observation, not proof of correct app layout.
+static NSString *TAChannel(NSString *bundle, NSString *kind) {
+    return [NSString stringWithFormat:@"com.sushibta.taduo.geometry.%@.%@", bundle, kind];
+}
+static NSArray<NSString *> *TAClientBundles(void) {
+    return @[@"com.apple.Maps", @"com.google.Maps", @"com.google.ios.youtube", @"com.google.ios.youtubemusic", @"vn.vietmap.live"];
+}
+// The layout experiment is enabled only for the exact scene dimensions
+// currently owned by TAduo. No global narrow-screen heuristics.
+static int TATargetToken(NSString *bundle) {
+    static NSMutableDictionary *tokens;
+    if (!tokens) tokens = [NSMutableDictionary new];
+    NSNumber *existing = tokens[bundle]; if (existing) return existing.intValue;
+    int token = -1;
+    NSString *name = TAChannel(bundle, @"layout-target");
+    if (notify_register_check(name.UTF8String, &token) != NOTIFY_STATUS_OK) return -1;
+    tokens[bundle] = @(token); return token;
+}
+static void TASetLayoutTarget(NSString *bundle, CGSize size) {
+    int token = TATargetToken(bundle); if (token < 0) return;
+    uint64_t packed = ((uint64_t)llround(size.width * 4) << 32) | (uint32_t)llround(size.height * 4);
+    if (notify_set_state(token, packed) == NOTIFY_STATUS_OK) notify_post(TAChannel(bundle, @"layout-target").UTF8String);
+}
+static BOOL TATemplateTarget(UIWindow *w, NSString **bundleOut) {
+    NSString *sid = w.windowScene.session.persistentIdentifier;
+    NSArray *parts = [sid componentsSeparatedByString:@":"];
+    if (parts.count != 3 || ![parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"]) return NO;
+    NSString *bundle = parts.lastObject; if (bundleOut) *bundleOut = bundle;
+    if (![TAClientBundles() containsObject:bundle]) return NO;
+    int token = TATargetToken(bundle); uint64_t packed = 0;
+    if (token < 0 || notify_get_state(token, &packed) != NOTIFY_STATUS_OK || !packed) return NO;
+    CGSize target = CGSizeMake((packed >> 32)/4.0, (packed & 0xffffffff)/4.0);
+    CGSize actual = w.windowScene.coordinateSpace.bounds.size;
+    return fabs(target.width-actual.width)<0.5 && fabs(target.height-actual.height)<0.5;
+}
+// Change only native tab item titles. UIKit still owns all button geometry.
+static NSHashTable<UITabBar *> *TACompactTabBars;
+static char TATabTitleKey, TATabBusyKey;
+static NSString *TAFitTabTitle(NSString *title, CGFloat width) {
+    NSDictionary *attributes=@{NSFontAttributeName:[UIFont systemFontOfSize:11 weight:UIFontWeightSemibold]};
+    if ([title sizeWithAttributes:attributes].width<=width) return title;
+    NSString *prefix=title;
+    while (prefix.length) {
+        NSRange last=[prefix rangeOfComposedCharacterSequenceAtIndex:prefix.length-1];
+        prefix=[prefix substringToIndex:last.location];
+        NSString *candidate=[prefix stringByAppendingString:@"…"];
+        if ([candidate sizeWithAttributes:attributes].width<=width) return candidate;
+    }
+    return @"…";
+}
+static void TACompactTabs(UITabBar *bar) {
+    if ([objc_getAssociatedObject(bar,&TATabBusyKey) boolValue]) return;
+    NSString *bundle=nil;
+    BOOL active=TATemplateTarget(bar.window,&bundle) && [bundle isEqual:@"com.google.ios.youtubemusic"] && bar.bounds.size.width>0 && bar.bounds.size.width<300;
+    if (!active && ![TACompactTabBars containsObject:bar]) return;
+    objc_setAssociatedObject(bar,&TATabBusyKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @try {
+        if (!TACompactTabBars) TACompactTabBars=[NSHashTable weakObjectsHashTable];
+        if (active) [TACompactTabBars addObject:bar];
+        CGFloat width=MAX(12,bar.bounds.size.width/MAX((NSUInteger)1,bar.items.count)-10);
+        NSUInteger changed=0;
+        for (UITabBarItem *item in bar.items) {
+            NSDictionary *saved=objc_getAssociatedObject(item,&TATabTitleKey);
+            // An application title update supersedes our saved value.
+            if (saved && ![item.title isEqual:saved[@"applied"]]) {
+                if ([item.accessibilityLabel isEqual:saved[@"original"]]) item.accessibilityLabel=saved[@"accessibility"]==NSNull.null ? nil : saved[@"accessibility"];
+                saved=nil; objc_setAssociatedObject(item,&TATabTitleKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            NSString *original=saved ? saved[@"original"] : item.title;
+            if (!original) continue;
+            NSString *desired=active ? TAFitTabTitle(original,width) : original;
+            if (![desired isEqual:original]) {
+                id accessibility=saved ? saved[@"accessibility"] : (item.accessibilityLabel ?: (id)NSNull.null);
+                objc_setAssociatedObject(item,&TATabTitleKey,@{@"original":original,@"applied":desired,@"accessibility":accessibility},OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                if (!item.accessibilityLabel) item.accessibilityLabel=original;
+            } else if (saved) {
+                if ([item.accessibilityLabel isEqual:original]) item.accessibilityLabel=saved[@"accessibility"]==NSNull.null ? nil : saved[@"accessibility"];
+                objc_setAssociatedObject(item,&TATabTitleKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            if (![item.title isEqual:desired]) { item.title=desired; ++changed; }
+        }
+        if (!active) [TACompactTabBars removeObject:bar];
+        if (changed) TALog(@"TAB TITLES active=%d count=%lu changed=%lu width=%.2f",active,(unsigned long)bar.items.count,(unsigned long)changed,width);
+    } @finally {
+        objc_setAssociatedObject(bar,&TATabBusyKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+// Device evidence: four fixed 61pt square buttons in a 135pt image row.
+// Adjust only the verified matching width/height constants; keep native layout.
+static NSHashTable<UIView *> *TAImageRows;
+static char TARowConstantsKey, TARowBusyKey, TARowStampKey;
+static void TARestoreImageRow(UIView *cell) {
+    NSMapTable *saved=objc_getAssociatedObject(cell,&TARowConstantsKey);
+    for (NSLayoutConstraint *c in saved.keyEnumerator) {
+        NSDictionary *entry=[saved objectForKey:c];
+        if (fabs(c.constant-[entry[@"applied"] doubleValue])<0.01) c.constant=[entry[@"original"] doubleValue];
+    }
+    if (saved.count) TALog(@"IMAGE ROW restore count=%lu",(unsigned long)saved.count);
+    objc_setAssociatedObject(cell,&TARowConstantsKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(cell,&TARowStampKey,nil,OBJC_ASSOCIATION_COPY_NONATOMIC);
+    [TAImageRows removeObject:cell];
+}
+static void TACompactImageRow(UIView *cell) {
+    if ([objc_getAssociatedObject(cell,&TARowBusyKey) boolValue]) return;
+    NSString *bundle=nil;
+    BOOL active=TATemplateTarget(cell.window,&bundle) && [bundle isEqual:@"com.google.ios.youtubemusic"] && cell.bounds.size.width>48 && cell.bounds.size.width<300;
+    if (!active) { TARestoreImageRow(cell); return; }
+    objc_setAssociatedObject(cell,&TARowBusyKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @try {
+        NSMapTable *saved=objc_getAssociatedObject(cell,&TARowConstantsKey);
+        for (UIView *child in cell.subviews) {
+            if (![child isKindOfClass:UIStackView.class]) continue;
+            UIStackView *stack=(UIStackView *)child;
+            NSArray<UIView *> *buttons=stack.arrangedSubviews;
+            if (stack.axis!=UILayoutConstraintAxisHorizontal || stack.distribution!=UIStackViewDistributionEqualSpacing || buttons.count<2 || buttons.count>8) continue;
+            // The observed native row has 12pt margins. Wait until its own
+            // width constraint has caught up with the resized cell.
+            CGFloat available=cell.bounds.size.width-24;
+            BOOL rowWidthReady=NO;
+            for (NSLayoutConstraint *c in stack.constraints) {
+                if (c.active && c.firstItem==stack && !c.secondItem && c.firstAttribute==NSLayoutAttributeWidth && c.relation==NSLayoutRelationEqual && fabs(c.constant-available)<1) rowWidthReady=YES;
+            }
+            if (!rowWidthReady) continue;
+            NSMutableArray<NSLayoutConstraint *> *dimensions=[NSMutableArray new];
+            BOOL valid=YES;
+            for (UIView *button in buttons) {
+                if (![NSStringFromClass(button.class) isEqual:@"CPUIHighlightButton"]) { valid=NO; break; }
+                NSLayoutConstraint *width=nil,*height=nil;
+                for (NSLayoutConstraint *c in button.constraints) {
+                    NSDictionary *entry=[saved objectForKey:c];
+                    CGFloat original=entry ? [entry[@"original"] doubleValue] : c.constant;
+                    if (!c.active || c.firstItem!=button || c.secondItem || c.relation!=NSLayoutRelationEqual || fabs(original-61)>0.01 || c.priority!=UILayoutPriorityRequired) continue;
+                    if (c.firstAttribute==NSLayoutAttributeWidth) width=c;
+                    if (c.firstAttribute==NSLayoutAttributeHeight) height=c;
+                }
+                if (!width || !height) { valid=NO; break; }
+                [dimensions addObject:width]; [dimensions addObject:height];
+            }
+            if (!valid) continue;
+            CGFloat side=MIN(61,floor((available-6*(buttons.count-1))/buttons.count));
+            if (side<20) continue;
+            NSString *stamp=[NSString stringWithFormat:@"%.2f/%lu/%.2f/%p/%p",available,(unsigned long)buttons.count,side,(__bridge void *)dimensions.firstObject,(__bridge void *)dimensions.lastObject];
+            // At most one attempt per geometry/constraint set. If native code
+            // resets a constant, do not fight it on every layout pass.
+            if ([objc_getAssociatedObject(cell,&TARowStampKey) isEqual:stamp]) continue;
+            if (!saved) {
+                saved=[NSMapTable weakToStrongObjectsMapTable];
+                objc_setAssociatedObject(cell,&TARowConstantsKey,saved,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            for (NSLayoutConstraint *c in dimensions) {
+                NSDictionary *entry=[saved objectForKey:c];
+                // Preserve a new value supplied by the system between passes.
+                CGFloat original=entry && fabs(c.constant-[entry[@"applied"] doubleValue])<0.01 ? [entry[@"original"] doubleValue] : c.constant;
+                [saved setObject:@{@"original":@(original),@"applied":@(side)} forKey:c];
+                if (fabs(c.constant-side)>0.01) c.constant=side;
+            }
+            if (!TAImageRows) TAImageRows=[NSHashTable weakObjectsHashTable];
+            [TAImageRows addObject:cell];
+            if (![objc_getAssociatedObject(cell,&TARowStampKey) isEqual:stamp]) {
+                objc_setAssociatedObject(cell,&TARowStampKey,stamp,OBJC_ASSOCIATION_COPY_NONATOMIC);
+                TALog(@"IMAGE ROW apply available=%.2f count=%lu side=%.2f constants=%lu",available,(unsigned long)buttons.count,side,(unsigned long)dimensions.count);
+            }
+        }
+    } @finally { objc_setAssociatedObject(cell,&TARowBusyKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+}
+static void TAInvalidateTree(UIView *view, NSUInteger depth, NSUInteger *budget) {
+    if (!view || !*budget || depth > 8) return; --*budget;
+    [view setNeedsUpdateConstraints]; [view setNeedsLayout];
+    if ([view isKindOfClass:UICollectionView.class]) [((UICollectionView *)view).collectionViewLayout invalidateLayout];
+    for (UIView *child in view.subviews) TAInvalidateTree(child, depth+1, budget);
+}
+static void TALayoutEvidence(UIView *view, NSString *bundle, NSUInteger depth, NSUInteger *budget) {
+    if (!view || !*budget || depth > 14) return; --*budget;
+    TALog(@"TEMPLATE VIEW %@ depth=%lu class=%@ frame=%@ bounds=%@ safe=%@ margins=%@ constraints=%lu",
+          bundle, (unsigned long)depth, NSStringFromClass(view.class), NSStringFromCGRect(view.frame),
+          NSStringFromCGRect(view.bounds), NSStringFromUIEdgeInsets(view.safeAreaInsets),
+          NSStringFromUIEdgeInsets(view.layoutMargins), (unsigned long)view.constraints.count);
+    if ([view isKindOfClass:UILabel.class]) {
+        UILabel *label = (UILabel *)view;
+        TALog(@"LABEL %@ class=%@ font=%.2f lines=%ld fit=%d minScale=%.2f intrinsic=%@ hidden=%d alpha=%.2f",
+              bundle, NSStringFromClass(view.class), label.font.pointSize, (long)label.numberOfLines,
+              label.adjustsFontSizeToFitWidth, label.minimumScaleFactor, NSStringFromCGSize(label.intrinsicContentSize), label.hidden, label.alpha);
+    }
+    for (UIView *child in view.subviews) TALayoutEvidence(child, bundle, depth+1, budget);
+}
+static char TAOriginalInsetsKey, TALayoutStampKey, TALayoutQueuedKey;
+static void TATemplateLayout(UIWindow *w) {
+    if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"]) return;
+    UIViewController *root = w.rootViewController;
+    if (!root.viewIfLoaded || ![NSStringFromClass(root.class) isEqual:@"CARTemplateUIApplicationSceneViewController"]) return;
+    NSString *bundle = nil; BOOL active = TATemplateTarget(w, &bundle);
+    NSValue *saved = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
+    if (!active && !saved) return;
+    NSString *stamp = active ? NSStringFromCGRect(w.windowScene.coordinateSpace.bounds) : @"restore";
+    if ([objc_getAssociatedObject(root, &TALayoutStampKey) isEqual:stamp] || [objc_getAssociatedObject(root, &TALayoutQueuedKey) boolValue]) return;
+    objc_setAssociatedObject(root, &TALayoutQueuedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        objc_setAssociatedObject(root, &TALayoutQueuedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (w.rootViewController != root || !root.viewIfLoaded) return;
+        NSString *currentBundle = nil; BOOL currentActive = TATemplateTarget(w, &currentBundle);
+        NSValue *original = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
+        if (!currentActive && !original) return;
+        UIEdgeInsets before = root.view.safeAreaInsets;
+        if (currentActive) {
+            if (!original) {
+                original = [NSValue valueWithUIEdgeInsets:root.additionalSafeAreaInsets];
+                objc_setAssociatedObject(root, &TAOriginalInsetsKey, original, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            UIEdgeInsets desired = original.UIEdgeInsetsValue;
+            // Reclaim only inherited lateral display chrome at the scene root.
+            // Keep top/bottom navigation regions intact. Do not patch children.
+            CGFloat left = MAX(0, before.left-root.additionalSafeAreaInsets.left);
+            CGFloat right = MAX(0, before.right-root.additionalSafeAreaInsets.right);
+            CGFloat limit = w.bounds.size.width * 0.25;
+            if (left <= limit) desired.left -= left;
+            if (right <= limit) desired.right -= right;
+            root.additionalSafeAreaInsets = desired;
+            objc_setAssociatedObject(root, &TALayoutStampKey, NSStringFromCGRect(w.windowScene.coordinateSpace.bounds), OBJC_ASSOCIATION_COPY_NONATOMIC);
+            TALog(@"TEMPLATE APPLY %@ scene=%@ safeBefore=%@ additional=%@", currentBundle,
+                  NSStringFromCGRect(w.windowScene.coordinateSpace.bounds), NSStringFromUIEdgeInsets(before), NSStringFromUIEdgeInsets(desired));
+        } else {
+            root.additionalSafeAreaInsets = original.UIEdgeInsetsValue;
+            objc_setAssociatedObject(root, &TAOriginalInsetsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(root, &TALayoutStampKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            TALog(@"TEMPLATE RESTORE %@ additional=%@", currentBundle ?: bundle, NSStringFromUIEdgeInsets(root.additionalSafeAreaInsets));
+        }
+        NSUInteger budget = 100; TAInvalidateTree(root.view, 0, &budget);
+        [root.view layoutIfNeeded];
+        if (currentActive) {
+            TALog(@"TEMPLATE AFTER %@ safe=%@ traits=%ld/%ld", currentBundle, NSStringFromUIEdgeInsets(root.view.safeAreaInsets),
+                  (long)root.traitCollection.horizontalSizeClass, (long)root.traitCollection.verticalSizeClass);
+            NSUInteger evidence = 60; TALayoutEvidence(root.view, currentBundle, 0, &evidence);
         }
     });
 }
-@end
-
-static void DPRefreshButton(void) {
-    NSUInteger validCount = 0;
-    for (NSString *bundle in gOrder) if (gRecords[bundle].valid) validCount++;
-    BOOL ready = validCount >= 2;
-    gButtonWindow.hidden = gRunning || !ready;
-}
-// Chỉ CHẨN ĐOÁN — quét tên method/property của controller + scene, lọc theo
-// từ khoá liên quan tới template/tab bar/layout, để TÌM (không phải đoán mò)
-// xem có API nào bắt hệ thống Template (CarPlayTemplateUIHost) vẽ lại UI theo
-// kích thước mới hay không. Chỉ chạy 1 lần/app để không spam log.
-static BOOL DPTemplateProbeNameLooksUseful(NSString *name) {
-    if (!name) return NO;
-    NSString *l = name.lowercaseString;
-    return [l containsString:@"template"] || [l containsString:@"tabbar"] ||
-           [l containsString:@"tab"] || [l containsString:@"layout"] ||
-           [l containsString:@"reload"] || [l containsString:@"invalidate"] ||
-           [l containsString:@"relayout"] || [l containsString:@"content"] ||
-           [l containsString:@"redraw"] || [l containsString:@"update"];
-}
-static void DPProbeClassSurface(Class cls, NSString *tag) {
-    if (!cls || !tag) return;
-    DPLog(@"TEMPLATE-PROBE class=%@ super=%@", tag, NSStringFromClass(class_getSuperclass(cls)));
-    unsigned int mc = 0;
-    Method *methods = class_copyMethodList(cls, &mc);
-    for (unsigned int i = 0; i < mc; i++) {
-        NSString *name = NSStringFromSelector(method_getName(methods[i]));
-        if (DPTemplateProbeNameLooksUseful(name))
-            DPLog(@"TEMPLATE-PROBE %@ METHOD %@ argc=%u types=%s", tag, name,
-                  method_getNumberOfArguments(methods[i]),
-                  method_getTypeEncoding(methods[i]) ?: "?");
-    }
-    if (methods) free(methods);
-}
-// GHI CHÚ: đã bỏ 2 hàm gọi trigger/getter không tham số (DPTryZeroArgVoid,
-// DPPeekZeroArgObject) — hướng "reason"/"invalidate"/"_updateSceneUI" đã
-// chứng minh là ngõ cụt hoặc nguy hiểm (xem log thực tế). Chuyển hẳn sang
-// quét ivar thật ở hàm bên dưới.
-static void DPTryPokeSceneUI(DPRecord *record) {
-    // GHI CHÚ: hàm này từng đào sâu FBSDisplayLayoutElement (soi class,
-    // quét ivar tìm instance thật). Log thực tế xác nhận đó là NGÕ CỤT —
-    // object này là cơ chế theo dõi UI toàn hệ thống (xuất hiện cho cả
-    // lock-screen, Filza...), không phải thứ quyết định kích thước layout
-    // thật của app CarPlay. Đã gỡ bỏ toàn bộ nhánh đó, để trống chờ hướng
-    // điều tra tiếp theo (xem ghi chú ở %hook UIApplication bên dưới —
-    // hướng mới là soi windowScene NGAY LÚC app kết nối lần đầu, thay vì
-    // resize sau khi đã kết nối).
-    (void)record;
-}
-static NSMutableSet<NSString *> *gTemplateProbed;
-static void DPProbeTemplateSurface(DPRecord *record) {
-    if (!record.controller) return;
-    if (!gTemplateProbed) gTemplateProbed = [NSMutableSet set];
-    if ([gTemplateProbed containsObject:record.bundle]) return;
-    [gTemplateProbed addObject:record.bundle];
-
-    BOOL isTemplate = [record.sid containsString:@"CarPlayTemplateUIHost"];
-    DPLog(@"========== TEMPLATE-PROBE bundle=%@ isTemplate=%d ==========", record.bundle, isTemplate);
-
-    DPProbeClassSurface([record.controller class],
-                        [NSString stringWithFormat:@"controller(%@)", record.bundle]);
-
-    id scene = DPValue(record.controller, @"scene");
-    if (scene) DPProbeClassSurface([scene class],
-                                   [NSString stringWithFormat:@"scene(%@)", record.bundle]);
-
-    // Presentation view chính là bề mặt render — quét luôn để tìm hàm
-    // "reload/invalidate layout" ngay trên chính view đó nếu có.
-    if (record.presentation)
-        DPProbeClassSurface([record.presentation class],
-                            [NSString stringWithFormat:@"presentation(%@)", record.bundle]);
-
-    DPLog(@"========== TEMPLATE-PROBE bundle=%@ END ==========", record.bundle);
-}
-static void DPDumpConnectedScenes(NSString *tag) {
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        NSString *pid = scene.session.persistentIdentifier;
-        NSString *role = scene.session.role;
-        BOOL active = scene.activationState == UISceneActivationStateForegroundActive;
-        DPLog(@"SCENES[%@] pid=%@ role=%@ class=%@ active=%d",
-              tag, pid, role, NSStringFromClass([scene class]), active);
-    }
-}
-static void DPCapture(id controller, id settings) {
-    if (gOwnCall || ![settings isKindOfClass:NSDictionary.class]) return;
-    // Ignore suspended prewarming. Only retain observed explicit launch settings.
-    if (!settings[@"DBActivationSettingLaunchSource"]) return;
-    NSString *sid = DPValue(controller, @"sceneID"), *bundle = DPBundle(sid);
-    if (!bundle) return;
-    NSString *category = DPCategoryToken(sid);
-    NSDictionary *copy = [settings copy];
-    NSUInteger epoch = gSessionEpoch;
-    void (^capture)(void) = ^{
-        if (epoch != gSessionEpoch || !gSession || DPDashboard() != gSession) return;
-        if (gRunning) return;
-        DPRecord *record = [DPRecord new];
-        record.controller = controller; record.sid = sid; record.category = category;
-        record.bundle = bundle; record.settings = copy;
-        record.valid = YES;
-        // Nếu bundle này đã có record cũ với category KHÁC, hoặc trùng bundle
-        // nhưng khác controller — đáng chú ý, log riêng để đối chiếu sau.
-        DPRecord *previous = gRecords[bundle];
-        if (previous && previous.controller != controller)
-            DPLog(@"CAPTURE-REPLACE bundle=%@ oldController=%p oldCategory=%@ newController=%p newCategory=%@",
-                  bundle, (__bridge void *)previous.controller, previous.category,
-                  (__bridge void *)controller, category);
-        gRecords[bundle] = record;
-        [gOrder removeObject:bundle]; [gOrder addObject:bundle];
-        while (gOrder.count > kMaxCachedApps) {
-            [gRecords removeObjectForKey:gOrder.firstObject]; [gOrder removeObjectAtIndex:0];
-        }
-        DPLog(@"CAPTURE bundle=%@ category=%@ sid=%@ controller=%p source=%@ suspended=%@ isTemplate=%d", bundle, category, sid,
-              (__bridge void *)controller,
-              copy[@"DBActivationSettingLaunchSource"], copy[@"DBActivationSettingSuspended"],
-              [sid containsString:@"CarPlayTemplateUIHost"]);
-        // Dump TOÀN BỘ key trong settings — đang tìm 1 key kiểu frame/display
-        // configuration có thể set NGAY LÚC connect, thay vì resize sau khi
-        // đã render (cách hiện tại không hiệu quả với app kiểu Template).
-        for (NSString *key in copy.allKeys)
-            DPLog(@"SETTINGS-DUMP bundle=%@ key=%@ value=%@ class=%@",
-                  bundle, key, copy[key], NSStringFromClass([copy[key] class]));
-        DPDumpConnectedScenes([NSString stringWithFormat:@"capture:%@", bundle]);
-        DPRefreshButton();
-    };
-    // Register before %orig can synchronously background/destroy this controller.
-    if ([NSThread isMainThread]) capture();
-    else dispatch_async(dispatch_get_main_queue(), capture);
-}
-static void DPTick(void) {
-    UIWindowScene *session = DPDashboard();
-    if (session != gSession) {
-        ++gSessionEpoch;
-        DPStop(@"display changed");
-        [gControls closePicker];
-        gButtonWindow.hidden = YES; gButtonWindow = nil; gButton = nil;
-        [gRecords removeAllObjects]; [gOrder removeAllObjects];
-        gSession = session;
-        DPLog(@"DISPLAY %@", session.session.persistentIdentifier);
-    }
-    if (gRunning && session) {
-        CGSize size = session.coordinateSpace.bounds.size;
-        if (fabs(size.width - gNativeSize.width) > 0.5 || fabs(size.height - gNativeSize.height) > 0.5)
-            DPStop(@"display geometry changed");
-    }
-    if (session && !gButtonWindow) {
-        gButtonWindow = [[UIWindow alloc] initWithWindowScene:session];
-        gButtonWindow.windowLevel = UIWindowLevelAlert + 80;
-        gButtonWindow.rootViewController = [UIViewController new];
-        gButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        [gButton setTitle:@"Chia" forState:UIControlStateNormal];
-        gButton.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.9];
-        gButton.layer.cornerRadius = 8;
-        [gButton addTarget:gControls action:@selector(startEmptySplit) forControlEvents:UIControlEventTouchUpInside];
-        [gButtonWindow.rootViewController.view addSubview:gButton];
-    }
-    if (session) {
-        CGFloat width = session.coordinateSpace.bounds.size.width;
-        gButtonWindow.frame = CGRectMake(MAX(45,width-58), 0, 58, 28);
-        gButton.frame = CGRectMake(0,0,58,28);
-        DPRefreshButton();
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ DPTick(); });
-}
-%hook DBApplicationSceneViewController
-- (void)sceneManager:(id)manager updateForScene:(id)scene appliedWithContext:(id)context {
-    NSString *bundle = DPBundle(DPValue(self, @"sceneID"));
-    DPRecord *record = bundle ? gRecords[bundle] : nil;
-    if (record && record.controller == self) {
-        DPLog(@"SCENE-MANAGER-APPLIED ENTER bundle=%@ manager=%@ scene=%@ context=%@ current=%@",
-              bundle, DPObjSummary(manager), DPObjSummary(scene), DPObjSummary(context),
-              DPObjSummary(DPValue(self, @"currentSceneUpdate")));
-        for (NSString *key in @[@"frame", @"bounds", @"geometry", @"settings", @"sceneSettings", @"clientSettings", @"transitionContext"]) {
-            id v = DPValue(context, key);
-            if (v) DPLog(@"SCENE-MANAGER-CONTEXT bundle=%@ key=%@ value=%@", bundle, key, DPObjSummary(v));
-        }
-    }
-    %orig;
-    if (record && record.controller == self) {
-        DPLog(@"SCENE-MANAGER-APPLIED EXIT bundle=%@ current=%@",
-              bundle, DPObjSummary(DPValue(self, @"currentSceneUpdate")));
-    }
-}
-- (void)sceneManager:(id)manager didDestroyScene:(id)scene {
-    NSString *bundle = DPBundle(DPValue(self, @"sceneID"));
-    DPRecord *record = bundle ? gRecords[bundle] : nil;
-    if (record.controller == self) {
-        BOOL wasInPair = gRunning && [gPair containsObject:record];
-        if (gPickerWindow) [gControls closePicker];
-        if (wasInPair) {
-            // Đang hiển thị app này thật — phải dừng ngay, không trì hoãn.
-            record.valid = NO;
-            DPStop(@"native scene destroyed");
-            [gRecords removeObjectForKey:bundle];
-            [gOrder removeObject:bundle];
-            DPRefreshButton();
-        } else {
-            // Nhiều app tự huỷ rồi tạo lại controller khi cập nhật UI nội bộ
-            // (không thật sự rời CarPlay) — quan sát thấy CAPTURE-REPLACE khá
-            // thường xuyên trong log thực tế. Đánh invalid ngay lập tức làm
-            // điều kiện "đủ 2 app" nhấp nháy, nút "Chia" ẩn/hiện liên tục.
-            // Chờ 1 nhịp xem có bị capture lại (thay thế) không rồi mới gỡ
-            // thật khỏi danh sách + refresh nút.
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                if (gRecords[bundle] == record) {
-                    record.valid = NO;
-                    [gRecords removeObjectForKey:bundle];
-                    [gOrder removeObject:bundle];
-                    DPRefreshButton();
+static void TACaptureVisible(UIWindow *w, NSString *reason);
+static void TAListenTemplateTargets(void) {
+    for (NSString *bundle in TAClientBundles()) {
+        int token;
+        notify_register_dispatch(TAChannel(bundle, @"layout-target").UTF8String, &token, dispatch_get_main_queue(), ^(__unused int delivered) {
+            for (UITabBar *bar in TACompactTabBars.allObjects) TACompactTabs(bar);
+            for (UIView *cell in TAImageRows.allObjects) TACompactImageRow(cell);
+            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                if (![scene isKindOfClass:UIWindowScene.class]) continue;
+                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                    TATemplateLayout(w);
+                    if (![w.windowScene.session.persistentIdentifier hasSuffix:[@":" stringByAppendingString:bundle]]) continue;
+                    __weak UIWindow *weakWindow=w;
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(), ^{
+                        UIWindow *window=weakWindow; if (window) TACaptureVisible(window,@"target-settled");
+                    });
                 }
-            });
+            }
+        });
+    }
+}
+static void TASendSize(NSString *bundle, NSString *kind, CGSize size) {
+    if (!isfinite(size.width) || !isfinite(size.height) || size.width <= 0 || size.height <= 0 || size.width > 16000 || size.height > 16000) return;
+    static NSMutableDictionary *tokens;
+    if (!tokens) tokens = [NSMutableDictionary new];
+    NSString *name = TAChannel(bundle, kind); NSNumber *cached = tokens[name]; int token;
+    if (!cached) {
+        if (notify_register_check(name.UTF8String, &token) != NOTIFY_STATUS_OK) return;
+        tokens[name] = @(token);
+    } else token = cached.intValue;
+    uint64_t packed = ((uint64_t)llround(size.width * 4) << 32) | (uint32_t)llround(size.height * 4);
+    if (notify_set_state(token, packed) == NOTIFY_STATUS_OK) notify_post(name.UTF8String);
+}
+static void TAListenClients(void) {
+    for (NSString *bundle in TAClientBundles()) for (NSString *kind in @[@"scene", @"window", @"root"]) {
+        int token;
+        uint32_t status = notify_register_dispatch(TAChannel(bundle, kind).UTF8String, &token, dispatch_get_main_queue(), ^(int delivered) {
+            if (!running) return;
+            TARecord *r = records[bundle];
+            if (!r || (r != slots[0] && r != slots[1])) return;
+            uint64_t value = 0; if (notify_get_state(delivered, &value) != NOTIFY_STATUS_OK) return;
+            CGSize observed = CGSizeMake((value >> 32) / 4.0, (value & 0xffffffff) / 4.0);
+            TALog(@"CLIENT %@ bundle=%@ observed=%@ target=%@ match=%d", kind, bundle,
+                  NSStringFromCGSize(observed), NSStringFromCGSize(r.targetSize),
+                  fabs(observed.width-r.targetSize.width) < 0.5 && fabs(observed.height-r.targetSize.height) < 0.5);
+        });
+        if (status != NOTIFY_STATUS_OK) TALog(@"CLIENT LISTENER FAILED %@ %@ status=%u", bundle, kind, status);
+    }
+}
+static void TAClientObserve(UIWindow *w) {
+    if (![NSThread isMainThread]) return;
+    UIWindowScene *ws = w.windowScene; if (!ws) return;
+    NSString *sid = ws.session.persistentIdentifier ?: @"", *role = ws.session.role ?: @"";
+    if (![sid hasPrefix:@"Car["] && ![role containsString:@"CarPlay"]) return;
+    NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
+    if ([bundle isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+        NSArray *parts = [sid componentsSeparatedByString:@":"];
+        if (parts.count != 3) return; bundle = parts.lastObject;
+    }
+    if (![TAClientBundles() containsObject:bundle]) return;
+    static char observationKey;
+    UIView *root = w.rootViewController.viewIfLoaded;
+    NSString *stamp = [NSString stringWithFormat:@"%@|%@|%@|%@|%@", sid, NSStringFromCGRect(ws.coordinateSpace.bounds),
+                       NSStringFromCGRect(w.bounds), NSStringFromCGRect(root.bounds), NSStringFromUIEdgeInsets(root.safeAreaInsets)];
+    if ([objc_getAssociatedObject(w, &observationKey) isEqual:stamp]) return;
+    objc_setAssociatedObject(w, &observationKey, stamp, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    TASendSize(bundle, @"scene", ws.coordinateSpace.bounds.size);
+    TASendSize(bundle, @"window", w.bounds.size);
+    if (root) TASendSize(bundle, @"root", root.bounds.size);
+}
+// Read-only comparison: include native CarPlay windows, without active targets.
+static NSString *TADiagnosticBundle(UIWindow *w) {
+    if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"] || w.hidden) return nil;
+    NSArray *parts=[w.windowScene.session.persistentIdentifier componentsSeparatedByString:@":"];
+    if (parts.count!=3 || ![parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"]) return nil;
+    return [TAClientBundles() containsObject:parts.lastObject] ? parts.lastObject : nil;
+}
+static NSString *TAItemDescription(id item) {
+    if (!item) return @"none";
+    return [NSString stringWithFormat:@"%@: %p",NSStringFromClass([item class]),(__bridge void *)item];
+}
+static void TAConstraintEvidence(UIView *view, NSUInteger depth, NSUInteger *views, NSUInteger *constraints) {
+    if (!view || !*views || depth>14) return; --*views;
+    NSString *name=NSStringFromClass(view.class);
+    BOOL focus=[name hasPrefix:@"CPUI"] || [name isEqual:@"UIStackView"] || [name hasPrefix:@"UITabBar"] || [name isEqual:@"CPSImageRowCell"];
+    if (focus) {
+        TALog(@"LAYOUT NODE %@ parent=%@ frame=%@ ambiguous=%d mask=%d compression=%.0f/%.0f hugging=%.0f/%.0f",TAItemDescription(view),TAItemDescription(view.superview),NSStringFromCGRect(view.frame),view.hasAmbiguousLayout,view.translatesAutoresizingMaskIntoConstraints,
+              [view contentCompressionResistancePriorityForAxis:UILayoutConstraintAxisHorizontal],[view contentCompressionResistancePriorityForAxis:UILayoutConstraintAxisVertical],
+              [view contentHuggingPriorityForAxis:UILayoutConstraintAxisHorizontal],[view contentHuggingPriorityForAxis:UILayoutConstraintAxisVertical]);
+        for (NSLayoutConstraint *c in view.constraints) {
+            if (!*constraints) break; --*constraints;
+            TALog(@"CONSTRAINT owner=%@ first=%@ attr=%ld relation=%ld second=%@ attr=%ld multiplier=%.3f constant=%.3f priority=%.0f active=%d",TAItemDescription(view),TAItemDescription(c.firstItem),(long)c.firstAttribute,(long)c.relation,TAItemDescription(c.secondItem),(long)c.secondAttribute,c.multiplier,c.constant,c.priority,c.active);
         }
     }
+    if ([view isKindOfClass:UIStackView.class]) {
+        UIStackView *stack=(UIStackView *)view;
+        TALog(@"STACK CONFIG parent=%@ axis=%ld distribution=%ld alignment=%ld spacing=%.2f arranged=%lu",NSStringFromClass(view.superview.class),(long)stack.axis,(long)stack.distribution,(long)stack.alignment,stack.spacing,(unsigned long)stack.arrangedSubviews.count);
+    }
+    BOOL imageRow=[name isEqual:@"CPSImageRowCell"];
+    if ([name isEqual:@"CPUINowPlayingView"] || imageRow) {
+        unsigned int count=0; Method *methods=class_copyMethodList(view.class,&count); NSUInteger remaining=60;
+        for (unsigned int i=0;i<count && remaining;i++) {
+            NSString *selector=NSStringFromSelector(method_getName(methods[i])); NSString *lower=selector.lowercaseString;
+            if (imageRow || [lower containsString:@"layout"] || [lower containsString:@"constraint"] || [lower containsString:@"artwork"] || [lower containsString:@"size"] || [lower containsString:@"style"]) {
+                TALog(@"LAYOUT METHOD class=%@ selector=%@ encoding=%s",name,selector,method_getTypeEncoding(methods[i])); --remaining;
+            }
+        }
+        free(methods);
+    }
+    for (UIView *child in view.subviews) TAConstraintEvidence(child,depth+1,views,constraints);
+}
+
+// Read-only Google Maps controller/layout evidence: root geometry is correct
+// but a nested map viewport retains a 45pt leading offset on this device.
+static void TAMapControllerEvidence(UIViewController *vc, NSUInteger depth, NSUInteger *budget) {
+    if (!vc || depth>10 || !*budget) return; --*budget;
+    TALog(@"MAP CONTROLLER class=%@ frame=%@ safe=%@ additional=%@",NSStringFromClass(vc.class),NSStringFromCGRect(vc.viewIfLoaded.frame),NSStringFromUIEdgeInsets(vc.viewIfLoaded.safeAreaInsets),NSStringFromUIEdgeInsets(vc.additionalSafeAreaInsets));
+    if ([NSStringFromClass(vc.class) hasPrefix:@"CPS"]) {
+        unsigned int count=0; Method *methods=class_copyMethodList(vc.class,&count); NSUInteger limit=35;
+        for (unsigned int i=0;i<count && limit;i++) {
+            NSString *name=NSStringFromSelector(method_getName(methods[i])); NSString *lower=name.lowercaseString;
+            if ([lower containsString:@"layout"] || [lower containsString:@"safe"] || [lower containsString:@"inset"] || [lower containsString:@"map"] || [lower containsString:@"size"]) {
+                TALog(@"MAP METHOD class=%@ selector=%@ encoding=%s",NSStringFromClass(vc.class),name,method_getTypeEncoding(methods[i])); --limit;
+            }
+        }
+        free(methods);
+    }
+    for (UIViewController *child in vc.childViewControllers) TAMapControllerEvidence(child,depth+1,budget);
+}
+static void TAMapViewportEvidence(UIView *view, NSUInteger depth, NSUInteger *budget) {
+    if (!view || depth>12 || !*budget) return; --*budget;
+    BOOL mapOwner=NO;
+    for (UIView *child in view.subviews) {
+        if ([NSStringFromClass(child.class) isEqual:@"UIStackView"]) {
+            for (UIView *button in child.subviews) if ([NSStringFromClass(button.class) isEqual:@"CPSMapButton"]) mapOwner=YES;
+        }
+    }
+    if (mapOwner) {
+        TALog(@"MAP VIEWPORT owner=%@ frame=%@ safe=%@",TAItemDescription(view),NSStringFromCGRect(view.frame),NSStringFromUIEdgeInsets(view.safeAreaInsets));
+        for (UIView *child in view.subviews) TALog(@"MAP CHILD item=%@ frame=%@",TAItemDescription(child),NSStringFromCGRect(child.frame));
+        NSUInteger limit=60;
+        for (NSLayoutConstraint *c in view.constraints) {
+            if (!limit--) break;
+            TALog(@"MAP CONSTRAINT first=%@ attr=%ld relation=%ld second=%@ attr=%ld constant=%.2f priority=%.0f active=%d",TAItemDescription(c.firstItem),(long)c.firstAttribute,(long)c.relation,TAItemDescription(c.secondItem),(long)c.secondAttribute,c.constant,c.priority,c.active);
+        }
+    }
+    for (UIView *child in view.subviews) TAMapViewportEvidence(child,depth+1,budget);
+}
+// Capture both native and split geometry for comparison.
+static void TACaptureVisible(UIWindow *w, NSString *reason) {
+    NSString *bundle = TADiagnosticBundle(w);
+    if (!bundle) return;
+    TALog(@"COMPARE mode=%@ window=%@ screen=%@ scale=%.2f traits=%ld/%ld", TATemplateTarget(w,NULL) ? @"split" : @"native",NSStringFromCGRect(w.bounds),NSStringFromCGRect(w.screen.bounds),w.screen.scale,(long)w.traitCollection.horizontalSizeClass,(long)w.traitCollection.verticalSizeClass);
+    TALog(@"VISIBLE BEGIN %@ reason=%@ root=%@ scene=%@", bundle, reason,
+          NSStringFromClass(w.rootViewController.class), NSStringFromCGRect(w.windowScene.coordinateSpace.bounds));
+    NSUInteger budget = 180; TALayoutEvidence(w.rootViewController.viewIfLoaded, bundle, 0, &budget);
+    if ([bundle isEqual:@"com.google.Maps"]) {
+        NSUInteger controllers=24, viewports=120;
+        TAMapControllerEvidence(w.rootViewController,0,&controllers);
+        TAMapViewportEvidence(w.rootViewController.viewIfLoaded,0,&viewports);
+    }
+    NSUInteger nodes=180, constraints=200; TAConstraintEvidence(w.rootViewController.viewIfLoaded,0,&nodes,&constraints);
+    TALog(@"VISIBLE END %@ remainingBudget=%lu constraintBudget=%lu", bundle, (unsigned long)budget,(unsigned long)constraints);
+}
+static void TAVisibleTransition(UIViewController *vc) {
+    if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"]) return;
+    UIWindow *w = vc.viewIfLoaded.window;
+    NSString *bundle = TADiagnosticBundle(w); if (!bundle) return;
+    BOOL active=TATemplateTarget(w,NULL);
+    if (!active && ![NSStringFromClass(vc.class) isEqual:@"CPSNowPlayingViewController"]) return;
+    // One native layout invalidation per appearance. No font/frame edits.
+    NSUInteger budget = 100; if (active) TAInvalidateTree(vc.viewIfLoaded, 0, &budget);
+    __weak UIWindow *weakWindow = w;
+    __weak UIViewController *weakController = vc;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400*NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        UIWindow *window = weakWindow; UIViewController *controller = weakController;
+        if (!window || !controller || controller.viewIfLoaded.window != window) return;
+        static char stampKey;
+        NSString *stamp = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(controller.class), NSStringFromCGRect(window.bounds)];
+        NSDictionary *previous = objc_getAssociatedObject(window, &stampKey);
+        NSTimeInterval now = NSDate.timeIntervalSinceReferenceDate;
+        if ([previous[@"stamp"] isEqual:stamp] && now-[previous[@"time"] doubleValue]<2) return;
+        objc_setAssociatedObject(window, &stampKey, @{@"stamp":stamp,@"time":@(now)}, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        TACaptureVisible(window, [@"appeared:" stringByAppendingString:NSStringFromClass(controller.class)]);
+    });
+}
+static void TAListenSnapshots(void) {
+    int token;
+    notify_register_dispatch("com.sushibta.taduo.snapshot", &token, dispatch_get_main_queue(), ^(__unused int delivered) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) TACaptureVisible(w, @"manual");
+        }
+    });
+}
+// One controlled input to the system's own layout selection. No frame edits.
+%group TANowPlayingExperiment
+%hook CPUINowPlayingView
+- (void)recalculateLayout:(BOOL)recalculate allowsAlbumArt:(BOOL)allowsAlbumArt hasDataSource:(BOOL)hasDataSource viewArea:(CGRect)viewArea safeArea:(CGRect)safeArea rightHandDrive:(BOOL)rightHandDrive {
+    UIView *view=(UIView *)self;
+    BOOL narrow=TATemplateTarget(view.window,NULL) && viewArea.size.width>0 && viewArea.size.width<300;
+    BOOL effectiveArt=narrow ? NO : allowsAlbumArt;
+    %orig(recalculate,effectiveArt,hasDataSource,viewArea,safeArea,rightHandDrive);
+    static char stampKey;
+    NSString *stamp=[NSString stringWithFormat:@"%d/%d/%d/%@/%@",narrow,allowsAlbumArt,effectiveArt,NSStringFromCGRect(viewArea),NSStringFromCGRect(safeArea)];
+    if (![objc_getAssociatedObject(self,&stampKey) isEqual:stamp]) {
+        objc_setAssociatedObject(self,&stampKey,stamp,OBJC_ASSOCIATION_COPY_NONATOMIC);
+        id height=TAValue(self,@"songDetailsViewHeightConstraint");
+        CGFloat minimum=[height isKindOfClass:NSLayoutConstraint.class] ? ((NSLayoutConstraint *)height).constant : -1;
+        TALog(@"NATIVE LAYOUT narrow=%d artRequested=%d artEffective=%d recalculate=%d datasource=%d area=%@ safe=%@ songMinimum=%.2f layoutClass=%@",narrow,allowsAlbumArt,effectiveArt,recalculate,hasDataSource,NSStringFromCGRect(viewArea),NSStringFromCGRect(safeArea),minimum,NSStringFromClass([TAValue(self,@"nowPlayingLayout") class]));
+    }
+}
+%end
+%end
+
+%group TAImageRowExperiment
+%hook CPSImageRowCell
+- (void)layoutSubviews {
+    %orig;
+    TACompactImageRow((UIView *)self);
+}
+- (void)prepareForReuse {
+    TARestoreImageRow((UIView *)self);
     %orig;
 }
+%end
+%end
+
+%group TACompactHome
+%hook UITabBar
+- (void)layoutSubviews {
+    TACompactTabs(self);
+    %orig;
+}
+- (void)didMoveToWindow {
+    %orig;
+    TACompactTabs(self);
+}
+%end
+%end
+
+%group TAClient
+%hook UIViewController
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    TAVisibleTransition(self);
+}
+%end
+%hook UIWindow
+- (void)layoutSubviews {
+    %orig;
+    TAClientObserve(self);
+    TATemplateLayout(self);
+}
+%end
+%end
+%group TAHost
+%hook UIView
+- (void)layoutSubviews {
+    %orig;
+    if (self==mountedDock && !dockAdjusting) TAInstallDock(self);
+}
+%end
+%hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
-    if (!gOwnCall && gRunning) DPStop(@"native app launch");
-    DPCapture(self, settings);
+    BOOL external=!ownCall;
+    TALog(@"FOREGROUND controller=%p sid=%@ running=%d own=%d pending=%d",self,TAValue(self,@"sceneID"),running,ownCall,TAAttachPending());
+    NSString *bundle=TABundle(self);
+    BOOL current=slots[0].controller==self || slots[1].controller==self || [slots[0].bundle isEqual:bundle] || [slots[1].bundle isEqual:bundle];
+    BOOL launch=[settings isKindOfClass:NSDictionary.class] && settings[@"DBActivationSettingLaunchSource"]!=nil;
+    if (external && running && !TAAttachPending() && !current && bundle && [settings isKindOfClass:NSDictionary.class] && (launch || [TAClientBundles() containsObject:bundle])) TALog(@"NATIVE LAUNCH retain split bundle=%@",bundle);
+    if (external) TACapture(self,settings);
+    %orig;
+    // Retry once after native foreground has established its scene ID. No
+    // fabricated callback or repeated foreground requests.
+    if (external && [settings isKindOfClass:NSDictionary.class]) {
+        __weak id controller=self;
+        NSDictionary *activation=[settings copy];
+        NSUInteger token=generation;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id strongController=controller;
+            if (!strongController || generation!=token) return;
+            NSString *lateBundle=TABundle(strongController);
+            BOOL occupied=slots[0].controller==strongController || slots[1].controller==strongController || [slots[0].bundle isEqual:lateBundle] || [slots[1].bundle isEqual:lateBundle];
+            if (running && !TAAttachPending() && !occupied && lateBundle && (activation[@"DBActivationSettingLaunchSource"] || [TAClientBundles() containsObject:lateBundle])) TALog(@"NATIVE LAUNCH settled retain split bundle=%@",lateBundle);
+            TACapture(strongController,activation);
+            if (running && lateBundle && activation[@"DBActivationSettingLaunchSource"]) [controls offerNative:lateBundle];
+        });
+    }
+}
+- (void)backgroundSceneWithCompletion:(id)completion {
+    TARecord *r = records[TABundle(self) ?: @""];
+    if (!ownCall && r.controller == self) { r.backgrounded = YES; if (running) TALog(@"NATIVE BACKGROUND %@", r.bundle); }
     %orig;
 }
 - (id)presentationViewWithIdentifier:(id)identifier {
-    if (!gOwnCall && gRunning && [identifier isKindOfClass:NSString.class] &&
-        [identifier isEqualToString:@"kCARAppToHomeAnimationIdentifier"])
-        DPStop(@"native home transition");
+    if (!ownCall && running && [identifier isEqual:@"kCARAppToHomeAnimationIdentifier"]) {
+        if (TAAttachPending()) TALog(@"HOME TRANSITION during attach (session retained)");
+        else TALog(@"HOME TRANSITION retain split bundle=%@",TABundle(self));
+    }
     return %orig;
 }
-- (void)backgroundSceneWithCompletion:(id)completion {
-    if (!gOwnCall) {
-        NSString *bundle = DPBundle(DPValue(self, @"sceneID"));
-        DPRecord *record = bundle ? gRecords[bundle] : nil;
-        if (record.controller == self) record.nativeBackgrounded = YES;
-    }
-    if (gRunning) DPLog(@"NATIVE BACKGROUND id=%@ own=%d", DPValue(self,@"sceneID"), gOwnCall);
-    %orig;
-}
-- (void)deactivateSceneWithReasonMask:(NSUInteger)mask {
-    if (gRunning) DPLog(@"NATIVE DEACTIVATE id=%@ mask=%lu", DPValue(self,@"sceneID"),(unsigned long)mask);
-    %orig;
-}
-%end
-
-// V6.25: đây là callback thật của FBScene khi client settings thay đổi.
-// V6.24 đã chứng minh host scene.settings.frame = 188.83x240 và FBSceneUpdateContext
-// cũng mang frame đó. Giờ ta đo xem "clientSettings" mà process app trao đổi với
-// FrontBoard có còn full-width 426.67 hay đã nhận pane width.
-%hook FBScene
-- (void)client:(id)client didUpdateClientSettings:(id)settings withDiff:(id)diff transitionContext:(id)transitionContext {
-    DPRecord *record = DPRecordForSceneObject(self);
-    if (record) {
-        DPLog(@"CLIENT-SETTINGS ENTER bundle=%@ scene=%@ client=%@ settings=%@ diff=%@ transition=%@",
-              record.bundle, DPObjSummary(self), DPObjSummary(client), DPObjSummary(settings),
-              DPObjSummary(diff), DPObjSummary(transitionContext));
-        DPDumpClientObject(record, @"settings-before", settings);
-        DPDumpClientObject(record, @"diff-before", diff);
-        DPDumpClientObject(record, @"transition-before", transitionContext);
-    }
-    %orig;
-    if (record) {
-        id sceneSettings = DPValue(self, @"settings");
-        DPLog(@"CLIENT-SETTINGS EXIT bundle=%@ sceneSettings=%@", record.bundle, DPObjSummary(sceneSettings));
-        DPDumpClientObject(record, @"scene-settings-after", sceneSettings);
-    }
-}
-%end
-
-// Presentation context là tầng ngay trước _UIScenePresentationView. Nếu client
-// settings đã đúng mà UI vẫn co/crop sai, log này cho biết presentation context
-// có còn giữ geometry full-width hay không.
-%hook _UIScenePresentationView
-- (void)scene:(id)scene didPrepareUpdateWithContext:(id)context {
-    DPRecord *record = DPRecordForPresentation(self);
-    if (record) {
-        DPLog(@"PRESENTATION-PREPARE bundle=%@ scene=%@ context=%@",
-              record.bundle, DPObjSummary(scene), DPObjSummary(context));
-        DPDumpClientObject(record, @"presentation-prepare-context", context);
-    }
-    %orig;
-}
-- (void)_updatePresentationContextFrom:(id)fromContext toContext:(id)toContext {
-    DPRecord *record = DPRecordForPresentation(self);
-    if (record) {
-        DPLog(@"PRESENTATION-CONTEXT bundle=%@ from=%@ to=%@",
-              record.bundle, DPObjSummary(fromContext), DPObjSummary(toContext));
-        DPDumpClientObject(record, @"presentation-from", fromContext);
-        DPDumpClientObject(record, @"presentation-to", toContext);
+- (void)sceneManager:(id)manager didDestroyScene:(id)scene {
+    NSString *bundle = TABundle(self); TARecord *r = records[bundle ?: @""];
+    id currentScene=TAValue(self,@"scene");
+    TALog(@"SCENE DESTROY bundle=%@ controller=%p destroyed=%p current=%p attached=%p running=%d own=%d",bundle,self,scene,currentScene,r.scene,running,ownCall);
+    if (r && r.controller == self && scene) {
+        // A late destruction notification for an old scene must not evict a
+        // newer scene on the same controller. Keep activation data for retry.
+        BOOL attachedDestroyed=r.scene==scene;
+        BOOL pendingDestroyed=r.attaching && (!currentScene || currentScene==scene);
+        if (attachedDestroyed || pendingDestroyed) {
+            r.changed=NO; r.restoreBackground=NO;
+            if (r == slots[0]) TAClearSlot(0,@"current scene destroyed");
+            if (r == slots[1]) TAClearSlot(1,@"current scene destroyed");
+        }
+        TALog(@"SCENE RECORD retained bundle=%@ affected=%d",bundle,attachedDestroyed || pendingDestroyed);
     }
     %orig;
 }
 %end
-
-// ĐÃ GỠ BỎ: hook FBSDisplayLayoutElement. Log thực tế cho thấy object này
-// xuất hiện cho RẤT NHIỀU thứ không liên quan CarPlay (lock-screen, home-
-// screen, passcode, thậm chí app Filza) và frame của Maps/YouTube Music bị
-// hệ thống tự đặt lại full-width liên tục, nhiều lần. fillsDisplayBounds
-// cũng đã là 0 sẵn từ đầu — không phải cờ cần tắt như từng đoán. Kết luận:
-// đây là cơ chế theo dõi UI toàn hệ thống (khả năng phục vụ Siri/context-
-// awareness), KHÔNG phải thứ quyết định kích thước layout thật của app
-// CarPlay. Ngõ cụt, dừng đào hướng này.
-
-// Chạy BÊN TRONG process của chính app bản đồ (Maps/Google Maps/Vietmap), khác
-// hẳn khối hook DBApplicationSceneViewController ở trên (chạy trong CarPlayApp).
-// Mục đích: xem chính app đó tự khai báo role/configuration gì khi nó kết nối
-// tới scene CarPlay — dữ liệu này quyết định có spoof/redirect được không.
-// _connectUIScene:withOptions: là API private phổ biến, có thể không tồn tại
-// trên mọi phiên bản iOS — nếu log không thấy dòng APPSIDE-CONNECT nào dù đã
-// mở app trên CarPlay, nghĩa là cần probe selector khác, không phải app không
-// kết nối.
-//
-// HƯỚNG MỚI (sau khi FBSDisplayLayoutElement bị loại): resize SAU KHI app đã
-// kết nối và tự layout xong không hiệu quả (đã chứng minh qua nhiều bản). Có
-// khả năng app CHỈ tự layout đúng nếu biết kích thước NHỎ ngay từ đầu, giống
-// hệt cách 1 app tự nhiên khác nhau trên iPhone SE và iPhone Pro Max. Bước
-// này log THÊM windowScene.coordinateSpace.bounds và windowScene.screen.bounds
-// — đọc TRƯỚC %orig, tức đúng lúc app CHUẨN BỊ nhận biết kích thước, để xem
-// hệ thống báo cho app kích thước gì NGAY LÚC KẾT NỐI ĐẦU TIÊN. Nếu số liệu
-// ở đây LUÔN LÀ full-width (426.67x240), nghĩa là app học kích thước full
-// ngay từ giây đầu tiên — xác nhận hướng "spoof kích thước lúc connect" là
-// đúng chỗ cần làm, chứ không phải resize về sau như đang làm.
-static __weak UIWindowScene *gAppObservedCarScene = nil;
-static CGRect gAppLastBounds = {{0,0},{0,0}};
-static void DPAppPollSceneBounds(NSUInteger remaining) {
-    if (!gAppProbeEnabled || remaining == 0) return;
-    UIWindowScene *ws = gAppObservedCarScene;
-    if (ws) {
-        @try {
-            CGRect coord = ws.coordinateSpace.bounds;
-            CGRect screen = ws.screen.bounds;
-            if (!CGRectEqualToRect(coord, gAppLastBounds)) {
-                gAppLastBounds = coord;
-                DPLog(@"APPSIDE-BOUNDS-CHANGED proc=%@ sid=%@ coordBounds=%@ screenBounds=%@",
-                      NSBundle.mainBundle.bundleIdentifier, ws.session.persistentIdentifier,
-                      NSStringFromCGRect(coord), NSStringFromCGRect(screen));
-            }
-        } @catch (__unused NSException *e) {}
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        DPAppPollSceneBounds(remaining - 1);
-    });
-}
-
-static void DPAppScanConnectedScenes(NSUInteger remaining) {
-    if (!gAppProbeEnabled || remaining == 0) return;
-    @try {
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (![scene isKindOfClass:UIWindowScene.class]) continue;
-            UIWindowScene *ws = (UIWindowScene *)scene;
-            NSString *role = ws.session.role ?: @"";
-            NSString *sid = ws.session.persistentIdentifier ?: @"";
-            if (![role containsString:@"CarPlay"] && ![sid containsString:@"Car["]) continue;
-            CGRect coord = ws.coordinateSpace.bounds;
-            CGRect screen = ws.screen.bounds;
-            if (gAppObservedCarScene != ws || !CGRectEqualToRect(coord, gAppLastBounds)) {
-                gAppObservedCarScene = ws;
-                gAppLastBounds = coord;
-                DPLog(@"APPSIDE-SCAN proc=%@ sid=%@ role=%@ coordBounds=%@ screenBounds=%@ windows=%lu",
-                      NSBundle.mainBundle.bundleIdentifier, sid, role, NSStringFromCGRect(coord),
-                      NSStringFromCGRect(screen), (unsigned long)ws.windows.count);
-            }
-        }
-    } @catch (NSException *e) { DPLog(@"APPSIDE-SCAN ERROR %@", e.name); }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        DPAppScanConnectedScenes(remaining - 1);
-    });
-}
-
-
-
-static void DPTemplateHostDumpViewTree(UIView *view, NSString *sid, NSUInteger depth, NSUInteger *budget) {
-    if (!view || !budget || *budget == 0 || depth > 5) return;
-    (*budget)--;
-    UIEdgeInsets safe = UIEdgeInsetsZero;
-    @try { safe = view.safeAreaInsets; } @catch (__unused NSException *e) {}
-    DPLog(@"TEMPLATEHOST-TREE sid=%@ depth=%lu class=%@ frame=%@ bounds=%@ safe={%.1f,%.1f,%.1f,%.1f} hidden=%d alpha=%.2f constraints=%lu",
-          sid, (unsigned long)depth, NSStringFromClass(view.class), NSStringFromCGRect(view.frame),
-          NSStringFromCGRect(view.bounds), safe.top, safe.left, safe.bottom, safe.right,
-          view.hidden, view.alpha, (unsigned long)view.constraints.count);
-    if (*budget == 0) return;
-    for (UIView *sub in view.subviews) {
-        DPTemplateHostDumpViewTree(sub, sid, depth + 1, budget);
-        if (*budget == 0) break;
-    }
-}
-
-static void DPTemplateHostDumpControllerMethods(Class cls) {
-    static NSMutableSet *seen; static dispatch_once_t once; dispatch_once(&once, ^{ seen=[NSMutableSet set]; });
-    if (!cls) return; NSString *name=NSStringFromClass(cls); if ([seen containsObject:name]) return; [seen addObject:name];
-    unsigned int count=0; Method *methods=class_copyMethodList(cls,&count);
-    for (unsigned int i=0;i<count;i++) {
-        NSString *sel=NSStringFromSelector(method_getName(methods[i])); NSString *l=sel.lowercaseString;
-        if ([l containsString:@"layout"] || [l containsString:@"size"] || [l containsString:@"trait"] || [l containsString:@"safe"] || [l containsString:@"content"] || [l containsString:@"frame"] || [l containsString:@"bounds"])
-            DPLog(@"TEMPLATEHOST-METHOD class=%@ selector=%@ types=%s", name, sel, method_getTypeEncoding(methods[i]));
-    }
-    if (methods) free(methods);
-}
-
-static void DPTemplateHostApplySafeAreaFix(UIWindowScene *ws, UIWindow *w, UIViewController *root, NSString *sid) {
-    if (!ws || !w || !root || !root.view) return;
-    if (![NSStringFromClass(root.class) isEqualToString:@"CARTemplateUIApplicationSceneViewController"]) return;
-    if (![sid containsString:@":com.apple.CarPlayTemplateUIHost:"]) return;
-
-    @try {
-        CGFloat paneW = ws.coordinateSpace.bounds.size.width;
-        UIEdgeInsets inherited = root.view.safeAreaInsets;
-
-        // CarPlay's physical display reserves ~45 pt for the global sidebar.  When the
-        // application scene is resized to a ~189 pt pane, UIKit keeps propagating that
-        // same physical-display left safe-area into EACH pane.  The result is a second
-        // 45 pt subtraction (189 -> ~144), which is exactly the squeezed content seen in
-        // V6.27.  Reclaim only that inherited left inset for narrow application scenes.
-        if (paneW > 0.0 && paneW < 300.0 && inherited.left > 20.0) {
-            UIEdgeInsets add = root.additionalSafeAreaInsets;
-            CGFloat desiredLeft = -inherited.left;
-            if (fabs(add.left - desiredLeft) > 0.5 || fabs(add.top) > 0.5 || fabs(add.right) > 0.5 || fabs(add.bottom) > 0.5) {
-                root.additionalSafeAreaInsets = UIEdgeInsetsMake(0.0, desiredLeft, 0.0, 0.0);
-                [root.view setNeedsUpdateConstraints];
-                [root.view setNeedsLayout];
-                [root.view layoutIfNeeded];
-                DPLog(@"SAFEAREA-FIX APPLY sid=%@ paneW=%.2f inherited=%@ additional=%@ final=%@",
-                      sid, paneW, NSStringFromUIEdgeInsets(inherited),
-                      NSStringFromUIEdgeInsets(root.additionalSafeAreaInsets),
-                      NSStringFromUIEdgeInsets(root.view.safeAreaInsets));
-            }
-        } else if (paneW >= 300.0) {
-            UIEdgeInsets add = root.additionalSafeAreaInsets;
-            if (fabs(add.top) > 0.5 || fabs(add.left) > 0.5 || fabs(add.bottom) > 0.5 || fabs(add.right) > 0.5) {
-                root.additionalSafeAreaInsets = UIEdgeInsetsZero;
-                [root.view setNeedsUpdateConstraints];
-                [root.view setNeedsLayout];
-                [root.view layoutIfNeeded];
-                DPLog(@"SAFEAREA-FIX RESTORE sid=%@ paneW=%.2f final=%@",
-                      sid, paneW, NSStringFromUIEdgeInsets(root.view.safeAreaInsets));
-            }
-        }
-    } @catch (NSException *e) {
-        DPLog(@"SAFEAREA-FIX ERROR sid=%@ %@ %@", sid, e.name, e.reason);
-    }
-}
-
-
-static void DPTemplateHostVerticalReclaimController(UIViewController *vc, CGFloat paneW, NSString *sid, NSUInteger depth) {
-    if (!vc || depth > 8) return;
-    @try {
-        UIView *view = vc.viewIfLoaded;
-        if (view && view.window) {
-            UIEdgeInsets safe = view.safeAreaInsets;
-            UIEdgeInsets add = vc.additionalSafeAreaInsets;
-
-            // V6.28 fixed the duplicate 45pt LEFT safe-area, but the template content
-            // still keeps a ~44pt TOP safe-area for the full-screen CarPlay chrome.
-            // In a narrow half-pane this leaves the real content around 180pt tall
-            // (e.g. y=52..232) even though the scene itself is 240pt tall.  Reclaim only
-            // the inherited TOP inset on nested content controllers.  The actual
-            // CPSNavigationBar / UITabBar remains on top, so background/main content can
-            // extend behind it instead of being vertically squeezed.
-            if (paneW > 0.0 && paneW < 300.0) {
-                if (safe.top > 20.0 && add.top > -1.0) {
-                    CGFloat desiredTop = -safe.top;
-                    vc.additionalSafeAreaInsets = UIEdgeInsetsMake(desiredTop, add.left, add.bottom, add.right);
-                    [view setNeedsUpdateConstraints];
-                    [view setNeedsLayout];
-                    [view layoutIfNeeded];
-                    DPLog(@"VERTICAL-RECLAIM APPLY sid=%@ depth=%lu vc=%@ inherited=%@ additional=%@ final=%@ frame=%@",
-                          sid, (unsigned long)depth, NSStringFromClass(vc.class), NSStringFromUIEdgeInsets(safe),
-                          NSStringFromUIEdgeInsets(vc.additionalSafeAreaInsets), NSStringFromUIEdgeInsets(view.safeAreaInsets),
-                          NSStringFromCGRect(view.frame));
-                }
-            } else if (paneW >= 300.0 && add.top < -0.5) {
-                vc.additionalSafeAreaInsets = UIEdgeInsetsMake(0.0, add.left, add.bottom, add.right);
-                [view setNeedsUpdateConstraints];
-                [view setNeedsLayout];
-                [view layoutIfNeeded];
-                DPLog(@"VERTICAL-RECLAIM RESTORE sid=%@ depth=%lu vc=%@ final=%@ frame=%@",
-                      sid, (unsigned long)depth, NSStringFromClass(vc.class),
-                      NSStringFromUIEdgeInsets(view.safeAreaInsets), NSStringFromCGRect(view.frame));
-            }
-        }
-
-        for (UIViewController *child in vc.childViewControllers) {
-            DPTemplateHostVerticalReclaimController(child, paneW, sid, depth + 1);
-        }
-        UIViewController *presented = vc.presentedViewController;
-        if (presented && presented.presentingViewController == vc) {
-            DPTemplateHostVerticalReclaimController(presented, paneW, sid, depth + 1);
-        }
-    } @catch (NSException *e) {
-        DPLog(@"VERTICAL-RECLAIM ERROR sid=%@ depth=%lu vc=%@ %@ %@",
-              sid, (unsigned long)depth, vc ? NSStringFromClass(vc.class) : @"nil", e.name, e.reason);
-    }
-}
-
-
-static void DPTemplateHostPolishNarrowViewTree(UIView *view, NSString *sid, CGFloat paneW, NSUInteger depth) {
-    if (!view || depth > 10 || paneW <= 0.0 || paneW >= 300.0) return;
-    @try {
-        BOOL isYT = [sid containsString:@"com.google.ios.youtubemusic"];
-        NSString *cls = NSStringFromClass(view.class);
-
-        // DuoDash-like visual behavior: the narrow pane should use every horizontal
-        // point.  Several CarPlay template wrapper views keep margins inherited from
-        // the full-width template even after the scene itself has resized.  Clear only
-        // wrapper/container margins; do not touch controls or labels individually.
-        if ([cls isEqualToString:@"UILayoutContainerView"] ||
-            [cls isEqualToString:@"UINavigationTransitionView"] ||
-            [cls isEqualToString:@"UIViewControllerWrapperView"] ||
-            [cls isEqualToString:@"UITransitionView"]) {
-            UIEdgeInsets before = view.layoutMargins;
-            if (fabs(before.left) > 0.5 || fabs(before.right) > 0.5) {
-                view.preservesSuperviewLayoutMargins = NO;
-                view.layoutMargins = UIEdgeInsetsMake(before.top, 0.0, before.bottom, 0.0);
-                [view setNeedsLayout];
-                DPLog(@"NARROW-MARGINS sid=%@ depth=%lu class=%@ before=%@ after=%@ frame=%@",
-                      sid, (unsigned long)depth, cls, NSStringFromUIEdgeInsets(before),
-                      NSStringFromUIEdgeInsets(view.layoutMargins), NSStringFromCGRect(view.frame));
-            }
-        }
-
-        // YouTube Music exposes a vertical scroll indicator in the half-width layout.
-        // DuoDash does not show this chrome.  Hide only the indicator; preserve actual
-        // scrolling and contentSize so interaction remains native.
-        if (isYT && [view isKindOfClass:UIScrollView.class]) {
-            UIScrollView *sv = (UIScrollView *)view;
-            if (sv.showsVerticalScrollIndicator) {
-                sv.showsVerticalScrollIndicator = NO;
-                DPLog(@"YT-SCROLLBAR-HIDE sid=%@ depth=%lu class=%@ frame=%@ content=%@ inset=%@",
-                      sid, (unsigned long)depth, cls, NSStringFromCGRect(sv.frame),
-                      NSStringFromCGSize(sv.contentSize), NSStringFromUIEdgeInsets(sv.contentInset));
-            }
-            // Remove only horizontal content inset inherited from full-screen chrome.
-            UIEdgeInsets ci = sv.contentInset;
-            if (fabs(ci.left) > 0.5 || fabs(ci.right) > 0.5) {
-                UIEdgeInsets desired = UIEdgeInsetsMake(ci.top, 0.0, ci.bottom, 0.0);
-                sv.contentInset = desired;
-                sv.scrollIndicatorInsets = desired;
-                DPLog(@"YT-CONTENT-INSET sid=%@ depth=%lu class=%@ before=%@ after=%@",
-                      sid, (unsigned long)depth, cls, NSStringFromUIEdgeInsets(ci),
-                      NSStringFromUIEdgeInsets(sv.contentInset));
-            }
-        }
-
-        for (UIView *child in view.subviews) {
-            DPTemplateHostPolishNarrowViewTree(child, sid, paneW, depth + 1);
-        }
-    } @catch (NSException *e) {
-        DPLog(@"NARROW-POLISH ERROR sid=%@ depth=%lu class=%@ %@ %@",
-              sid, (unsigned long)depth, view ? NSStringFromClass(view.class) : @"nil", e.name, e.reason);
-    }
-}
-
-static void DPProbeTemplateHostHierarchy(UIWindowScene *ws, NSString *tag) {
-    if (!ws) return;
-    @try {
-        NSString *proc = NSBundle.mainBundle.bundleIdentifier ?: @"?";
-        NSString *sid = ws.session.persistentIdentifier ?: @"?";
-        CGRect coord = ws.coordinateSpace.bounds;
-        CGRect screen = ws.screen.bounds;
-        DPLog(@"TEMPLATEHOST-SCENE tag=%@ proc=%@ sid=%@ role=%@ coordBounds=%@ screenBounds=%@ windows=%lu",
-              tag, proc, sid, ws.session.role, NSStringFromCGRect(coord), NSStringFromCGRect(screen),
-              (unsigned long)ws.windows.count);
-        NSUInteger wi = 0;
-        for (UIWindow *w in ws.windows) {
-            UIViewController *root = w.rootViewController;
-            DPTemplateHostApplySafeAreaFix(ws, w, root, sid);
-            if (root && [NSStringFromClass(root.class) isEqualToString:@"CARTemplateUIApplicationSceneViewController"] &&
-                [sid containsString:@":com.apple.CarPlayTemplateUIHost:"]) {
-                DPTemplateHostVerticalReclaimController(root, ws.coordinateSpace.bounds.size.width, sid, 0);
-                DPTemplateHostPolishNarrowViewTree(root.view, sid, ws.coordinateSpace.bounds.size.width, 0);
-            }
-            DPLog(@"TEMPLATEHOST-WINDOW tag=%@ sid=%@ idx=%lu class=%@ frame=%@ bounds=%@ root=%@ rootViewFrame=%@",
-                  tag, sid, (unsigned long)wi, NSStringFromClass(w.class), NSStringFromCGRect(w.frame),
-                  NSStringFromCGRect(w.bounds), root ? NSStringFromClass(root.class) : @"nil",
-                  root.view ? NSStringFromCGRect(root.view.frame) : @"nil");
-            // Non-destructive relayout poke. Do not force a synthetic frame yet; first see
-            // whether TemplateUIHost receives the pane geometry from its UIWindowScene.
-            [w setNeedsLayout];
-            [w layoutIfNeeded];
-            if (root.view) {
-                [root.view setNeedsLayout];
-                [root.view layoutIfNeeded];
-                DPTemplateHostDumpControllerMethods(root.class);
-                NSUInteger budget = 80;
-                DPTemplateHostDumpViewTree(root.view, sid, 0, &budget);
-                DPLog(@"TEMPLATEHOST-TRAITS sid=%@ root=%@ hSize=%ld vSize=%ld style=%ld safe=%@ preferredContentSize=%@",
-                      sid, NSStringFromClass(root.class), (long)root.traitCollection.horizontalSizeClass,
-                      (long)root.traitCollection.verticalSizeClass, (long)root.traitCollection.userInterfaceStyle,
-                      NSStringFromUIEdgeInsets(root.view.safeAreaInsets), NSStringFromCGSize(root.preferredContentSize));
-            }
-            NSUInteger si = 0;
-            for (UIView *v in w.subviews) {
-                if (si >= 8) break;
-                DPLog(@"TEMPLATEHOST-SUBVIEW tag=%@ sid=%@ w=%lu idx=%lu class=%@ frame=%@ bounds=%@",
-                      tag, sid, (unsigned long)wi, (unsigned long)si, NSStringFromClass(v.class),
-                      NSStringFromCGRect(v.frame), NSStringFromCGRect(v.bounds));
-                si++;
-            }
-            wi++;
-        }
-    } @catch (NSException *e) {
-        DPLog(@"TEMPLATEHOST-PROBE ERROR %@ %@", e.name, e.reason);
-    }
-}
-
-static void DPTemplateHostScan(NSUInteger remaining) {
-    if (remaining == 0) return;
-    if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.CarPlayTemplateUIHost"]) return;
-    @try {
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (![scene isKindOfClass:UIWindowScene.class]) continue;
-            UIWindowScene *ws = (UIWindowScene *)scene;
-            NSString *sid = ws.session.persistentIdentifier ?: @"";
-            if (![sid hasPrefix:@"Car["]) continue;
-            DPProbeTemplateHostHierarchy(ws, @"scan");
-        }
-    } @catch (NSException *e) { DPLog(@"TEMPLATEHOST-SCAN ERROR %@", e.name); }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        DPTemplateHostScan(remaining - 1);
-    });
-}
-
-%hook UIApplication
-- (void)sendEvent:(UIEvent *)event {
-    // CarPlayApp owns the split window. Reveal controls on the first touch anywhere
-    // on the CarPlay surface, while preserving normal event delivery.
-    if (gRunning && gSplitWindow && event.type == UIEventTypeTouches) {
-        for (UITouch *touch in event.allTouches) {
-            if (touch.phase == UITouchPhaseBegan) {
-                DPRevealControls();
-                break;
-            }
-        }
-    }
-    %orig;
-}
-
-- (void)_connectUIScene:(UIScene *)scene withOptions:(id)options {
-    if (gAppProbeEnabled && [scene isKindOfClass:UIWindowScene.class]) {
-        @try {
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            UISceneSession *session = windowScene.session;
-            DPLog(@"APPSIDE-CONNECT-PRE proc=%@ sid=%@ role=%@ coordBounds=%@ screenBounds=%@",
-                  NSBundle.mainBundle.bundleIdentifier, session.persistentIdentifier, session.role,
-                  NSStringFromCGRect(windowScene.coordinateSpace.bounds),
-                  NSStringFromCGRect(windowScene.screen.bounds));
-        } @catch (NSException *e) { DPLog(@"APPSIDE-CONNECT-PRE ERROR %@", e.reason); }
-    }
-
-    %orig;
-
-    if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.CarPlayTemplateUIHost"] && [scene isKindOfClass:UIWindowScene.class]) {
-        DPProbeTemplateHostHierarchy((UIWindowScene *)scene, @"connect-post");
-    }
-
-    if (!gAppProbeEnabled || ![scene isKindOfClass:UIWindowScene.class]) return;
-    @try {
-        UIWindowScene *windowScene = (UIWindowScene *)scene;
-        UISceneSession *session = windowScene.session;
-        gAppObservedCarScene = windowScene;
-        gAppLastBounds = CGRectZero;
-        DPAppPollSceneBounds(120);
-        DPLog(@"APPSIDE-CONNECT proc=%@ sid=%@ role=%@ configName=%@ configDelegateClass=%@ orientation=%ld coordBounds=%@ screenBounds=%@",
-              NSBundle.mainBundle.bundleIdentifier, session.persistentIdentifier, session.role,
-              session.configuration.name, session.configuration.delegateClass,
-              (long)windowScene.interfaceOrientation,
-              NSStringFromCGRect(windowScene.coordinateSpace.bounds),
-              NSStringFromCGRect(windowScene.screen.bounds));
-    } @catch (NSException *e) { DPLog(@"APPSIDE-CONNECT PROBE ERROR %@", e.reason); }
-}
 %end
 %ctor {
     @autoreleasepool {
-        NSString *proc = NSBundle.mainBundle.bundleIdentifier;
-        // Nhánh probe: KHÔNG đụng tới bất kỳ global nào của phần host-side
-        // (gRecords/gControls/...) — chỉ bật cờ cho hook UIApplication ở trên.
-        if ([@[@"com.apple.Maps", @"com.google.Maps", @"vn.vietmap.live", @"com.google.ios.youtubemusic", @"com.apple.CarPlayTemplateUIHost"] containsObject:proc]) {
-            gAppProbeEnabled = YES;
-            DPLog(@"APPSIDE PROBE ACTIVE proc=%@", proc);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                DPAppScanConnectedScenes(180);
-                if ([proc isEqualToString:@"com.apple.CarPlayTemplateUIHost"]) DPTemplateHostScan(180);
-            });
+        NSString *process = NSBundle.mainBundle.bundleIdentifier;
+        if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+            %init(TAClient);
+            if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+                %init(TACompactHome);
+                if (NSClassFromString(@"CPSImageRowCell")) {
+                    %init(TAImageRowExperiment);
+                }
+                Class cls=NSClassFromString(@"CPUINowPlayingView");
+                SEL selector=NSSelectorFromString(@"recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:");
+                Method method=class_getInstanceMethod(cls,selector);
+                const char *encoding=method ? method_getTypeEncoding(method) : NULL;
+                if (encoding && strcmp(encoding,"v96@0:8B16B20B24{CGRect={CGPoint=dd}{CGSize=dd}}28{CGRect={CGPoint=dd}{CGSize=dd}}60B92")==0) {
+                    %init(TANowPlayingExperiment);
+                    TALog(@"NATIVE LAYOUT HOOK enabled");
+                } else TALog(@"NATIVE LAYOUT HOOK skipped encoding=%s",encoding ?: "missing");
+                dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); TAListenSnapshots(); });
+            }
             return;
         }
-        if (![proc isEqualToString:@"com.apple.CarPlayApp"]) return;
-        gRecords = [NSMutableDictionary dictionary]; gOrder = [NSMutableArray array];
-        gControls = [DPControls new];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            DPLog(@"CTOR MANUAL EXPERIMENT — open two apps, tap Chia; no automatic split");
-            DPTick();
-        });
+        if (![process isEqual:@"com.apple.CarPlayApp"]) return;
+        records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
+        %init(TAHost);
+        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED"); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }
