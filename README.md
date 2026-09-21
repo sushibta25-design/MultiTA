@@ -1,4 +1,4 @@
-# TAduo 0.15.0 — thử nghiệm 50/50
+# TAduo 0.16.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
 
@@ -103,3 +103,11 @@ Test changing Maps to Apple Maps/Vietmap while music remains, failed-pane recove
 Replace fixed one-second capture with a bounded readiness check (250ms, minimum two turns, maximum four seconds). Foreground is called once; each check reads the current controller scene. During an outstanding attach, native foreground/Home-animation callbacks no longer tear down the split session. Capture may replace a pending controller with the current controller for the same bundle and dashboard. Preserve real launch activation settings when later refresh callbacks omit launch source. Identify occupied apps by bundle as well as controller pointer. Use unique presentation IDs per slot request; timeout, scene mismatch and presentation failure clear only the affected slot.
 
 This is a hypothesis-driven fix for navigation activation, not a confirmed root cause from the sparse 0.14 logs. Test Đổi trái/right → Apple Maps/Vietmap, keep companion visible, allow up to four seconds, no repeated tapping. Send logs containing ATTACH BEGIN / ATTACH REBIND / ATTACHED or ATTACH TIMEOUT, plus a screenshot if no attach request appears. Google Maps diagnostics and 0.14 menu remain.
+
+## 0.16 — keep split during native app transitions
+
+Native app foreground and app-to-home presentation callbacks no longer stop the split session. An external launch with a captured launch source offers left/right placement without first clearing either pane; a busy picker defers selection to the existing Change menu. Explicit Fold/Exit retain their prior behavior.
+
+Scene destruction checks scene identity before clearing an affected slot, never clears the companion, and retains the controller/activation record for an explicit retry (not a guarantee that the OS will recreate its scene). Added bounded event logs for foreground and scene destruction. Existing resize behavior is unchanged.
+
+Device gate: attach Apple Maps and Vietmap separately; replace either side of Google Maps + YouTube Music; verify companion touch and no split dismissal. Also check native external launch and explicit Fold/Exit. Build success is not device validation.

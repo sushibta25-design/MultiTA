@@ -1,4 +1,4 @@
-// TAduo 0.15.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.16.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.15] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.16] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -224,6 +224,7 @@ static void TASuspend(NSString *reason) {
 @interface TAControls : NSObject
 - (void)start;
 - (void)enter;
+- (void)offerNative:(NSString *)bundle;
 - (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
 - (void)fold;
 - (void)changeLeft;
@@ -282,6 +283,23 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [picker addAction:[UIAlertAction actionWithTitle:@"Giữ cặp cũ" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
         dispatch_async(dispatch_get_main_queue(), ^{ if (running && generation==token) [self restoreSelection:selection]; });
     }]];
+    [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
+}
+- (void)offerNative:(NSString *)bundle {
+    if (!running || !records[bundle] || TAAttachPending() || [slots[0].bundle isEqual:bundle] || [slots[1].bundle isEqual:bundle]) return;
+    if (splitWindow.rootViewController.presentedViewController) { TALog(@"NATIVE OFFER deferred to picker bundle=%@",bundle); return; }
+    floatingActions.hidden=YES;
+    UIAlertController *picker=[UIAlertController alertControllerWithTitle:TAAppName(bundle) message:@"Đưa app vào bên nào?" preferredStyle:UIAlertControllerStyleAlert];
+    NSUInteger token=generation;
+    for (NSInteger side=0;side<2;side++) {
+        [picker addAction:[UIAlertAction actionWithTitle:side==0 ? @"Bên trái" : @"Bên phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (running && generation==token) [self replace:bundle slot:side];
+            });
+        }]];
+    }
+    [picker addAction:[UIAlertAction actionWithTitle:@"Giữ nguyên" style:UIAlertActionStyleCancel handler:nil]];
+    TALog(@"NATIVE OFFER bundle=%@",bundle);
     [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
 }
 - (void)fold { floatingActions.hidden=YES; TARememberPair(); TASuspend(@"fold"); }
@@ -494,7 +512,7 @@ static void TATick(void) {
         buttonWindow = [[UIWindow alloc] initWithWindowScene:s]; buttonWindow.windowLevel = UIWindowLevelAlert + 80;
         buttonWindow.frame = CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-88, 0, 88, 30);
         buttonWindow.rootViewController = [UIViewController new];
-        UIButton *b = TAButton(@"TAduo 0.15", @selector(enter)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
+        UIButton *b = TAButton(@"TAduo 0.16", @selector(enter)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
     }
     buttonWindow.hidden = running || (!resumeBundles && order.count < 1);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
@@ -995,10 +1013,11 @@ static void TAListenSnapshots(void) {
 %hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
     BOOL external=!ownCall;
+    TALog(@"FOREGROUND controller=%p sid=%@ running=%d own=%d pending=%d",self,TAValue(self,@"sceneID"),running,ownCall,TAAttachPending());
     NSString *bundle=TABundle(self);
     BOOL current=slots[0].controller==self || slots[1].controller==self || [slots[0].bundle isEqual:bundle] || [slots[1].bundle isEqual:bundle];
     BOOL launch=[settings isKindOfClass:NSDictionary.class] && settings[@"DBActivationSettingLaunchSource"]!=nil;
-    if (external && running && !TAAttachPending() && !current && bundle && [settings isKindOfClass:NSDictionary.class] && (launch || [TAClientBundles() containsObject:bundle])) TASuspend(@"native app launch");
+    if (external && running && !TAAttachPending() && !current && bundle && [settings isKindOfClass:NSDictionary.class] && (launch || [TAClientBundles() containsObject:bundle])) TALog(@"NATIVE LAUNCH retain split bundle=%@",bundle);
     if (external) TACapture(self,settings);
     %orig;
     // Retry once after native foreground has established its scene ID. No
@@ -1012,8 +1031,9 @@ static void TAListenSnapshots(void) {
             if (!strongController || generation!=token) return;
             NSString *lateBundle=TABundle(strongController);
             BOOL occupied=slots[0].controller==strongController || slots[1].controller==strongController || [slots[0].bundle isEqual:lateBundle] || [slots[1].bundle isEqual:lateBundle];
-            if (running && !TAAttachPending() && !occupied && lateBundle && (activation[@"DBActivationSettingLaunchSource"] || [TAClientBundles() containsObject:lateBundle])) TASuspend(@"late native app launch");
+            if (running && !TAAttachPending() && !occupied && lateBundle && (activation[@"DBActivationSettingLaunchSource"] || [TAClientBundles() containsObject:lateBundle])) TALog(@"NATIVE LAUNCH settled retain split bundle=%@",lateBundle);
             TACapture(strongController,activation);
+            if (running && lateBundle && activation[@"DBActivationSettingLaunchSource"]) [controls offerNative:lateBundle];
         });
     }
 }
@@ -1025,16 +1045,25 @@ static void TAListenSnapshots(void) {
 - (id)presentationViewWithIdentifier:(id)identifier {
     if (!ownCall && running && [identifier isEqual:@"kCARAppToHomeAnimationIdentifier"]) {
         if (TAAttachPending()) TALog(@"HOME TRANSITION during attach (session retained)");
-        else TASuspend(@"native home");
+        else TALog(@"HOME TRANSITION retain split bundle=%@",TABundle(self));
     }
     return %orig;
 }
 - (void)sceneManager:(id)manager didDestroyScene:(id)scene {
     NSString *bundle = TABundle(self); TARecord *r = records[bundle ?: @""];
-    if (r && r.controller == self) {
-        if (r == slots[0]) TAClearSlot(0,@"scene destroyed");
-        if (r == slots[1]) TAClearSlot(1,@"scene destroyed");
-        [records removeObjectForKey:bundle]; [order removeObject:bundle];
+    id currentScene=TAValue(self,@"scene");
+    TALog(@"SCENE DESTROY bundle=%@ controller=%p destroyed=%p current=%p attached=%p running=%d own=%d",bundle,self,scene,currentScene,r.scene,running,ownCall);
+    if (r && r.controller == self && scene) {
+        // A late destruction notification for an old scene must not evict a
+        // newer scene on the same controller. Keep activation data for retry.
+        BOOL attachedDestroyed=r.scene==scene;
+        BOOL pendingDestroyed=r.attaching && (!currentScene || currentScene==scene);
+        if (attachedDestroyed || pendingDestroyed) {
+            r.changed=NO; r.restoreBackground=NO;
+            if (r == slots[0]) TAClearSlot(0,@"current scene destroyed");
+            if (r == slots[1]) TAClearSlot(1,@"current scene destroyed");
+        }
+        TALog(@"SCENE RECORD retained bundle=%@ affected=%d",bundle,attachedDestroyed || pendingDestroyed);
     }
     %orig;
 }
