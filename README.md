@@ -1,4 +1,4 @@
-# TAduo 0.12.0 — thử nghiệm 50/50
+# TAduo 0.13.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
 
@@ -84,3 +84,10 @@ Image rows are not fixed in this build. Add bounded read-only CPSImageRowCell me
 Scoped to active narrow YouTube Music scenes and verified CPSImageRowCell structure: wait for the native row-width constraint to match cell width minus its observed 12pt margins, then reduce only each matched 61pt width/height pair to a common square size, allowing at least 6pt inter-item space. Keep row height, stack distribution, frames, callbacks and selection actions native. Skip unknown structures and sizes below 20pt. Save constants weakly; restore on target clear, ordinary non-target layout, and cell reuse, without overwriting a newer system value. At most one adaptation attempt per geometry/constraint set to avoid repeatedly fighting native layout. No constraint deactivation, recursive layout, new gesture recognizers, or polling.
 
 This is a template-specific adaptation, not proof that arbitrary apps support narrow CarPlay screens. Artwork rendering and tap selection require device validation. Test home image rows, scroll, select each cover, enter Now Playing, exit to full screen and re-enter. Capture a home screenshot and both logs using the centered Log action.
+
+## 0.13 — resume split after native Home/navigation launch
+Includes the unvalidated 0.12 image-row experiment. Save selected bundle IDs when Home, a different native launch, or scene destruction interrupts a split. Restore geometry and release presentations before native navigation. The TAduo button restores valid current records; when a newly launched app is available, ask which side to replace and preserve the other side. Missing records leave an actionable empty picker. Explicit Exit, Chia, and display disconnect clear the saved selection. Nothing is persisted across respring.
+
+Recognize real foreground dictionaries for supported navigation apps even without DBActivationSettingLaunchSource; capture once again on the next main-queue turn if the scene ID was late. Match the current dashboard, preserve active records, and never stop for an in-session foreground refresh of the same controller. Pin saved/active apps in a 24-entry recent list. Show the launch button with one known app or a saved session. No forced relaunch timer, synthesized activation dictionary, or UI touch override.
+
+Device validation: Maps + music → CarPlay Home → Apple Maps or Vietmap → TAduo → choose left/right → verify companion preserved and both touch inputs work. Repeat with the other map, then native Home without opening a different app → TAduo should restore the pair. Explicit Exit should discard resume. Capture both logs before respring; verify SESSION SAVED/CAPTURE/ATTACHED chronology.
