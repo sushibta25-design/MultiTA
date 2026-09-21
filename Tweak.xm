@@ -593,16 +593,28 @@ static void TAImageRows(UIView *cell) {
 
 %group TAClient
 %hook CPUINowPlayingView
-- (void)layoutSubviews { %orig; TANowLayout((UIView *)self); }
+- (void)layoutSubviews {
+    %orig;
+    TANowLayout((UIView *)self);
+}
 %end
 %hook CPUISongDetailsView
-- (void)layoutSubviews { %orig; TASongLayout((UIView *)self); }
+- (void)layoutSubviews {
+    %orig;
+    TASongLayout((UIView *)self);
+}
 %end
 %hook UITabBar
-- (void)layoutSubviews { %orig; TATabLayout(self); }
+- (void)layoutSubviews {
+    %orig;
+    TATabLayout(self);
+}
 %end
 %hook CPSImageRowCell
-- (void)layoutSubviews { %orig; TAImageRows((UIView *)self); }
+- (void)layoutSubviews {
+    %orig;
+    TAImageRows((UIView *)self);
+}
 %end
 
 %hook UIViewController
