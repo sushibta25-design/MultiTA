@@ -1,4 +1,4 @@
-// TAduo 0.2.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.3.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -10,13 +10,13 @@ static void TALog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *s = [[NSString alloc] initWithFormat:format arguments:args]; va_end(args);
     @synchronized (NSFileManager.defaultManager) {
-        NSString *path = @"/var/mobile/TAduo.log";
+        NSString *path = [NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/TAduo-template.log" : @"/var/mobile/TAduo.log";
         NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
         if ([attrs fileSize] > 1024 * 1024) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.2] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.3] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -62,6 +62,7 @@ static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSUInteger generation;
 static void TAStop(NSString *reason);
+static void TASetLayoutTarget(NSString *bundle, CGSize size);
 static UIWindowScene *TADashboard(void) {
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:UIWindowScene.class] && [s.session.persistentIdentifier containsString:@"DBDashboard-Car"])
@@ -143,6 +144,7 @@ static void TAResize(TARecord *r, CGSize size) {
     }
     if (r.scene != scene) { TAStop(@"resize scene changed"); return; }
     r.targetSize = size;
+    TASetLayoutTarget(r.bundle, size);
     NSUInteger token = generation, serial = ++r.resizeSerial;
     TATransact(r, token, serial, 0);
     for (NSNumber *delay in @[@0.25, @1.0, @3.0]) {
@@ -153,6 +155,7 @@ static void TAResize(TARecord *r, CGSize size) {
 }
 static void TACleanup(TARecord *r) {
     if (!r) return;
+    TASetLayoutTarget(r.bundle, CGSizeZero);
     if (r.changed && r.scene == TAValue(r.controller, @"scene")) {
         CGRect original = r.originalFrame;
         void (^restore)(id) = ^(id settings) { @try { TALog(@"RESTORE %@ ok=%d", r.bundle, TASetFrame(settings, original)); } @catch (__unused NSException *e) {} };
@@ -213,7 +216,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
     UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(8, 0, half, toolbar)];
-    label.text = @"TAduo 0.2 · 50/50"; label.textColor = UIColor.whiteColor; label.font = [UIFont systemFontOfSize:12]; [root addSubview:label];
+    label.text = @"TAduo 0.3 · 50/50"; label.textColor = UIColor.whiteColor; label.font = [UIFont systemFontOfSize:12]; [root addSubview:label];
     UIButton *exit = TAButton(@"Thoát", @selector(stop)); exit.frame = CGRectMake(bounds.size.width - 64, 0, 64, toolbar); [root addSubview:exit];
     buttonWindow.hidden = YES; splitWindow.hidden = NO;
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
@@ -301,6 +304,109 @@ static NSString *TAChannel(NSString *bundle, NSString *kind) {
 static NSArray<NSString *> *TAClientBundles(void) {
     return @[@"com.apple.Maps", @"com.google.Maps", @"com.google.ios.youtube", @"com.google.ios.youtubemusic", @"vn.vietmap.live"];
 }
+// The layout experiment is enabled only for the exact scene dimensions
+// currently owned by TAduo. No global narrow-screen heuristics.
+static int TATargetToken(NSString *bundle) {
+    static NSMutableDictionary *tokens;
+    if (!tokens) tokens = [NSMutableDictionary new];
+    NSNumber *existing = tokens[bundle]; if (existing) return existing.intValue;
+    int token = -1;
+    NSString *name = TAChannel(bundle, @"layout-target");
+    if (notify_register_check(name.UTF8String, &token) != NOTIFY_STATUS_OK) return -1;
+    tokens[bundle] = @(token); return token;
+}
+static void TASetLayoutTarget(NSString *bundle, CGSize size) {
+    int token = TATargetToken(bundle); if (token < 0) return;
+    uint64_t packed = ((uint64_t)llround(size.width * 4) << 32) | (uint32_t)llround(size.height * 4);
+    if (notify_set_state(token, packed) == NOTIFY_STATUS_OK) notify_post(TAChannel(bundle, @"layout-target").UTF8String);
+}
+static BOOL TATemplateTarget(UIWindow *w, NSString **bundleOut) {
+    NSString *sid = w.windowScene.session.persistentIdentifier;
+    NSArray *parts = [sid componentsSeparatedByString:@":"];
+    if (parts.count != 3 || ![parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"]) return NO;
+    NSString *bundle = parts.lastObject; if (bundleOut) *bundleOut = bundle;
+    if (![TAClientBundles() containsObject:bundle]) return NO;
+    int token = TATargetToken(bundle); uint64_t packed = 0;
+    if (token < 0 || notify_get_state(token, &packed) != NOTIFY_STATUS_OK || !packed) return NO;
+    CGSize target = CGSizeMake((packed >> 32)/4.0, (packed & 0xffffffff)/4.0);
+    CGSize actual = w.windowScene.coordinateSpace.bounds.size;
+    return fabs(target.width-actual.width)<0.5 && fabs(target.height-actual.height)<0.5;
+}
+static void TAInvalidateTree(UIView *view, NSUInteger depth, NSUInteger *budget) {
+    if (!view || !*budget || depth > 8) return; --*budget;
+    [view setNeedsUpdateConstraints]; [view setNeedsLayout];
+    if ([view isKindOfClass:UICollectionView.class]) [((UICollectionView *)view).collectionViewLayout invalidateLayout];
+    for (UIView *child in view.subviews) TAInvalidateTree(child, depth+1, budget);
+}
+static void TALayoutEvidence(UIView *view, NSString *bundle, NSUInteger depth, NSUInteger *budget) {
+    if (!view || !*budget || depth > 6) return; --*budget;
+    TALog(@"TEMPLATE VIEW %@ depth=%lu class=%@ frame=%@ bounds=%@ safe=%@ margins=%@ constraints=%lu",
+          bundle, (unsigned long)depth, NSStringFromClass(view.class), NSStringFromCGRect(view.frame),
+          NSStringFromCGRect(view.bounds), NSStringFromUIEdgeInsets(view.safeAreaInsets),
+          NSStringFromUIEdgeInsets(view.layoutMargins), (unsigned long)view.constraints.count);
+    for (UIView *child in view.subviews) TALayoutEvidence(child, bundle, depth+1, budget);
+}
+static char TAOriginalInsetsKey, TALayoutStampKey, TALayoutQueuedKey;
+static void TATemplateLayout(UIWindow *w) {
+    if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"]) return;
+    UIViewController *root = w.rootViewController;
+    if (!root.viewIfLoaded || ![NSStringFromClass(root.class) isEqual:@"CARTemplateUIApplicationSceneViewController"]) return;
+    NSString *bundle = nil; BOOL active = TATemplateTarget(w, &bundle);
+    NSValue *saved = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
+    if (!active && !saved) return;
+    NSString *stamp = active ? NSStringFromCGRect(w.windowScene.coordinateSpace.bounds) : @"restore";
+    if ([objc_getAssociatedObject(root, &TALayoutStampKey) isEqual:stamp] || [objc_getAssociatedObject(root, &TALayoutQueuedKey) boolValue]) return;
+    objc_setAssociatedObject(root, &TALayoutQueuedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        objc_setAssociatedObject(root, &TALayoutQueuedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (w.rootViewController != root || !root.viewIfLoaded) return;
+        NSString *currentBundle = nil; BOOL currentActive = TATemplateTarget(w, &currentBundle);
+        NSValue *original = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
+        if (!currentActive && !original) return;
+        UIEdgeInsets before = root.view.safeAreaInsets;
+        if (currentActive) {
+            if (!original) {
+                original = [NSValue valueWithUIEdgeInsets:root.additionalSafeAreaInsets];
+                objc_setAssociatedObject(root, &TAOriginalInsetsKey, original, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            UIEdgeInsets desired = original.UIEdgeInsetsValue;
+            // Reclaim only inherited lateral display chrome at the scene root.
+            // Keep top/bottom navigation regions intact. Do not patch children.
+            CGFloat left = MAX(0, before.left-root.additionalSafeAreaInsets.left);
+            CGFloat right = MAX(0, before.right-root.additionalSafeAreaInsets.right);
+            CGFloat limit = w.bounds.size.width * 0.25;
+            if (left <= limit) desired.left -= left;
+            if (right <= limit) desired.right -= right;
+            root.additionalSafeAreaInsets = desired;
+            objc_setAssociatedObject(root, &TALayoutStampKey, NSStringFromCGRect(w.windowScene.coordinateSpace.bounds), OBJC_ASSOCIATION_COPY_NONATOMIC);
+            TALog(@"TEMPLATE APPLY %@ scene=%@ safeBefore=%@ additional=%@", currentBundle,
+                  NSStringFromCGRect(w.windowScene.coordinateSpace.bounds), NSStringFromUIEdgeInsets(before), NSStringFromUIEdgeInsets(desired));
+        } else {
+            root.additionalSafeAreaInsets = original.UIEdgeInsetsValue;
+            objc_setAssociatedObject(root, &TAOriginalInsetsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(root, &TALayoutStampKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            TALog(@"TEMPLATE RESTORE %@ additional=%@", currentBundle ?: bundle, NSStringFromUIEdgeInsets(root.additionalSafeAreaInsets));
+        }
+        NSUInteger budget = 100; TAInvalidateTree(root.view, 0, &budget);
+        [root.view layoutIfNeeded];
+        if (currentActive) {
+            TALog(@"TEMPLATE AFTER %@ safe=%@ traits=%ld/%ld", currentBundle, NSStringFromUIEdgeInsets(root.view.safeAreaInsets),
+                  (long)root.traitCollection.horizontalSizeClass, (long)root.traitCollection.verticalSizeClass);
+            NSUInteger evidence = 60; TALayoutEvidence(root.view, currentBundle, 0, &evidence);
+        }
+    });
+}
+static void TAListenTemplateTargets(void) {
+    for (NSString *bundle in TAClientBundles()) {
+        int token;
+        notify_register_dispatch(TAChannel(bundle, @"layout-target").UTF8String, &token, dispatch_get_main_queue(), ^(__unused int delivered) {
+            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                if (![scene isKindOfClass:UIWindowScene.class]) continue;
+                for (UIWindow *w in ((UIWindowScene *)scene).windows) TATemplateLayout(w);
+            }
+        });
+    }
+}
 static void TASendSize(NSString *bundle, NSString *kind, CGSize size) {
     if (!isfinite(size.width) || !isfinite(size.height) || size.width <= 0 || size.height <= 0 || size.width > 16000 || size.height > 16000) return;
     static NSMutableDictionary *tokens;
@@ -355,6 +461,7 @@ static void TAClientObserve(UIWindow *w) {
 - (void)layoutSubviews {
     %orig;
     TAClientObserve(self);
+    TATemplateLayout(self);
 }
 %end
 %end
@@ -388,11 +495,13 @@ static void TAClientObserve(UIWindow *w) {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
         if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
+            if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"])
+                dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); });
             return;
         }
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
-        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED"); TAListenClients(); TATick(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED"); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }
