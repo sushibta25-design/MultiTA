@@ -1,4 +1,4 @@
-// TAduo 0.17.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.18.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.17] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.18] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -277,6 +277,40 @@ static UIView *TAFindDock(UIView *view, NSUInteger depth) {
     return nil;
 }
 
+static BOOL TADockButtonVisible(void) {
+    if (!dockButton.window || dockButton.window.hidden || dockButton.hidden) return NO;
+    CGRect visible=[dockButton convertRect:dockButton.bounds toView:dockButton.window];
+    if (!CGRectIntersectsRect(visible,dockButton.window.bounds)) return NO;
+    for (UIView *parent=dockButton;parent;parent=parent.superview) {
+        if (parent.hidden || parent.alpha<0.01 || !parent.userInteractionEnabled) return NO;
+        if (parent.clipsToBounds) {
+            CGRect clip=[parent convertRect:parent.bounds toView:dockButton.window];
+            visible=CGRectIntersection(visible,clip);
+            if (CGRectIsNull(visible) || CGRectIsEmpty(visible)) return NO;
+        }
+    }
+    CGPoint center=[dockButton convertPoint:CGPointMake(CGRectGetMidX(dockButton.bounds),CGRectGetMidY(dockButton.bounds)) toView:dockButton.window];
+    UIView *hit=[dockButton.window hitTest:center withEvent:nil];
+    return hit==dockButton || [hit isDescendantOfView:dockButton];
+}
+static void TADumpDockTree(UIView *view, NSUInteger depth, NSInteger *budget) {
+    if (!view || depth>12 || *budget<=0) return;
+    --*budget;
+    NSString *name=NSStringFromClass(view.class);
+    if (depth<3 || [name hasPrefix:@"DB"] || [name containsString:@"Dock"] || [name containsString:@"Sidebar"]) {
+        TALog(@"DOCK TREE depth=%lu class=%@ frame=%@ bounds=%@ hidden=%d alpha=%.2f interactive=%d",(unsigned long)depth,name,NSStringFromCGRect(view.frame),NSStringFromCGRect(view.bounds),view.hidden,view.alpha,view.userInteractionEnabled);
+    }
+    for (UIView *child in view.subviews) TADumpDockTree(child,depth+1,budget);
+}
+static void TADumpDock(void) {
+    NSInteger budget=180;
+    for (UIWindow *window in dashboard.windows) {
+        if (window==splitWindow || window==buttonWindow) continue;
+        TALog(@"DOCK WINDOW class=%@ level=%.1f hidden=%d",NSStringFromClass(window.class),window.windowLevel,window.hidden);
+        TADumpDockTree(window,0,&budget);
+    }
+}
+
 static void TAClearSlot(NSInteger slot, NSString *reason) {
     ++slotRequests[slot];
     TARecord *r=slots[slot]; r.attaching=NO; slots[slot]=nil;
@@ -435,6 +469,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
 - (void)snapshot {
     floatingActions.hidden = YES;
     TALog(@"MANUAL SNAPSHOT REQUEST");
+    TADumpDock();
     notify_post("com.sushibta.taduo.snapshot");
 }
 - (void)restartSplit {
@@ -667,6 +702,7 @@ static void TATick(void) {
     UIWindowScene *s = TADashboard();
     if (s != dashboard) {
         TAStop(@"display changed"); buttonWindow.hidden = YES; buttonWindow = nil;
+        TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil;
         [records removeAllObjects]; [order removeAllObjects]; dashboard = s;
         TALog(@"DISPLAY %@", s.session.persistentIdentifier);
     }
@@ -677,7 +713,32 @@ static void TATick(void) {
         dock=TAFindDock(window,0); if (dock) break;
     }
     if (dock) TAInstallDock(dock);
-    else if (!mountedDock) { static BOOL logged; if (!logged) { logged=YES; TALog(@"DOCK pending native view discovery"); } }
+    if (s && !buttonWindow) {
+        buttonWindow=[[UIWindow alloc] initWithWindowScene:s];
+        buttonWindow.windowLevel=UIWindowLevelAlert+80;
+        buttonWindow.rootViewController=[UIViewController new];
+        buttonWindow.rootViewController.view.backgroundColor=UIColor.clearColor;
+        UIButton *button=TAButton(@"",@selector(enter));
+        button.tag=1818; [button setImage:TAGlyph(0) forState:UIControlStateNormal];
+        button.layer.cornerRadius=10; button.accessibilityLabel=@"TAduo 0.18 — Chia màn hình";
+        [button addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:controls action:@selector(holdDock:)]];
+        [buttonWindow.rootViewController.view addSubview:button];
+    }
+    if (s) {
+        CGRect bounds=s.coordinateSpace.bounds;
+        buttonWindow.frame=CGRectMake(CGRectGetMaxX(bounds)-42,CGRectGetMinY(bounds)+4,38,38);
+        [buttonWindow.rootViewController.view viewWithTag:1818].frame=buttonWindow.bounds;
+        BOOL fallback=!running && !TADockButtonVisible();
+        buttonWindow.hidden=!fallback;
+        static __weak UIWindowScene *lastScene;
+        static BOOL lastFallback;
+        static NSUInteger attempts;
+        if (lastScene!=s) { lastScene=s; attempts=0; }
+        if (lastFallback!=fallback || attempts==0) TALog(@"LAUNCHER fallback=%d dockVisible=%d running=%d",fallback,TADockButtonVisible(),running);
+        lastFallback=fallback;
+        if (!running && (attempts==0 || attempts==3)) TADumpDock();
+        if (attempts<4) attempts++;
+    }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
 }
 // Darwin state channels carry only dimensions, never application content.

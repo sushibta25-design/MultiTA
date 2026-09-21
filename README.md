@@ -1,4 +1,4 @@
-# TAduo 0.17.0 — thử nghiệm 50/50
+# TAduo 0.18.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
 
@@ -121,3 +121,9 @@ Full-height 50/50 panes initially say “Chạm để chọn ứng dụng”. Ea
 Divider controls: Swap, curved-arrow Fold, Exit. Observe UIWindow sendEvent after forwarding; reveal for one second after touch without intercepting gestures. Long-press Swap for change-left/change-right/log; long-press Dock Split for log outside split. Explicit Fold and Exit retain 0.16 semantics. Existing geometry and lifecycle logic unchanged. Loading placeholder shows app icon but readiness still measures scene geometry, not first rendered frame.
 
 Validation: CI arm64/arm64e rootless build; on-device gates are Dock accessibility and preserved native Dock buttons, both picker orders/scrolling/dimmed duplicate, touch/drag/pinch unaffected, timed divider reveal, Swap/Fold/Exit and map switching.
+
+## 0.18 — recover missing launcher
+
+0.17 removed the independent launcher before native Dock discovery was verified on the device. Restore a 38pt cyan/orange icon at top-right whenever the native Dock button is not visible/hittable. No captured apps are required to show it. Hide while split is active or the native Dock button is available. This is a temporary access fallback, not confirmation of native Dock integration.
+
+Bounded Dock hierarchy diagnostics run twice per dashboard session and on manual snapshot (long-press launcher; or long-press Swap > Lấy log). Reset old Dock compaction and detach its button when the dashboard changes. Keep 0.17 icon grid and timed divider unchanged. Device test: launcher present before opening apps, enter/exit/fold, reconnect, and obtain current TAduo.log for actual Dock class/geometry.
