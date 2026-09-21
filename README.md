@@ -1,4 +1,4 @@
-# TAduo 0.13.0 — thử nghiệm 50/50
+# TAduo 0.14.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
 
@@ -91,3 +91,10 @@ Includes the unvalidated 0.12 image-row experiment. Save selected bundle IDs whe
 Recognize real foreground dictionaries for supported navigation apps even without DBActivationSettingLaunchSource; capture once again on the next main-queue turn if the scene ID was late. Match the current dashboard, preserve active records, and never stop for an in-session foreground refresh of the same controller. Pin saved/active apps in a 24-entry recent list. Show the launch button with one known app or a saved session. No forced relaunch timer, synthesized activation dictionary, or UI touch override.
 
 Device validation: Maps + music → CarPlay Home → Apple Maps or Vietmap → TAduo → choose left/right → verify companion preserved and both touch inputs work. Repeat with the other map, then native Home without opening a different app → TAduo should restore the pair. Explicit Exit should discard resume. Capture both logs before respring; verify SESSION SAVED/CAPTURE/ATTACHED chronology.
+
+## 0.14 — change one pane, fold, swap and recent pairs
+Centered actions: Đổi trái / Đổi phải / Đổi bên / Thu / Cặp gần / Log / Thoát. Pick known apps by readable name, newest first. Replacing one pane releases only that record. Foreground/presentation failure or scene destruction resets only the affected pane. Per-slot request IDs reject stale delayed attachments after replacing or swapping. Swap requires two attached presentations and changes only their parents at fixed 50/50 geometry. Keep up to four recent completed pairs in memory; disabled pairs need apps reopened. Thu retains the selected pair and shows native CarPlay again; Exit clears resume. These controls do not directly invoke native Home or launch an unseen app.
+
+Google Maps review: template root is 213.33x240, but the nested map viewport is x45/y44, width168.33, height196. Latest 0.13 snapshot was native/full width, not split. Add bounded read-only controller method signatures and exact map-owner constraints/child frames, including during search transitions. No speculative global offset or frame correction. Need split-map and split-search screenshots plus logs to distinguish cached dock offset from intentional map layout.
+
+Test changing Maps to Apple Maps/Vietmap while music remains, failed-pane recovery, swap, Thu → native Home → open map → TAduo, and a recent pair. Log Google Maps first on map, then search menu. Do not claim device stability from compile success.

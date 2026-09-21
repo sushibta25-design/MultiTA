@@ -1,4 +1,4 @@
-// TAduo 0.13.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.14.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.13] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.14] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -64,6 +64,8 @@ static BOOL running, ownCall;
 static NSArray<NSString *> *resumeBundles;
 static NSString *resumeCandidate;
 static NSUInteger generation;
+static NSUInteger slotRequests[2];
+static NSMutableArray<NSArray<NSString *> *> *recentPairs;
 static void TAStop(NSString *reason);
 static NSArray<NSString *> *TAClientBundles(void);
 static void TASetLayoutTarget(NSString *bundle, CGSize size);
@@ -177,6 +179,24 @@ static void TACleanup(TARecord *r) {
     r.backgrounded = r.restoreBackground;
     r.presentationID = nil; r.scene = nil; r.changed = NO; r.frameCaptured = NO; ++r.resizeSerial;
 }
+static NSString *TAAppName(NSString *bundle) {
+    return @{@"com.apple.Maps":@"Apple Maps",@"com.google.Maps":@"Google Maps",@"vn.vietmap.live":@"Vietmap Live",@"com.google.ios.youtubemusic":@"YouTube Music",@"com.google.ios.youtube":@"YouTube",@"com.apple.Music":@"Nhạc"}[bundle] ?: bundle;
+}
+static void TARememberPair(void) {
+    if (!slots[0].presentation || !slots[1].presentation) return;
+    NSArray *pair=@[slots[0].bundle,slots[1].bundle];
+    if (!recentPairs) recentPairs=[NSMutableArray new];
+    [recentPairs removeObject:pair]; [recentPairs insertObject:pair atIndex:0];
+    while (recentPairs.count>4) [recentPairs removeLastObject];
+}
+static void TAClearSlot(NSInteger slot, NSString *reason) {
+    ++slotRequests[slot];
+    TARecord *r=slots[slot]; slots[slot]=nil;
+    BOOL previous=ownCall; ownCall=YES; TACleanup(r); ownCall=previous;
+    choose[slot].hidden=NO; choose[slot].enabled=YES;
+    [choose[slot] setTitle:slot==0 ? @"Chọn app trái" : @"Chọn app phải" forState:UIControlStateNormal];
+    TALog(@"SLOT CLEAR side=%ld reason=%@",(long)slot,reason);
+}
 static void TAStop(NSString *reason) {
     resumeBundles=nil; resumeCandidate=nil;
     if (!running) return;
@@ -201,6 +221,12 @@ static void TASuspend(NSString *reason) {
 @interface TAControls : NSObject
 - (void)start;
 - (void)enter;
+- (void)fold;
+- (void)changeLeft;
+- (void)changeRight;
+- (void)swapSides;
+- (void)showPairs;
+- (void)replace:(NSString *)bundle slot:(NSInteger)slot;
 - (void)restoreSelection:(NSArray<NSString *> *)selection;
 - (void)stop;
 - (void)restartSplit;
@@ -254,7 +280,43 @@ static UIButton *TAButton(NSString *title, SEL action) {
     }]];
     [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
 }
-- (void)stop { TAStop(@"user"); }
+- (void)fold { floatingActions.hidden=YES; TARememberPair(); TASuspend(@"fold"); }
+- (void)changeLeft { [self pick:choose[0]]; }
+- (void)changeRight { [self pick:choose[1]]; }
+- (void)replace:(NSString *)bundle slot:(NSInteger)slot {
+    if (!running || slot<0 || slot>1 || !records[bundle]) return;
+    if ([slots[slot].bundle isEqual:bundle]) return;
+    if ([slots[1-slot].bundle isEqual:bundle]) return;
+    TAClearSlot(slot,@"replace"); [self attach:bundle slot:slot];
+}
+- (void)swapSides {
+    if (!running || !slots[0].presentation || !slots[1].presentation) return;
+    TARecord *left=slots[0]; slots[0]=slots[1]; slots[1]=left;
+    ++slotRequests[0]; ++slotRequests[1];
+    for (NSInteger i=0;i<2;i++) {
+        [panes[i] addSubview:slots[i].presentation]; slots[i].presentation.frame=panes[i].bounds;
+    }
+    floatingActions.hidden=YES; TARememberPair(); TALog(@"SWAP completed");
+}
+- (void)showPairs {
+    if (!running || splitWindow.rootViewController.presentedViewController) return;
+    floatingActions.hidden=YES;
+    UIAlertController *picker=[UIAlertController alertControllerWithTitle:@"Cặp gần dùng" message:recentPairs.count ? nil : @"Ghép hai app để lưu cặp gần dùng." preferredStyle:UIAlertControllerStyleAlert];
+    NSUInteger token=generation;
+    for (NSArray *pair in [recentPairs copy]) {
+        NSString *title=[NSString stringWithFormat:@"%@ + %@",TAAppName(pair[0]),TAAppName(pair[1])];
+        UIAlertAction *action=[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!running || generation!=token) return;
+                TAClearSlot(0,@"recent pair"); TAClearSlot(1,@"recent pair"); [self restoreSelection:pair];
+            });
+        }];
+        action.enabled=records[pair[0]]!=nil && records[pair[1]]!=nil; [picker addAction:action];
+    }
+    [picker addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+    [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
+}
+- (void)stop { TARememberPair(); TAStop(@"user"); }
 - (void)toggleActions { floatingActions.hidden = !floatingActions.hidden; }
 - (void)snapshot {
     floatingActions.hidden = YES;
@@ -284,13 +346,13 @@ static UIButton *TAButton(NSString *title, SEL action) {
         choose[i] = TAButton(i == 0 ? @"Chọn app trái" : @"Chọn app phải", @selector(pick:));
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half - 78, bounds.size.height / 2 - 49, 156, 30)];
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half - 114, MAX(4,bounds.size.height / 2 - 117), 228, 98)];
     floatingActions.backgroundColor = UIColor.clearColor;
-    NSArray *titles = @[@"Chia", @"Log", @"Thoát"];
-    NSArray *actions = @[@"restartSplit", @"snapshot", @"stop"];
+    NSArray *titles = @[@"Đổi trái", @"Đổi phải", @"Đổi bên", @"Thu", @"Cặp gần", @"Log", @"Thoát"];
+    NSArray *actions = @[@"changeLeft", @"changeRight", @"swapSides", @"fold", @"showPairs", @"snapshot", @"stop"];
     for (NSUInteger i=0; i<titles.count; i++) {
         UIButton *b = TAButton(titles[i], NSSelectorFromString(actions[i]));
-        b.frame = CGRectMake(i*52, 0, 50, 30); b.layer.cornerRadius = 8;
+        b.frame = CGRectMake((i%3)*76, (i/3)*34, 74, 30); b.layer.cornerRadius = 8;
         [floatingActions addSubview:b];
     }
     floatingActions.hidden = YES; [root addSubview:floatingActions];
@@ -303,14 +365,15 @@ static UIButton *TAButton(NSString *title, SEL action) {
 }
 - (void)pick:(UIButton *)sender {
     NSInteger slot = sender.tag;
-    if (!running || slots[slot] || splitWindow.rootViewController.presentedViewController) return;
-    UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"Chọn app đã mở" message:@"Mở app từ CarPlay trước để đưa vào danh sách." preferredStyle:UIAlertControllerStyleAlert];
+    if (!running || slot<0 || slot>1 || splitWindow.rootViewController.presentedViewController) return;
+    floatingActions.hidden=YES;
+    UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"Chọn app đã mở" message:@"Chưa thấy app? Bấm Thu, mở app trên CarPlay rồi bấm TAduo." preferredStyle:UIAlertControllerStyleAlert];
     NSUInteger token = generation;
-    for (NSString *bundle in [order copy]) {
+    for (NSString *bundle in [[order copy] reverseObjectEnumerator]) {
         TARecord *r = records[bundle]; TARecord *other = slots[1-slot];
         if (!r || (other && (other == r || other.controller == r.controller))) continue;
-        [picker addAction:[UIAlertAction actionWithTitle:bundle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-            dispatch_async(dispatch_get_main_queue(), ^{ if (running && token == generation) [self attach:bundle slot:slot]; });
+        [picker addAction:[UIAlertAction actionWithTitle:TAAppName(bundle) style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+            dispatch_async(dispatch_get_main_queue(), ^{ if (running && token == generation) [self replace:bundle slot:slot]; });
         }]];
     }
     [picker addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
@@ -322,20 +385,22 @@ static UIButton *TAButton(NSString *title, SEL action) {
     NSString *sid = TAValue(r.controller, @"sceneID"), *otherSID = TAValue(other.controller, @"sceneID");
     if (other && ![[sid componentsSeparatedByString:@":"].firstObject isEqual:[otherSID componentsSeparatedByString:@":"].firstObject]) return;
     slots[slot] = r; r.restoreBackground = r.backgrounded;
-    NSUInteger token = generation;
+    NSUInteger token = generation, request=++slotRequests[slot];
+    TALog(@"ATTACH BEGIN side=%ld bundle=%@",(long)slot,bundle);
     BOOL previous = ownCall; ownCall = YES;
     @try {
         SEL fg = NSSelectorFromString(@"foregroundSceneWithSettings:completion:");
         if (![r.controller respondsToSelector:fg]) @throw [NSException exceptionWithName:@"MissingForegroundAPI" reason:bundle userInfo:nil];
         ((void(*)(id,SEL,id,id))objc_msgSend)(r.controller, fg, r.activation, nil);
         r.backgrounded = NO;
-    } @catch (NSException *e) { TALog(@"ATTACH ERROR %@", e.name); TAStop(@"foreground failed"); ownCall = previous; return; }
+    } @catch (NSException *e) { TALog(@"ATTACH ERROR %@", e.name); TAClearSlot(slot,@"foreground failed"); ownCall = previous; return; }
     ownCall = previous; choose[slot].enabled = NO; [choose[slot] setTitle:@"Đang mở…" forState:UIControlStateNormal];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        if (!running || token != generation || slots[slot] != r) return;
+        if (!running || token != generation || slots[slot] != r || slotRequests[slot]!=request) return;
         BOOL old = ownCall; ownCall = YES;
         @try {
             TAResize(r, panes[slot].bounds.size);
+            if (!running || slots[slot]!=r || !r.frameCaptured) @throw [NSException exceptionWithName:@"SceneNotReady" reason:bundle userInfo:nil];
             SEL create = NSSelectorFromString(@"presentationViewWithIdentifier:");
             if (![r.controller respondsToSelector:create]) @throw [NSException exceptionWithName:@"MissingPresentationAPI" reason:bundle userInfo:nil];
             r.presentationID = [NSString stringWithFormat:@"com.sushibta.taduo.%lu.%ld", (unsigned long)token, (long)slot];
@@ -345,8 +410,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
             r.presentation.transform = CGAffineTransformIdentity;
             r.presentation.frame = panes[slot].bounds;
             [panes[slot] addSubview:r.presentation]; choose[slot].hidden = YES;
-            TALog(@"ATTACHED slot=%ld bundle=%@", (long)slot, bundle);
-        } @catch (NSException *e) { TALog(@"PRESENTATION ERROR %@", e.name); TAStop(@"presentation failed"); }
+            TALog(@"ATTACHED slot=%ld bundle=%@", (long)slot, bundle); TARememberPair();
+        } @catch (NSException *e) { TALog(@"PRESENTATION ERROR %@", e.name); if (running && slots[slot]==r) TAClearSlot(slot,@"presentation failed"); }
         ownCall = old;
     });
 }
@@ -398,7 +463,7 @@ static void TATick(void) {
         buttonWindow = [[UIWindow alloc] initWithWindowScene:s]; buttonWindow.windowLevel = UIWindowLevelAlert + 80;
         buttonWindow.frame = CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-88, 0, 88, 30);
         buttonWindow.rootViewController = [UIViewController new];
-        UIButton *b = TAButton(@"TAduo 0.13", @selector(enter)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
+        UIButton *b = TAButton(@"TAduo 0.14", @selector(enter)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
     }
     buttonWindow.hidden = running || (!resumeBundles && order.count < 1);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
@@ -751,6 +816,42 @@ static void TAConstraintEvidence(UIView *view, NSUInteger depth, NSUInteger *vie
     for (UIView *child in view.subviews) TAConstraintEvidence(child,depth+1,views,constraints);
 }
 
+// Read-only Google Maps controller/layout evidence: root geometry is correct
+// but a nested map viewport retains a 45pt leading offset on this device.
+static void TAMapControllerEvidence(UIViewController *vc, NSUInteger depth, NSUInteger *budget) {
+    if (!vc || depth>10 || !*budget) return; --*budget;
+    TALog(@"MAP CONTROLLER class=%@ frame=%@ safe=%@ additional=%@",NSStringFromClass(vc.class),NSStringFromCGRect(vc.viewIfLoaded.frame),NSStringFromUIEdgeInsets(vc.viewIfLoaded.safeAreaInsets),NSStringFromUIEdgeInsets(vc.additionalSafeAreaInsets));
+    if ([NSStringFromClass(vc.class) hasPrefix:@"CPS"]) {
+        unsigned int count=0; Method *methods=class_copyMethodList(vc.class,&count); NSUInteger limit=35;
+        for (unsigned int i=0;i<count && limit;i++) {
+            NSString *name=NSStringFromSelector(method_getName(methods[i])); NSString *lower=name.lowercaseString;
+            if ([lower containsString:@"layout"] || [lower containsString:@"safe"] || [lower containsString:@"inset"] || [lower containsString:@"map"] || [lower containsString:@"size"]) {
+                TALog(@"MAP METHOD class=%@ selector=%@ encoding=%s",NSStringFromClass(vc.class),name,method_getTypeEncoding(methods[i])); --limit;
+            }
+        }
+        free(methods);
+    }
+    for (UIViewController *child in vc.childViewControllers) TAMapControllerEvidence(child,depth+1,budget);
+}
+static void TAMapViewportEvidence(UIView *view, NSUInteger depth, NSUInteger *budget) {
+    if (!view || depth>12 || !*budget) return; --*budget;
+    BOOL mapOwner=NO;
+    for (UIView *child in view.subviews) {
+        if ([NSStringFromClass(child.class) isEqual:@"UIStackView"]) {
+            for (UIView *button in child.subviews) if ([NSStringFromClass(button.class) isEqual:@"CPSMapButton"]) mapOwner=YES;
+        }
+    }
+    if (mapOwner) {
+        TALog(@"MAP VIEWPORT owner=%@ frame=%@ safe=%@",TAItemDescription(view),NSStringFromCGRect(view.frame),NSStringFromUIEdgeInsets(view.safeAreaInsets));
+        for (UIView *child in view.subviews) TALog(@"MAP CHILD item=%@ frame=%@",TAItemDescription(child),NSStringFromCGRect(child.frame));
+        NSUInteger limit=60;
+        for (NSLayoutConstraint *c in view.constraints) {
+            if (!limit--) break;
+            TALog(@"MAP CONSTRAINT first=%@ attr=%ld relation=%ld second=%@ attr=%ld constant=%.2f priority=%.0f active=%d",TAItemDescription(c.firstItem),(long)c.firstAttribute,(long)c.relation,TAItemDescription(c.secondItem),(long)c.secondAttribute,c.constant,c.priority,c.active);
+        }
+    }
+    for (UIView *child in view.subviews) TAMapViewportEvidence(child,depth+1,budget);
+}
 // Capture both native and split geometry for comparison.
 static void TACaptureVisible(UIWindow *w, NSString *reason) {
     NSString *bundle = TADiagnosticBundle(w);
@@ -759,6 +860,11 @@ static void TACaptureVisible(UIWindow *w, NSString *reason) {
     TALog(@"VISIBLE BEGIN %@ reason=%@ root=%@ scene=%@", bundle, reason,
           NSStringFromClass(w.rootViewController.class), NSStringFromCGRect(w.windowScene.coordinateSpace.bounds));
     NSUInteger budget = 180; TALayoutEvidence(w.rootViewController.viewIfLoaded, bundle, 0, &budget);
+    if ([bundle isEqual:@"com.google.Maps"]) {
+        NSUInteger controllers=24, viewports=120;
+        TAMapControllerEvidence(w.rootViewController,0,&controllers);
+        TAMapViewportEvidence(w.rootViewController.viewIfLoaded,0,&viewports);
+    }
     NSUInteger nodes=180, constraints=200; TAConstraintEvidence(w.rootViewController.viewIfLoaded,0,&nodes,&constraints);
     TALog(@"VISIBLE END %@ remainingBudget=%lu constraintBudget=%lu", bundle, (unsigned long)budget,(unsigned long)constraints);
 }
@@ -892,7 +998,8 @@ static void TAListenSnapshots(void) {
 - (void)sceneManager:(id)manager didDestroyScene:(id)scene {
     NSString *bundle = TABundle(self); TARecord *r = records[bundle ?: @""];
     if (r && r.controller == self) {
-        if (r == slots[0] || r == slots[1]) TASuspend(@"scene destroyed");
+        if (r == slots[0]) TAClearSlot(0,@"scene destroyed");
+        if (r == slots[1]) TAClearSlot(1,@"scene destroyed");
         [records removeObjectForKey:bundle]; [order removeObject:bundle];
     }
     %orig;
