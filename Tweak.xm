@@ -1,4 +1,4 @@
-// TAduo 0.7.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.8.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.7] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.8] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -379,14 +379,12 @@ static void TALayoutEvidence(UIView *view, NSString *bundle, NSUInteger depth, N
     }
     for (UIView *child in view.subviews) TALayoutEvidence(child, bundle, depth+1, budget);
 }
-static void TARestoreAdapter(UIWindow *w);
 static char TAOriginalInsetsKey, TALayoutStampKey, TALayoutQueuedKey;
 static void TATemplateLayout(UIWindow *w) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"]) return;
     UIViewController *root = w.rootViewController;
     if (!root.viewIfLoaded || ![NSStringFromClass(root.class) isEqual:@"CARTemplateUIApplicationSceneViewController"]) return;
     NSString *bundle = nil; BOOL active = TATemplateTarget(w, &bundle);
-    if (!active) TARestoreAdapter(w);
     NSValue *saved = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
     if (!active && !saved) return;
     NSString *stamp = active ? NSStringFromCGRect(w.windowScene.coordinateSpace.bounds) : @"restore";
@@ -529,157 +527,7 @@ static void TAListenSnapshots(void) {
         }
     });
 }
-// Narrow-template adapter, enabled only in a scene currently owned by TAduo.
-static UIView *TAChild(UIView *v, NSString *name) {
-    for (UIView *child in v.subviews) if ([NSStringFromClass(child.class) isEqual:name]) return child;
-    return nil;
-}
-static BOOL TANarrow(UIView *v) {
-    return TATemplateTarget(v.window, NULL) && v.window.bounds.size.width < 300;
-}
-static char TAAdapterConstraintsKey, TAAdapterViewsKey;
-static void TAOwnFrame(UIView *v, CGRect frame) {
-    UIWindow *w=v.window; if (!w) return;
-    NSMutableDictionary *saved=objc_getAssociatedObject(w,&TAAdapterConstraintsKey);
-    if (!saved) { saved=[NSMutableDictionary new]; objc_setAssociatedObject(w,&TAAdapterConstraintsKey,saved,OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
-    NSMapTable *views=objc_getAssociatedObject(w,&TAAdapterViewsKey);
-    if (!views) { views=[NSMapTable weakToStrongObjectsMapTable]; objc_setAssociatedObject(w,&TAAdapterViewsKey,views,OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
-    if (![views objectForKey:v]) [views setObject:@(v.translatesAutoresizingMaskIntoConstraints) forKey:v];
-    v.translatesAutoresizingMaskIntoConstraints=NO;
-    // Remove only the managed view's own size constraints and its placement
-    // in ancestors. Preserve constraints laying out its descendants.
-    for (UIView *owner=v; owner && owner!=w; owner=owner.superview) {
-        for (NSLayoutConstraint *c in [owner.constraints copy]) {
-            BOOL touches=(c.firstItem==v || c.secondItem==v);
-            if (!touches || !c.active) continue;
-            if (owner==v && c.secondItem && !(c.firstItem==v && c.secondItem==v)) continue;
-            saved[[NSValue valueWithNonretainedObject:c]]=@{@"constraint":c,@"owner":owner}; c.active=NO;
-        }
-    }
-    if (!CGRectEqualToRect(v.frame,frame)) v.frame=frame;
-}
-static UIView *TAConstraintView(id item) {
-    return [item isKindOfClass:UIView.class] ? item : ([item isKindOfClass:UILayoutGuide.class] ? ((UILayoutGuide *)item).owningView : nil);
-}
-static void TARestoreAdapter(UIWindow *w) {
-    NSDictionary *saved=objc_getAssociatedObject(w,&TAAdapterConstraintsKey); if (!saved) return;
-    NSMapTable *views=objc_getAssociatedObject(w,&TAAdapterViewsKey);
-    for (UIView *v in views.keyEnumerator) v.translatesAutoresizingMaskIntoConstraints=[[views objectForKey:v] boolValue];
-    NSUInteger restored=0;
-    for (NSDictionary *entry in saved.allValues) {
-        NSLayoutConstraint *c=entry[@"constraint"]; UIView *owner=entry[@"owner"];
-        UIView *a=TAConstraintView(c.firstItem), *b=TAConstraintView(c.secondItem);
-        if (owner.window!=w || !a || ![a isDescendantOfView:owner] || (b && ![b isDescendantOfView:owner])) continue;
-        c.active=YES; restored++;
-    }
-    objc_setAssociatedObject(w,&TAAdapterConstraintsKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(w,&TAAdapterViewsKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    TALog(@"ADAPTER RESTORE constraints=%lu",(unsigned long)restored);
-    [w setNeedsLayout];
-}
-
-static void TASongLayout(UIView *v) {
-    if (!TANarrow(v)) return;
-    UIStackView *stack = (id)TAChild(v, @"UIStackView"); if (!stack) return;
-    TAOwnFrame(stack, v.bounds);
-    CGFloat y = 0;
-    for (UIView *row in stack.arrangedSubviews) {
-        if (row.hidden) continue;
-        CGFloat h = [NSStringFromClass(row.class) isEqual:@"CPUITitleView"] ? 21 : 17;
-        TAOwnFrame(row, CGRectMake(0, y, v.bounds.size.width, h)); y += h;
-
-    }
-}
-static void TANowLayout(UIView *v) {
-    if (!TANarrow(v)) return;
-    CGFloat w = v.bounds.size.width, top = MAX(0, v.safeAreaInsets.top);
-    CGFloat bottom = v.bounds.size.height - MAX(0, v.safeAreaInsets.bottom) - 4;
-    UIView *art = TAChild(v,@"CPUIShadowImageView"), *song = TAChild(v,@"CPUISongDetailsView");
-    UIView *transport = TAChild(v,@"CPUITransportControlView"), *progress = TAChild(v,@"CPUIProgressView"), *mode = TAChild(v,@"CPUIPlayModeControlView");
-    if (!song || !transport || !progress || !mode) return;
-    CGFloat artSize = MIN(40, MAX(0, bottom-top-150));
-    if (art) {
-        TAOwnFrame(art, CGRectMake((w-artSize)/2,top+2,artSize,artSize));
-        for (UIView *image in art.subviews) if ([image isKindOfClass:UIImageView.class]) TAOwnFrame(image,art.bounds);
-    }
-    CGFloat y=top+artSize+4;
-    TAOwnFrame(song, CGRectMake(12,y,w-24,55)); TASongLayout(song); y+=57;
-    TAOwnFrame(transport, CGRectMake(12,y,w-24,44)); y+=46;
-    TAOwnFrame(progress, CGRectMake(12,y,w-24,18)); y+=20;
-    TAOwnFrame(mode, CGRectMake(2,y,w-4,26));
-}
-static void TATabLayout(UITabBar *bar) {
-    if (!TANarrow(bar)) return;
-    for (UIView *button in bar.subviews) {
-        if (![NSStringFromClass(button.class) isEqual:@"UITabBarButton"]) continue;
-        for (UIView *child in button.subviews) if ([child isKindOfClass:UILabel.class]) {
-            UILabel *label=(id)child; CGRect f=label.frame;
-            f.origin.x=3; f.size.width=MAX(0,button.bounds.size.width-6); TAOwnFrame(label, f);
-
-        }
-    }
-}
-static void TAImageRows(UIView *cell) {
-    if (!TANarrow(cell)) return;
-    UIStackView *stack=(id)TAChild(cell,@"UIStackView"); if (!stack || stack.axis!=UILayoutConstraintAxisHorizontal) return;
-    NSMutableArray *items=[NSMutableArray new];
-    for (UIView *item in stack.arrangedSubviews) if (!item.hidden) [items addObject:item];
-    if (!items.count) return;
-    CGRect frame=stack.frame; frame.origin.x=12; frame.size.width=MAX(0,cell.bounds.size.width-24); TAOwnFrame(stack, frame);
-    CGFloat gap=4, width=MAX(0,(frame.size.width-gap*(items.count-1))/items.count);
-    for (NSUInteger i=0;i<items.count;i++) {
-        UIView *item=items[i]; TAOwnFrame(item, CGRectMake(i*(width+gap),0,width,stack.bounds.size.height));
-        for (UIView *child in item.subviews) if ([child isKindOfClass:UIImageView.class]) {
-            CGFloat side=MAX(0,MIN(width-6,item.bounds.size.height-6));
-            TAOwnFrame(child, CGRectMake((width-side)/2,(item.bounds.size.height-side)/2,side,side));
-
-        }
-    }
-}
-
 %group TAClient
-%hook CPUINowPlayingView
-- (void)layoutSubviews {
-    %orig;
-    TANowLayout((UIView *)self);
-}
-%end
-%hook CPUISongDetailsView
-- (void)layoutSubviews {
-    %orig;
-    TASongLayout((UIView *)self);
-}
-%end
-%hook UITabBar
-- (void)layoutSubviews {
-    %orig;
-    TATabLayout(self);
-}
-%end
-%hook CPSImageRowCell
-- (void)layoutSubviews {
-    %orig;
-    TAImageRows((UIView *)self);
-}
-%end
-
-%hook UIStackView
-- (void)layoutSubviews {
-    %orig;
-    UIView *parent=((UIView *)self).superview;
-    NSString *name=NSStringFromClass(parent.class);
-    if ([name isEqual:@"CPUISongDetailsView"]) TASongLayout(parent);
-    if ([name isEqual:@"CPSImageRowCell"]) TAImageRows(parent);
-}
-%end
-%hook UITabBarButton
-- (void)layoutSubviews {
-    %orig;
-    UIView *parent=((UIView *)self).superview;
-    if ([parent isKindOfClass:UITabBar.class]) TATabLayout((UITabBar *)parent);
-}
-%end
-
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
