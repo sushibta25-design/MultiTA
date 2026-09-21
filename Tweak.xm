@@ -1,4 +1,4 @@
-// TAduo 0.4.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.5.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.4] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.5] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -58,6 +58,7 @@ static TARecord *slots[2];
 static UIView *panes[2];
 static UIButton *choose[2];
 static UIWindow *splitWindow, *buttonWindow;
+static UIView *floatingActions;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSUInteger generation;
@@ -180,13 +181,15 @@ static void TAStop(NSString *reason) {
     BOOL previous = ownCall; ownCall = YES;
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
-    splitWindow.hidden = YES; splitWindow = nil;
+    splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
     buttonWindow.hidden = order.count < 2;
 }
 @interface TAControls : NSObject
 - (void)start;
 - (void)stop;
 - (void)restartSplit;
+- (void)toggleActions;
+- (void)snapshot;
 - (void)pick:(UIButton *)sender;
 - (void)attach:(NSString *)bundle slot:(NSInteger)slot;
 @end
@@ -199,6 +202,12 @@ static UIButton *TAButton(NSString *title, SEL action) {
 }
 @implementation TAControls
 - (void)stop { TAStop(@"user"); }
+- (void)toggleActions { floatingActions.hidden = !floatingActions.hidden; }
+- (void)snapshot {
+    floatingActions.hidden = YES;
+    TALog(@"MANUAL SNAPSHOT REQUEST");
+    notify_post("com.sushibta.taduo.snapshot");
+}
 - (void)restartSplit {
     if (!running || splitWindow.rootViewController.presentedViewController) return;
     TAStop(@"choose apps again");
@@ -222,13 +231,20 @@ static UIButton *TAButton(NSString *title, SEL action) {
         choose[i] = TAButton(i == 0 ? @"Chọn app trái" : @"Chọn app phải", @selector(pick:));
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
-    UIButton *split = TAButton(@"Chia", @selector(restartSplit));
-    split.frame = CGRectMake(4, 4, 44, 28); split.layer.cornerRadius = 8;
-    split.accessibilityLabel = @"Chọn lại hai ứng dụng";
-    [root addSubview:split];
-    UIButton *exit = TAButton(@"Thoát", @selector(stop));
-    exit.frame = CGRectMake(bounds.size.width - 52, 4, 48, 28); exit.layer.cornerRadius = 8;
-    [root addSubview:exit];
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half - 78, bounds.size.height - 68, 156, 30)];
+    floatingActions.backgroundColor = UIColor.clearColor;
+    NSArray *titles = @[@"Chia", @"Log", @"Thoát"];
+    NSArray *actions = @[@"restartSplit", @"snapshot", @"stop"];
+    for (NSUInteger i=0; i<titles.count; i++) {
+        UIButton *b = TAButton(titles[i], NSSelectorFromString(actions[i]));
+        b.frame = CGRectMake(i*52, 0, 50, 30); b.layer.cornerRadius = 8;
+        [floatingActions addSubview:b];
+    }
+    floatingActions.hidden = YES; [root addSubview:floatingActions];
+    UIButton *menu = TAButton(@"•••", @selector(toggleActions));
+    menu.frame = CGRectMake(half - 16, bounds.size.height - 34, 32, 30);
+    menu.layer.cornerRadius = 10; menu.accessibilityLabel = @"Tác vụ TAduo";
+    [root addSubview:menu];
     buttonWindow.hidden = YES; splitWindow.hidden = NO;
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
 }
@@ -350,11 +366,17 @@ static void TAInvalidateTree(UIView *view, NSUInteger depth, NSUInteger *budget)
     for (UIView *child in view.subviews) TAInvalidateTree(child, depth+1, budget);
 }
 static void TALayoutEvidence(UIView *view, NSString *bundle, NSUInteger depth, NSUInteger *budget) {
-    if (!view || !*budget || depth > 6) return; --*budget;
+    if (!view || !*budget || depth > 14) return; --*budget;
     TALog(@"TEMPLATE VIEW %@ depth=%lu class=%@ frame=%@ bounds=%@ safe=%@ margins=%@ constraints=%lu",
           bundle, (unsigned long)depth, NSStringFromClass(view.class), NSStringFromCGRect(view.frame),
           NSStringFromCGRect(view.bounds), NSStringFromUIEdgeInsets(view.safeAreaInsets),
           NSStringFromUIEdgeInsets(view.layoutMargins), (unsigned long)view.constraints.count);
+    if ([view isKindOfClass:UILabel.class]) {
+        UILabel *label = (UILabel *)view;
+        TALog(@"LABEL %@ class=%@ font=%.2f lines=%ld fit=%d minScale=%.2f intrinsic=%@ hidden=%d alpha=%.2f",
+              bundle, NSStringFromClass(view.class), label.font.pointSize, (long)label.numberOfLines,
+              label.adjustsFontSizeToFitWidth, label.minimumScaleFactor, NSStringFromCGSize(label.intrinsicContentSize), label.hidden, label.alpha);
+    }
     for (UIView *child in view.subviews) TALayoutEvidence(child, bundle, depth+1, budget);
 }
 static char TAOriginalInsetsKey, TALayoutStampKey, TALayoutQueuedKey;
@@ -467,7 +489,51 @@ static void TAClientObserve(UIWindow *w) {
     TASendSize(bundle, @"window", w.bounds.size);
     if (root) TASendSize(bundle, @"root", root.bounds.size);
 }
+// Capture the screen that is visible NOW, not only the initial tab list.
+static void TACaptureVisible(UIWindow *w, NSString *reason) {
+    NSString *bundle = nil;
+    if (!TATemplateTarget(w, &bundle)) return;
+    TALog(@"VISIBLE BEGIN %@ reason=%@ root=%@ scene=%@", bundle, reason,
+          NSStringFromClass(w.rootViewController.class), NSStringFromCGRect(w.windowScene.coordinateSpace.bounds));
+    NSUInteger budget = 180; TALayoutEvidence(w.rootViewController.viewIfLoaded, bundle, 0, &budget);
+    TALog(@"VISIBLE END %@ remainingBudget=%lu", bundle, (unsigned long)budget);
+}
+static void TAVisibleTransition(UIViewController *vc) {
+    if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"]) return;
+    UIWindow *w = vc.viewIfLoaded.window;
+    NSString *bundle = nil; if (!TATemplateTarget(w, &bundle)) return;
+    // One native layout invalidation per appearance. No font/frame edits.
+    NSUInteger budget = 100; TAInvalidateTree(vc.viewIfLoaded, 0, &budget);
+    __weak UIWindow *weakWindow = w;
+    __weak UIViewController *weakController = vc;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400*NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        UIWindow *window = weakWindow; UIViewController *controller = weakController;
+        if (!window || !controller || controller.viewIfLoaded.window != window) return;
+        static char stampKey;
+        NSString *stamp = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(controller.class), NSStringFromCGRect(window.bounds)];
+        NSDictionary *previous = objc_getAssociatedObject(window, &stampKey);
+        NSTimeInterval now = NSDate.timeIntervalSinceReferenceDate;
+        if ([previous[@"stamp"] isEqual:stamp] && now-[previous[@"time"] doubleValue]<2) return;
+        objc_setAssociatedObject(window, &stampKey, @{@"stamp":stamp,@"time":@(now)}, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        TACaptureVisible(window, [@"appeared:" stringByAppendingString:NSStringFromClass(controller.class)]);
+    });
+}
+static void TAListenSnapshots(void) {
+    int token;
+    notify_register_dispatch("com.sushibta.taduo.snapshot", &token, dispatch_get_main_queue(), ^(__unused int delivered) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) TACaptureVisible(w, @"manual");
+        }
+    });
+}
 %group TAClient
+%hook UIViewController
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    TAVisibleTransition(self);
+}
+%end
 %hook UIWindow
 - (void)layoutSubviews {
     %orig;
@@ -507,7 +573,7 @@ static void TAClientObserve(UIWindow *w) {
         if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
             if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"])
-                dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); });
+                dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); TAListenSnapshots(); });
             return;
         }
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
