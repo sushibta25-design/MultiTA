@@ -1,10 +1,11 @@
-name: Build DuoPhone
+name: Build TAduo
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
+      - taduo/**
 
 jobs:
   build:
@@ -16,11 +17,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install ldid xz
+          brew install ldid xz make
 
-      - name: Install RootHide Theos
+      - name: Install Theos
         run: |
-          git clone --recursive https://github.com/roothide/theos.git $HOME/theos
+          git clone --recursive https://github.com/theos/theos.git $HOME/theos
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
 
       - name: Install iOS 16.5 SDK
@@ -31,10 +32,11 @@ jobs:
 
       - name: Build package
         run: |
-          make clean package FINALPACKAGE=1
+          gmake clean package FINALPACKAGE=1
 
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: DuoPhone-DEB
+          name: TAduo-0.1.0-rootless
           path: packages/*.deb
+          if-no-files-found: error

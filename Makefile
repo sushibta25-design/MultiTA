@@ -1,13 +1,13 @@
 ARCHS = arm64 arm64e
-TARGET = iphone:clang:latest:15.0
+TARGET = iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME = rootless
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = DuoPhone
+TWEAK_NAME = TAduo
 
-DuoPhone_FILES = Tweak.xm
-DuoPhone_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
-DuoPhone_FRAMEWORKS = UIKit Foundation QuartzCore
+TAduo_FILES = Tweak.xm
+TAduo_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
+TAduo_FRAMEWORKS = UIKit Foundation QuartzCore
 
 include $(THEOS_MAKE_PATH)/tweak.mk
