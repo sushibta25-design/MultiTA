@@ -1,4 +1,4 @@
-// TAduo 0.17.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.19.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.17] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.19] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -330,6 +330,8 @@ static void TASuspend(NSString *reason) {
 - (void)snapshot;
 - (void)pick:(UIButton *)sender;
 - (void)attach:(NSString *)bundle slot:(NSInteger)slot;
+- (void)waitAttach:(NSString *)bundle slot:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
+- (void)retryPane:(NSInteger)slot;
 @end
 static TAControls *controls;
 static UIButton *TAButton(NSString *title, SEL action) {
@@ -398,9 +400,16 @@ static UIButton *TAButton(NSString *title, SEL action) {
 - (void)changeRight { [self pick:choose[1]]; }
 - (void)replace:(NSString *)bundle slot:(NSInteger)slot {
     if (!running || slot<0 || slot>1 || !records[bundle]) return;
-    if ([slots[slot].bundle isEqual:bundle]) return;
+    if ([slots[slot].bundle isEqual:bundle]) { [self retryPane:slot]; return; }
     if ([slots[1-slot].bundle isEqual:bundle]) return;
     TAClearSlot(slot,@"replace"); [self attach:bundle slot:slot];
+}
+- (void)retryPane:(NSInteger)slot {
+    if (!running || slot<0 || slot>1 || slots[slot].attaching) return;
+    NSString *bundle=[slots[slot].bundle copy]; if (!bundle.length) return;
+    TALog(@"MANUAL RETRY side=%ld bundle=%@",(long)slot,bundle);
+    [self snapshot];
+    TAClearSlot(slot,@"manual retry"); [self attach:bundle slot:slot];
 }
 - (void)swapSides {
     if (!running || !slots[0].presentation || !slots[1].presentation) return;
@@ -451,11 +460,12 @@ static UIButton *TAButton(NSString *title, SEL action) {
     splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
     splitWindow.rootViewController = [UIViewController new];
     UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.blackColor;
-    // Both scenes occupy full display height. Only floating button hit areas
-    // cover content; no toolbar strip is reserved in scene geometry.
+    // Scene target equals rounded pane bounds: 3pt outer inset, 6pt gap.
+    // No image scaling or independent crop of the app content.
     CGFloat half = bounds.size.width / 2;
     for (NSInteger i = 0; i < 2; i++) {
-        panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * half, 0, half, bounds.size.height)];
+        panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * half + 3, 3, half - 6, bounds.size.height - 6)];
+        panes[i].layer.cornerRadius=8; panes[i].layer.cornerCurve=kCACornerCurveContinuous;
         panes[i].clipsToBounds = YES; [root addSubview:panes[i]];
         choose[i] = TAButton(@"Chạm để chọn ứng dụng", @selector(pick:));
         choose[i].titleLabel.font=[UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
@@ -463,16 +473,21 @@ static UIButton *TAButton(NSString *title, SEL action) {
         choose[i].backgroundColor=[UIColor colorWithWhite:0.065 alpha:1];
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
-    UIView *divider=[[UIView alloc] initWithFrame:CGRectMake(half-1,0,2,bounds.size.height)];
-    divider.backgroundColor=[UIColor colorWithWhite:0.25 alpha:1]; divider.userInteractionEnabled=NO; [root addSubview:divider];
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-20,MAX(4,(bounds.size.height-124)/2),40,124)];
-    floatingActions.backgroundColor=[UIColor colorWithWhite:0.06 alpha:0.94]; floatingActions.layer.cornerRadius=12;
+
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-28,MAX(4,(bounds.size.height-148)/2),56,148)];
+    floatingActions.backgroundColor=[UIColor colorWithWhite:0.04 alpha:1]; floatingActions.layer.cornerRadius=10;
+    floatingActions.layer.borderWidth=1; floatingActions.layer.borderColor=[UIColor colorWithWhite:0.5 alpha:1].CGColor;
     NSArray *titles=@[@"Đổi trái phải",@"Thu về CarPlay",@"Thoát chia màn"];
     NSArray *actions=@[@"swapSides",@"fold",@"stop"];
     for (NSUInteger i=0;i<3;i++) {
         UIButton *b=TAButton(@"",NSSelectorFromString(actions[i]));
-        b.frame=CGRectMake(0,i*42,40,40); b.backgroundColor=UIColor.clearColor;
-        [b setImage:TAGlyph(i+1) forState:UIControlStateNormal]; b.accessibilityLabel=titles[i];
+        b.frame=CGRectMake(2,2+i*48,52,46); b.backgroundColor=UIColor.clearColor;
+        NSArray *symbols=@[@"arrow.left.arrow.right",@"arrow.uturn.backward",@"xmark"];
+        UIImage *glyph=[UIImage systemImageNamed:symbols[i] withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIImageSymbolWeightBold]];
+        UIImageView *iv=[[UIImageView alloc] initWithImage:glyph]; iv.frame=CGRectMake(14,3,24,23); iv.contentMode=UIViewContentModeScaleAspectFit;
+        iv.tintColor=i==2 ? TAOrange() : UIColor.whiteColor; [b addSubview:iv];
+        UILabel *caption=[[UILabel alloc] initWithFrame:CGRectMake(0,28,52,15)]; caption.text=(@[@"Đổi",@"Thu",@"Thoát"])[i]; caption.textAlignment=NSTextAlignmentCenter; caption.font=[UIFont boldSystemFontOfSize:11]; caption.textColor=iv.tintColor; [b addSubview:caption];
+        b.accessibilityLabel=titles[i];
         if (i==0) [b addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(holdSwap:)]];
         [floatingActions addSubview:b];
     }
@@ -490,6 +505,12 @@ static UIButton *TAButton(NSString *title, SEL action) {
     for (NSInteger i=0;i<2;i++) [menu addAction:[UIAlertAction actionWithTitle:i==0 ? @"Đổi app trái" : @"Đổi app phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
         dispatch_async(dispatch_get_main_queue(), ^{ if (running && generation==token) [self pick:choose[i]]; });
     }]];
+    for (NSInteger i=0;i<2;i++) {
+        if (!slots[i].bundle) continue;
+        [menu addAction:[UIAlertAction actionWithTitle:i==0 ? @"Tải lại ô trái" : @"Tải lại ô phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+            dispatch_async(dispatch_get_main_queue(), ^{ if (running && generation==token) [self retryPane:i]; });
+        }]];
+    }
     [menu addAction:[UIAlertAction actionWithTitle:@"Lấy log" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { [self snapshot]; }]];
     [menu addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
     [splitWindow.rootViewController presentViewController:menu animated:YES completion:nil];
@@ -542,6 +563,12 @@ static UIButton *TAButton(NSString *title, SEL action) {
 - (void)attach:(NSString *)bundle slot:(NSInteger)slot {
     TARecord *r = records[bundle], *other = slots[1-slot];
     if (!running || slots[slot] || !r || (other && (other == r || other.controller == r.controller))) return;
+    if (other.attaching) {
+        NSUInteger request=++slotRequests[slot];
+        choose[slot].enabled=NO; [choose[slot] setTitle:@"Đang chuẩn bị…" forState:UIControlStateNormal];
+        TALog(@"ATTACH QUEUED side=%ld bundle=%@",(long)slot,bundle);
+        [self waitAttach:bundle slot:slot generation:generation request:request attempt:0]; return;
+    }
     NSString *sid = TAValue(r.controller, @"sceneID"), *otherSID = TAValue(other.controller, @"sceneID");
     if (other && ![[sid componentsSeparatedByString:@":"].firstObject isEqual:[otherSID componentsSeparatedByString:@":"].firstObject]) return;
     slots[slot] = r; r.restoreBackground = r.backgrounded; r.attaching=YES;
@@ -559,6 +586,18 @@ static UIButton *TAButton(NSString *title, SEL action) {
     if (icon) { UIGraphicsBeginImageContextWithOptions(CGSizeMake(36,36),NO,0); [icon drawInRect:CGRectMake(0,0,36,36)]; UIImage *small=UIGraphicsGetImageFromCurrentImageContext(); UIGraphicsEndImageContext(); [choose[slot] setImage:[small imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] forState:UIControlStateNormal]; }
     choose[slot].enabled = NO; [choose[slot] setTitle:@"Đang mở…" forState:UIControlStateNormal];
     [self finishAttach:slot generation:token request:request attempt:0];
+}
+- (void)waitAttach:(NSString *)bundle slot:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt {
+    if (!running || generation!=token || slotRequests[slot]!=request || slots[slot]) return;
+    if (!slots[1-slot].attaching) {
+        choose[slot].enabled=YES;
+        [choose[slot] setTitle:@"Chạm để chọn ứng dụng" forState:UIControlStateNormal];
+        [self attach:bundle slot:slot]; return;
+    }
+    if (attempt>=24) { TAClearSlot(slot,@"activation queue timeout"); return; }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(), ^{
+        [self waitAttach:bundle slot:slot generation:token request:request attempt:attempt+1];
+    });
 }
 - (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt {
     if (!running || generation!=token || slotRequests[slot]!=request || !slots[slot].attaching) return;

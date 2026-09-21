@@ -1,4 +1,4 @@
-# TAduo 0.17.0 — thử nghiệm 50/50
+# TAduo 0.19.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
 
@@ -121,3 +121,11 @@ Full-height 50/50 panes initially say “Chạm để chọn ứng dụng”. Ea
 Divider controls: Swap, curved-arrow Fold, Exit. Observe UIWindow sendEvent after forwarding; reveal for one second after touch without intercepting gestures. Long-press Swap for change-left/change-right/log; long-press Dock Split for log outside split. Explicit Fold and Exit retain 0.16 semantics. Existing geometry and lifecycle logic unchanged. Loading placeholder shows app icon but readiness still measures scene geometry, not first rendered frame.
 
 Validation: CI arm64/arm64e rootless build; on-device gates are Dock accessibility and preserved native Dock buttons, both picker orders/scrolling/dimmed duplicate, touch/drag/pinch unaffected, timed divider reveal, Swap/Fold/Exit and map switching.
+
+## 0.19 — clearer divider, rounded panes, activation queue
+
+Use bold system glyphs and visible Vietnamese labels (Đổi / Thu / Thoát) on a 56pt opaque divider panel, still hidden one second after touch. Add 8pt corner radius, 3pt outer insets and 6pt central gap; request actual pane dimensions from each app, no transform scaling.
+
+Serialize foreground/presentation attachment when the companion is still attaching (bounded 6s queue with generation/request cancellation), including pair resume and rapid picker choices. This removes overlapping TAduo activation requests; it does not establish the root cause of black rendered content or detect first rendered frames.
+
+Long-press Đổi offers Tải lại ô trái/phải and logs before rebuilding only that slot. Selecting its current app again also retries it. Initial rendering readiness still uses scene geometry; device validation and logs are required for black panes. Built from 0.17 (047f604a), without 0.18 launcher fallback or Dock diagnostics. Native Dock integration remains unverified; the previously reported missing-launcher issue from 0.17 is not claimed fixed.
