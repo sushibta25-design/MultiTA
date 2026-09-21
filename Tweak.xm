@@ -1,4 +1,4 @@
-// TAduo 0.11.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.12.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.11] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.12] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -318,7 +318,7 @@ static void TATick(void) {
         buttonWindow = [[UIWindow alloc] initWithWindowScene:s]; buttonWindow.windowLevel = UIWindowLevelAlert + 80;
         buttonWindow.frame = CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-88, 0, 88, 30);
         buttonWindow.rootViewController = [UIViewController new];
-        UIButton *b = TAButton(@"TAduo 0.11", @selector(start)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
+        UIButton *b = TAButton(@"TAduo 0.12", @selector(start)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
     }
     buttonWindow.hidden = running || order.count < 2;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
@@ -411,6 +411,84 @@ static void TACompactTabs(UITabBar *bar) {
         objc_setAssociatedObject(bar,&TATabBusyKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
+// Device evidence: four fixed 61pt square buttons in a 135pt image row.
+// Adjust only the verified matching width/height constants; keep native layout.
+static NSHashTable<UIView *> *TAImageRows;
+static char TARowConstantsKey, TARowBusyKey, TARowStampKey;
+static void TARestoreImageRow(UIView *cell) {
+    NSMapTable *saved=objc_getAssociatedObject(cell,&TARowConstantsKey);
+    for (NSLayoutConstraint *c in saved.keyEnumerator) {
+        NSDictionary *entry=[saved objectForKey:c];
+        if (fabs(c.constant-[entry[@"applied"] doubleValue])<0.01) c.constant=[entry[@"original"] doubleValue];
+    }
+    if (saved.count) TALog(@"IMAGE ROW restore count=%lu",(unsigned long)saved.count);
+    objc_setAssociatedObject(cell,&TARowConstantsKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(cell,&TARowStampKey,nil,OBJC_ASSOCIATION_COPY_NONATOMIC);
+    [TAImageRows removeObject:cell];
+}
+static void TACompactImageRow(UIView *cell) {
+    if ([objc_getAssociatedObject(cell,&TARowBusyKey) boolValue]) return;
+    NSString *bundle=nil;
+    BOOL active=TATemplateTarget(cell.window,&bundle) && [bundle isEqual:@"com.google.ios.youtubemusic"] && cell.bounds.size.width>48 && cell.bounds.size.width<300;
+    if (!active) { TARestoreImageRow(cell); return; }
+    objc_setAssociatedObject(cell,&TARowBusyKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @try {
+        NSMapTable *saved=objc_getAssociatedObject(cell,&TARowConstantsKey);
+        for (UIView *child in cell.subviews) {
+            if (![child isKindOfClass:UIStackView.class]) continue;
+            UIStackView *stack=(UIStackView *)child;
+            NSArray<UIView *> *buttons=stack.arrangedSubviews;
+            if (stack.axis!=UILayoutConstraintAxisHorizontal || stack.distribution!=UIStackViewDistributionEqualSpacing || buttons.count<2 || buttons.count>8) continue;
+            // The observed native row has 12pt margins. Wait until its own
+            // width constraint has caught up with the resized cell.
+            CGFloat available=cell.bounds.size.width-24;
+            BOOL rowWidthReady=NO;
+            for (NSLayoutConstraint *c in stack.constraints) {
+                if (c.active && c.firstItem==stack && !c.secondItem && c.firstAttribute==NSLayoutAttributeWidth && c.relation==NSLayoutRelationEqual && fabs(c.constant-available)<1) rowWidthReady=YES;
+            }
+            if (!rowWidthReady) continue;
+            NSMutableArray<NSLayoutConstraint *> *dimensions=[NSMutableArray new];
+            BOOL valid=YES;
+            for (UIView *button in buttons) {
+                if (![NSStringFromClass(button.class) isEqual:@"CPUIHighlightButton"]) { valid=NO; break; }
+                NSLayoutConstraint *width=nil,*height=nil;
+                for (NSLayoutConstraint *c in button.constraints) {
+                    NSDictionary *entry=[saved objectForKey:c];
+                    CGFloat original=entry ? [entry[@"original"] doubleValue] : c.constant;
+                    if (!c.active || c.firstItem!=button || c.secondItem || c.relation!=NSLayoutRelationEqual || fabs(original-61)>0.01 || c.priority!=UILayoutPriorityRequired) continue;
+                    if (c.firstAttribute==NSLayoutAttributeWidth) width=c;
+                    if (c.firstAttribute==NSLayoutAttributeHeight) height=c;
+                }
+                if (!width || !height) { valid=NO; break; }
+                [dimensions addObject:width]; [dimensions addObject:height];
+            }
+            if (!valid) continue;
+            CGFloat side=MIN(61,floor((available-6*(buttons.count-1))/buttons.count));
+            if (side<20) continue;
+            NSString *stamp=[NSString stringWithFormat:@"%.2f/%lu/%.2f/%p/%p",available,(unsigned long)buttons.count,side,(__bridge void *)dimensions.firstObject,(__bridge void *)dimensions.lastObject];
+            // At most one attempt per geometry/constraint set. If native code
+            // resets a constant, do not fight it on every layout pass.
+            if ([objc_getAssociatedObject(cell,&TARowStampKey) isEqual:stamp]) continue;
+            if (!saved) {
+                saved=[NSMapTable weakToStrongObjectsMapTable];
+                objc_setAssociatedObject(cell,&TARowConstantsKey,saved,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            for (NSLayoutConstraint *c in dimensions) {
+                NSDictionary *entry=[saved objectForKey:c];
+                // Preserve a new value supplied by the system between passes.
+                CGFloat original=entry && fabs(c.constant-[entry[@"applied"] doubleValue])<0.01 ? [entry[@"original"] doubleValue] : c.constant;
+                [saved setObject:@{@"original":@(original),@"applied":@(side)} forKey:c];
+                if (fabs(c.constant-side)>0.01) c.constant=side;
+            }
+            if (!TAImageRows) TAImageRows=[NSHashTable weakObjectsHashTable];
+            [TAImageRows addObject:cell];
+            if (![objc_getAssociatedObject(cell,&TARowStampKey) isEqual:stamp]) {
+                objc_setAssociatedObject(cell,&TARowStampKey,stamp,OBJC_ASSOCIATION_COPY_NONATOMIC);
+                TALog(@"IMAGE ROW apply available=%.2f count=%lu side=%.2f constants=%lu",available,(unsigned long)buttons.count,side,(unsigned long)dimensions.count);
+            }
+        }
+    } @finally { objc_setAssociatedObject(cell,&TARowBusyKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+}
 static void TAInvalidateTree(UIView *view, NSUInteger depth, NSUInteger *budget) {
     if (!view || !*budget || depth > 8) return; --*budget;
     [view setNeedsUpdateConstraints]; [view setNeedsLayout];
@@ -487,6 +565,7 @@ static void TAListenTemplateTargets(void) {
         int token;
         notify_register_dispatch(TAChannel(bundle, @"layout-target").UTF8String, &token, dispatch_get_main_queue(), ^(__unused int delivered) {
             for (UITabBar *bar in TACompactTabBars.allObjects) TACompactTabs(bar);
+            for (UIView *cell in TAImageRows.allObjects) TACompactImageRow(cell);
             for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
                 if (![scene isKindOfClass:UIWindowScene.class]) continue;
                 for (UIWindow *w in ((UIWindowScene *)scene).windows) {
@@ -654,6 +733,19 @@ static void TAListenSnapshots(void) {
 %end
 %end
 
+%group TAImageRowExperiment
+%hook CPSImageRowCell
+- (void)layoutSubviews {
+    %orig;
+    TACompactImageRow((UIView *)self);
+}
+- (void)prepareForReuse {
+    TARestoreImageRow((UIView *)self);
+    %orig;
+}
+%end
+%end
+
 %group TACompactHome
 %hook UITabBar
 - (void)layoutSubviews {
@@ -714,6 +806,9 @@ static void TAListenSnapshots(void) {
             %init(TAClient);
             if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
                 %init(TACompactHome);
+                if (NSClassFromString(@"CPSImageRowCell")) {
+                    %init(TAImageRowExperiment);
+                }
                 Class cls=NSClassFromString(@"CPUINowPlayingView");
                 SEL selector=NSSelectorFromString(@"recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:");
                 Method method=class_getInstanceMethod(cls,selector);

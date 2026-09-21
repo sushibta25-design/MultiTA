@@ -1,4 +1,4 @@
-# TAduo 0.11.0 — thử nghiệm 50/50
+# TAduo 0.12.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
 
@@ -77,3 +77,10 @@ Keep 0.10 geometry and Now Playing behavior. Device test of 0.10: 3m17s before u
 Only in active narrow YouTube Music template windows, shorten long UITabBarItem titles using composed-character-safe ellipsis and the available per-item width. UIKit lays out its own buttons; no child frame/constraint changes. Save and restore original titles/accessibility labels, respect incoming app title changes, and restore tracked bars on target-clear even when hidden behind Now Playing. No synchronous layout calls or repeat timers.
 
 Image rows are not fixed in this build. Add bounded read-only CPSImageRowCell method signatures and stack configuration evidence to choose the next native layout input. Test home tabs and rows, tap each tab, open Now Playing, exit to native home and confirm full titles return. Capture home with ••• → Log and send both current logs plus screenshot. Build success is not device validation.
+
+## 0.12 — equal square image-row buttons
+0.11 device photo confirms tab labels no longer overlap. Image rows still squeeze unequal widths. The device reports horizontal equal-spacing stacks with four buttons, each with required fixed 61pt width and height, in a 135.33pt row.
+
+Scoped to active narrow YouTube Music scenes and verified CPSImageRowCell structure: wait for the native row-width constraint to match cell width minus its observed 12pt margins, then reduce only each matched 61pt width/height pair to a common square size, allowing at least 6pt inter-item space. Keep row height, stack distribution, frames, callbacks and selection actions native. Skip unknown structures and sizes below 20pt. Save constants weakly; restore on target clear, ordinary non-target layout, and cell reuse, without overwriting a newer system value. At most one adaptation attempt per geometry/constraint set to avoid repeatedly fighting native layout. No constraint deactivation, recursive layout, new gesture recognizers, or polling.
+
+This is a template-specific adaptation, not proof that arbitrary apps support narrow CarPlay screens. Artwork rendering and tap selection require device validation. Test home image rows, scroll, select each cover, enter Now Playing, exit to full screen and re-enter. Capture a home screenshot and both logs using the centered Log action.
