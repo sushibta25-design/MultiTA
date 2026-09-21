@@ -1,8 +1,10 @@
-// TAduo 0.1.0: fixed panes, observed CarPlay scenes, one geometry transaction.
+// TAduo 0.2.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
 #import <string.h>
+#import <notify.h>
+#import <objc/runtime.h>
 
 static void TALog(NSString *format, ...) {
     va_list args; va_start(args, format);
@@ -14,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.1] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.2] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -42,6 +44,9 @@ static NSString *TABundle(id controller) {
 @property(nonatomic,copy) NSString *updater;
 @property(nonatomic) CGRect originalFrame;
 @property(nonatomic) BOOL changed;
+@property(nonatomic) BOOL frameCaptured;
+@property(nonatomic) CGSize targetSize;
+@property(nonatomic) NSUInteger resizeSerial;
 @property(nonatomic) BOOL backgrounded;
 @property(nonatomic) BOOL restoreBackground;
 @end
@@ -75,34 +80,76 @@ static BOOL TASetFrame(id settings, CGRect frame) {
     if (!sig || sig.numberOfArguments != 3 || strcmp(sig.methodReturnType, @encode(void)) || strcmp([sig getArgumentTypeAtIndex:2], @encode(CGRect))) return NO;
     ((void(*)(id,SEL,CGRect))objc_msgSend)(settings, sel, frame); return YES;
 }
-static NSString *TAUpdater(id scene) {
-    for (NSString *name in @[@"updateUISettingsWithBlock:", @"updateSettingsWithBlock:"]) {
-        NSMethodSignature *sig = [scene methodSignatureForSelector:NSSelectorFromString(name)];
-        if (sig && sig.numberOfArguments == 3 && !strcmp(sig.methodReturnType, @encode(void)) && !strcmp([sig getArgumentTypeAtIndex:2], "@?")) return name;
-    }
-    return nil;
+// Do not confuse the existence of a UI updater with its ability to mutate a
+// scene frame. Prefer the native scene-settings transaction; fall back only
+// after the chosen callback explicitly rejects the frame setter.
+static BOOL TAHasUpdater(id scene, NSString *name) {
+    NSMethodSignature *sig = [scene methodSignatureForSelector:NSSelectorFromString(name)];
+    return sig && sig.numberOfArguments == 3 && !strcmp(sig.methodReturnType, @encode(void)) && !strcmp([sig getArgumentTypeAtIndex:2], "@?");
 }
-static void TAResize(TARecord *r, CGSize size) {
-    r.scene = TAValue(r.controller, @"scene");
-    r.updater = TAUpdater(r.scene);
-    CGRect original = CGRectZero;
-    if (!r.updater || !TAReadFrame(r.scene, &original)) { TALog(@"RESIZE UNSUPPORTED %@", r.bundle); return; }
-    r.originalFrame = original;
-    NSUInteger token = generation;
+static void TAInvokeVoid(id object, NSString *name) {
+    SEL sel = NSSelectorFromString(name);
+    NSMethodSignature *sig = [object methodSignatureForSelector:sel];
+    if (sig && sig.numberOfArguments == 2 && !strcmp(sig.methodReturnType, @encode(void)))
+        ((void(*)(id,SEL))objc_msgSend)(object, sel);
+}
+static void TAObserve(TARecord *r, NSUInteger token, NSUInteger serial, NSString *phase) {
+    if (!running || generation != token || r.resizeSerial != serial) return;
+    CGRect actual = CGRectZero; BOOL readable = TAReadFrame(r.scene, &actual);
+    TALog(@"HOST %@ bundle=%@ target=%@ settings=%@ readable=%d presentation=%@ transform=%@", phase, r.bundle,
+          NSStringFromCGSize(r.targetSize), NSStringFromCGRect(actual), readable,
+          NSStringFromCGRect(r.presentation.bounds), NSStringFromCGAffineTransform(r.presentation.transform));
+}
+static void TATransact(TARecord *r, NSUInteger token, NSUInteger serial, NSUInteger index) {
+    NSArray *paths = @[@"updateSettingsWithBlock:", @"updateUISettingsWithBlock:"];
+    if (!running || generation != token || r.resizeSerial != serial) return;
+    if (index >= paths.count) { TALog(@"RESIZE UNSUPPORTED %@", r.bundle); return; }
+    NSString *path = paths[index];
+    if (!TAHasUpdater(r.scene, path)) { TATransact(r, token, serial, index + 1); return; }
+    __block BOOL called = NO;
     void (^change)(id) = ^(id settings) {
-        if (!running || generation != token) return;
+        called = YES;
+        if (!running || generation != token || r.resizeSerial != serial || r.scene != TAValue(r.controller, @"scene")) return;
         @try {
-            r.changed = TASetFrame(settings, (CGRect){CGPointZero, size});
-            TALog(@"RESIZE REQUEST %@ size=%@ setter=%d path=%@", r.bundle, NSStringFromCGSize(size), r.changed, r.updater);
+            BOOL accepted = TASetFrame(settings, (CGRect){CGPointZero, r.targetSize});
+            TALog(@"RESIZE REQUEST %@ target=%@ setter=%d path=%@ settingsClass=%@", r.bundle,
+                  NSStringFromCGSize(r.targetSize), accepted, path, NSStringFromClass([settings class]));
+            if (accepted) { r.changed = YES; r.updater = path; }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!running || generation != token || r.resizeSerial != serial) return;
+                if (!accepted) { TATransact(r, token, serial, index + 1); return; }
+                @try {
+                    TAInvokeVoid(r.controller, @"_updateSceneUI");
+                    TAInvokeVoid(r.presentation, @"_updateFrameAndTransform");
+                    [r.presentation setNeedsLayout];
+                } @catch (NSException *e) { TALog(@"REFRESH ERROR %@", e.name); }
+                TAObserve(r, token, serial, @"after-transaction");
+            });
         } @catch (NSException *e) { TALog(@"RESIZE ERROR %@ %@", r.bundle, e.name); }
     };
-    @try { ((void(*)(id,SEL,id))objc_msgSend)(r.scene, NSSelectorFromString(r.updater), change); }
-    @catch (NSException *e) { TALog(@"TRANSACTION ERROR %@", e.name); }
+    @try { ((void(*)(id,SEL,id))objc_msgSend)(r.scene, NSSelectorFromString(path), change); }
+    @catch (NSException *e) { TALog(@"TRANSACTION ERROR %@ %@", r.bundle, e.name); }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        if (!running || generation != token) return;
-        CGRect actual = CGRectZero; BOOL readable = TAReadFrame(r.scene, &actual);
-        TALog(@"RESIZE OBSERVED %@ requested=%@ scene=%@ readable=%d host=%@ (client redraw still needs visual verification)", r.bundle, NSStringFromCGSize(size), NSStringFromCGRect(actual), readable, NSStringFromCGRect(r.presentation.bounds));
+        if (running && generation == token && r.resizeSerial == serial && !called)
+            TALog(@"RESIZE NO CALLBACK %@ path=%@ (no speculative fallback)", r.bundle, path);
     });
+}
+static void TAResize(TARecord *r, CGSize size) {
+    id scene = TAValue(r.controller, @"scene");
+    if (!r.frameCaptured) {
+        CGRect original = CGRectZero;
+        if (!TAReadFrame(scene, &original)) { TALog(@"RESIZE NO FRAME %@", r.bundle); return; }
+        r.scene = scene; r.originalFrame = original; r.frameCaptured = YES;
+    }
+    if (r.scene != scene) { TAStop(@"resize scene changed"); return; }
+    r.targetSize = size;
+    NSUInteger token = generation, serial = ++r.resizeSerial;
+    TATransact(r, token, serial, 0);
+    for (NSNumber *delay in @[@0.25, @1.0, @3.0]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            TAObserve(r, token, serial, [NSString stringWithFormat:@"after-%@s", delay]);
+        });
+    }
 }
 static void TACleanup(TARecord *r) {
     if (!r) return;
@@ -121,7 +168,7 @@ static void TACleanup(TARecord *r) {
         if (r.restoreBackground && [r.controller respondsToSelector:bg]) ((void(*)(id,SEL,id))objc_msgSend)(r.controller, bg, nil);
     } @catch (__unused NSException *e) {}
     r.backgrounded = r.restoreBackground;
-    r.presentationID = nil; r.scene = nil; r.changed = NO;
+    r.presentationID = nil; r.scene = nil; r.changed = NO; r.frameCaptured = NO; ++r.resizeSerial;
 }
 static void TAStop(NSString *reason) {
     if (!running) return;
@@ -166,7 +213,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
     UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(8, 0, half, toolbar)];
-    label.text = @"TAduo 0.1 · 50/50"; label.textColor = UIColor.whiteColor; label.font = [UIFont systemFontOfSize:12]; [root addSubview:label];
+    label.text = @"TAduo 0.2 · 50/50"; label.textColor = UIColor.whiteColor; label.font = [UIFont systemFontOfSize:12]; [root addSubview:label];
     UIButton *exit = TAButton(@"Thoát", @selector(stop)); exit.frame = CGRectMake(bounds.size.width - 64, 0, 64, toolbar); [root addSubview:exit];
     buttonWindow.hidden = YES; splitWindow.hidden = NO;
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
@@ -205,6 +252,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
         if (!running || token != generation || slots[slot] != r) return;
         BOOL old = ownCall; ownCall = YES;
         @try {
+            TAResize(r, panes[slot].bounds.size);
             SEL create = NSSelectorFromString(@"presentationViewWithIdentifier:");
             if (![r.controller respondsToSelector:create]) @throw [NSException exceptionWithName:@"MissingPresentationAPI" reason:bundle userInfo:nil];
             r.presentationID = [NSString stringWithFormat:@"com.sushibta.taduo.%lu.%ld", (unsigned long)token, (long)slot];
@@ -214,7 +262,6 @@ static UIButton *TAButton(NSString *title, SEL action) {
             r.presentation.transform = CGAffineTransformIdentity;
             r.presentation.frame = panes[slot].bounds;
             [panes[slot] addSubview:r.presentation]; choose[slot].hidden = YES;
-            TAResize(r, panes[slot].bounds.size);
             TALog(@"ATTACHED slot=%ld bundle=%@", (long)slot, bundle);
         } @catch (NSException *e) { TALog(@"PRESENTATION ERROR %@", e.name); TAStop(@"presentation failed"); }
         ownCall = old;
@@ -246,6 +293,71 @@ static void TATick(void) {
     buttonWindow.hidden = running || order.count < 2;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
 }
+// Darwin state channels carry only dimensions, never application content.
+// The host logs receipt as an observation, not proof of correct app layout.
+static NSString *TAChannel(NSString *bundle, NSString *kind) {
+    return [NSString stringWithFormat:@"com.sushibta.taduo.geometry.%@.%@", bundle, kind];
+}
+static NSArray<NSString *> *TAClientBundles(void) {
+    return @[@"com.apple.Maps", @"com.google.Maps", @"com.google.ios.youtube", @"com.google.ios.youtubemusic", @"vn.vietmap.live"];
+}
+static void TASendSize(NSString *bundle, NSString *kind, CGSize size) {
+    if (!isfinite(size.width) || !isfinite(size.height) || size.width <= 0 || size.height <= 0 || size.width > 16000 || size.height > 16000) return;
+    static NSMutableDictionary *tokens;
+    if (!tokens) tokens = [NSMutableDictionary new];
+    NSString *name = TAChannel(bundle, kind); NSNumber *cached = tokens[name]; int token;
+    if (!cached) {
+        if (notify_register_check(name.UTF8String, &token) != NOTIFY_STATUS_OK) return;
+        tokens[name] = @(token);
+    } else token = cached.intValue;
+    uint64_t packed = ((uint64_t)llround(size.width * 4) << 32) | (uint32_t)llround(size.height * 4);
+    if (notify_set_state(token, packed) == NOTIFY_STATUS_OK) notify_post(name.UTF8String);
+}
+static void TAListenClients(void) {
+    for (NSString *bundle in TAClientBundles()) for (NSString *kind in @[@"scene", @"window", @"root"]) {
+        int token;
+        uint32_t status = notify_register_dispatch(TAChannel(bundle, kind).UTF8String, &token, dispatch_get_main_queue(), ^(int delivered) {
+            if (!running) return;
+            TARecord *r = records[bundle];
+            if (!r || (r != slots[0] && r != slots[1])) return;
+            uint64_t value = 0; if (notify_get_state(delivered, &value) != NOTIFY_STATUS_OK) return;
+            CGSize observed = CGSizeMake((value >> 32) / 4.0, (value & 0xffffffff) / 4.0);
+            TALog(@"CLIENT %@ bundle=%@ observed=%@ target=%@ match=%d", kind, bundle,
+                  NSStringFromCGSize(observed), NSStringFromCGSize(r.targetSize),
+                  fabs(observed.width-r.targetSize.width) < 0.5 && fabs(observed.height-r.targetSize.height) < 0.5);
+        });
+        if (status != NOTIFY_STATUS_OK) TALog(@"CLIENT LISTENER FAILED %@ %@ status=%u", bundle, kind, status);
+    }
+}
+static void TAClientObserve(UIWindow *w) {
+    if (![NSThread isMainThread]) return;
+    UIWindowScene *ws = w.windowScene; if (!ws) return;
+    NSString *sid = ws.session.persistentIdentifier ?: @"", *role = ws.session.role ?: @"";
+    if (![sid hasPrefix:@"Car["] && ![role containsString:@"CarPlay"]) return;
+    NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
+    if ([bundle isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+        NSArray *parts = [sid componentsSeparatedByString:@":"];
+        if (parts.count != 3) return; bundle = parts.lastObject;
+    }
+    if (![TAClientBundles() containsObject:bundle]) return;
+    static char observationKey;
+    UIView *root = w.rootViewController.viewIfLoaded;
+    NSString *stamp = [NSString stringWithFormat:@"%@|%@|%@|%@|%@", sid, NSStringFromCGRect(ws.coordinateSpace.bounds),
+                       NSStringFromCGRect(w.bounds), NSStringFromCGRect(root.bounds), NSStringFromUIEdgeInsets(root.safeAreaInsets)];
+    if ([objc_getAssociatedObject(w, &observationKey) isEqual:stamp]) return;
+    objc_setAssociatedObject(w, &observationKey, stamp, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    TASendSize(bundle, @"scene", ws.coordinateSpace.bounds.size);
+    TASendSize(bundle, @"window", w.bounds.size);
+    if (root) TASendSize(bundle, @"root", root.bounds.size);
+}
+%group TAClient
+%hook UIWindow
+- (void)layoutSubviews {
+    %orig;
+    TAClientObserve(self);
+}
+%end
+%end
 %group TAHost
 %hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
@@ -273,9 +385,14 @@ static void TATick(void) {
 %end
 %ctor {
     @autoreleasepool {
-        if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayApp"]) return;
+        NSString *process = NSBundle.mainBundle.bundleIdentifier;
+        if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+            %init(TAClient);
+            return;
+        }
+        if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
-        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED"); TATick(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED"); TAListenClients(); TATick(); });
     }
 }
