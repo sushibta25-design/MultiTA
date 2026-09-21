@@ -1,4 +1,4 @@
-# TAduo 0.2.0 — thử nghiệm 50/50
+# TAduo 0.11.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
 
@@ -8,7 +8,7 @@ Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 
 - Giữ DEB Duophone cũ để quay lại. Gỡ Duophone trước khi cài TAduo; hai gói khai báo xung đột để tránh cùng hook. Tắt MiniTa/DuoDash và các tweak chia màn hình khác trong lần test này.
 - Kết nối CarPlay, mở Maps rồi YouTube Music từ dock mỗi app một lần.
 - Chạm TAduo, chọn app cho từng ô. Có thể chọn ô phải trước.
-- Hai ô bằng nhau, nằm dưới thanh Thoát cao 32pt. Không kéo divider ở bản này.
+- Hai ô bằng nhau, dùng toàn bộ chiều cao; menu ••• ở giữa có Chia / Log / Thoát. Không kéo divider ở bản này.
 - Chạm Thoát để trả geometry đã lưu và hủy presentation riêng.
 - Gửi ảnh hai ô và /var/mobile/TAduo.log; nếu có log .1 thì gửi kèm.
 
@@ -70,3 +70,10 @@ Uses 0.8 layout behavior. Captures native Now Playing on appearance and settled 
 
 ## 0.10 — native Now Playing without artwork in narrow active panes
 Device 0.9 evidence: native song minimum height 68pt; split 2pt, with artwork above the song details. Runtime exposes recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:. Guard its exact observed ABI and pass allowsAlbumArt=NO only in an active TAduo scene with viewArea width under 300pt. All other inputs and native/full-screen calls remain unchanged. No child frame changes, constraint deactivation, or recursive layout calls. This tests the system's no-art layout; it does not fix tabs or image rows. Compare same song native/split/native, touch and exit, and collect NATIVE LAYOUT plus geometry logs.
+
+## 0.11 — native tab title fitting; image-row diagnostics
+Keep 0.10 geometry and Now Playing behavior. Device test of 0.10: 3m17s before user exit, successful restore/re-entry, user confirms responsive touch with no freeze. Baseline commit: 78ca0c3135f4bfaa7eca1c0b14f5d2b724ef8f62.
+
+Only in active narrow YouTube Music template windows, shorten long UITabBarItem titles using composed-character-safe ellipsis and the available per-item width. UIKit lays out its own buttons; no child frame/constraint changes. Save and restore original titles/accessibility labels, respect incoming app title changes, and restore tracked bars on target-clear even when hidden behind Now Playing. No synchronous layout calls or repeat timers.
+
+Image rows are not fixed in this build. Add bounded read-only CPSImageRowCell method signatures and stack configuration evidence to choose the next native layout input. Test home tabs and rows, tap each tab, open Now Playing, exit to native home and confirm full titles return. Capture home with ••• → Log and send both current logs plus screenshot. Build success is not device validation.

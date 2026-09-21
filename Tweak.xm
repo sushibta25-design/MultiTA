@@ -1,4 +1,4 @@
-// TAduo 0.10.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.11.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.11] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -318,7 +318,7 @@ static void TATick(void) {
         buttonWindow = [[UIWindow alloc] initWithWindowScene:s]; buttonWindow.windowLevel = UIWindowLevelAlert + 80;
         buttonWindow.frame = CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-88, 0, 88, 30);
         buttonWindow.rootViewController = [UIViewController new];
-        UIButton *b = TAButton(@"TAduo 0.10", @selector(start)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
+        UIButton *b = TAButton(@"TAduo 0.11", @selector(start)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
     }
     buttonWindow.hidden = running || order.count < 2;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
@@ -358,6 +358,58 @@ static BOOL TATemplateTarget(UIWindow *w, NSString **bundleOut) {
     CGSize target = CGSizeMake((packed >> 32)/4.0, (packed & 0xffffffff)/4.0);
     CGSize actual = w.windowScene.coordinateSpace.bounds.size;
     return fabs(target.width-actual.width)<0.5 && fabs(target.height-actual.height)<0.5;
+}
+// Change only native tab item titles. UIKit still owns all button geometry.
+static NSHashTable<UITabBar *> *TACompactTabBars;
+static char TATabTitleKey, TATabBusyKey;
+static NSString *TAFitTabTitle(NSString *title, CGFloat width) {
+    NSDictionary *attributes=@{NSFontAttributeName:[UIFont systemFontOfSize:11 weight:UIFontWeightSemibold]};
+    if ([title sizeWithAttributes:attributes].width<=width) return title;
+    NSString *prefix=title;
+    while (prefix.length) {
+        NSRange last=[prefix rangeOfComposedCharacterSequenceAtIndex:prefix.length-1];
+        prefix=[prefix substringToIndex:last.location];
+        NSString *candidate=[prefix stringByAppendingString:@"…"];
+        if ([candidate sizeWithAttributes:attributes].width<=width) return candidate;
+    }
+    return @"…";
+}
+static void TACompactTabs(UITabBar *bar) {
+    if ([objc_getAssociatedObject(bar,&TATabBusyKey) boolValue]) return;
+    NSString *bundle=nil;
+    BOOL active=TATemplateTarget(bar.window,&bundle) && [bundle isEqual:@"com.google.ios.youtubemusic"] && bar.bounds.size.width>0 && bar.bounds.size.width<300;
+    if (!active && ![TACompactTabBars containsObject:bar]) return;
+    objc_setAssociatedObject(bar,&TATabBusyKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @try {
+        if (!TACompactTabBars) TACompactTabBars=[NSHashTable weakObjectsHashTable];
+        if (active) [TACompactTabBars addObject:bar];
+        CGFloat width=MAX(12,bar.bounds.size.width/MAX((NSUInteger)1,bar.items.count)-10);
+        NSUInteger changed=0;
+        for (UITabBarItem *item in bar.items) {
+            NSDictionary *saved=objc_getAssociatedObject(item,&TATabTitleKey);
+            // An application title update supersedes our saved value.
+            if (saved && ![item.title isEqual:saved[@"applied"]]) {
+                if ([item.accessibilityLabel isEqual:saved[@"original"]]) item.accessibilityLabel=saved[@"accessibility"]==NSNull.null ? nil : saved[@"accessibility"];
+                saved=nil; objc_setAssociatedObject(item,&TATabTitleKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            NSString *original=saved ? saved[@"original"] : item.title;
+            if (!original) continue;
+            NSString *desired=active ? TAFitTabTitle(original,width) : original;
+            if (![desired isEqual:original]) {
+                id accessibility=saved ? saved[@"accessibility"] : (item.accessibilityLabel ?: (id)NSNull.null);
+                objc_setAssociatedObject(item,&TATabTitleKey,@{@"original":original,@"applied":desired,@"accessibility":accessibility},OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                if (!item.accessibilityLabel) item.accessibilityLabel=original;
+            } else if (saved) {
+                if ([item.accessibilityLabel isEqual:original]) item.accessibilityLabel=saved[@"accessibility"]==NSNull.null ? nil : saved[@"accessibility"];
+                objc_setAssociatedObject(item,&TATabTitleKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            if (![item.title isEqual:desired]) { item.title=desired; ++changed; }
+        }
+        if (!active) [TACompactTabBars removeObject:bar];
+        if (changed) TALog(@"TAB TITLES active=%d count=%lu changed=%lu width=%.2f",active,(unsigned long)bar.items.count,(unsigned long)changed,width);
+    } @finally {
+        objc_setAssociatedObject(bar,&TATabBusyKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 }
 static void TAInvalidateTree(UIView *view, NSUInteger depth, NSUInteger *budget) {
     if (!view || !*budget || depth > 8) return; --*budget;
@@ -434,6 +486,7 @@ static void TAListenTemplateTargets(void) {
     for (NSString *bundle in TAClientBundles()) {
         int token;
         notify_register_dispatch(TAChannel(bundle, @"layout-target").UTF8String, &token, dispatch_get_main_queue(), ^(__unused int delivered) {
+            for (UITabBar *bar in TACompactTabBars.allObjects) TACompactTabs(bar);
             for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
                 if (![scene isKindOfClass:UIWindowScene.class]) continue;
                 for (UIWindow *w in ((UIWindowScene *)scene).windows) {
@@ -521,11 +574,16 @@ static void TAConstraintEvidence(UIView *view, NSUInteger depth, NSUInteger *vie
             TALog(@"CONSTRAINT owner=%@ first=%@ attr=%ld relation=%ld second=%@ attr=%ld multiplier=%.3f constant=%.3f priority=%.0f active=%d",TAItemDescription(view),TAItemDescription(c.firstItem),(long)c.firstAttribute,(long)c.relation,TAItemDescription(c.secondItem),(long)c.secondAttribute,c.multiplier,c.constant,c.priority,c.active);
         }
     }
-    if ([name isEqual:@"CPUINowPlayingView"]) {
-        unsigned int count=0; Method *methods=class_copyMethodList(view.class,&count); NSUInteger remaining=40;
+    if ([view isKindOfClass:UIStackView.class]) {
+        UIStackView *stack=(UIStackView *)view;
+        TALog(@"STACK CONFIG parent=%@ axis=%ld distribution=%ld alignment=%ld spacing=%.2f arranged=%lu",NSStringFromClass(view.superview.class),(long)stack.axis,(long)stack.distribution,(long)stack.alignment,stack.spacing,(unsigned long)stack.arrangedSubviews.count);
+    }
+    BOOL imageRow=[name isEqual:@"CPSImageRowCell"];
+    if ([name isEqual:@"CPUINowPlayingView"] || imageRow) {
+        unsigned int count=0; Method *methods=class_copyMethodList(view.class,&count); NSUInteger remaining=60;
         for (unsigned int i=0;i<count && remaining;i++) {
             NSString *selector=NSStringFromSelector(method_getName(methods[i])); NSString *lower=selector.lowercaseString;
-            if ([lower containsString:@"layout"] || [lower containsString:@"constraint"] || [lower containsString:@"artwork"] || [lower containsString:@"size"] || [lower containsString:@"style"]) {
+            if (imageRow || [lower containsString:@"layout"] || [lower containsString:@"constraint"] || [lower containsString:@"artwork"] || [lower containsString:@"size"] || [lower containsString:@"style"]) {
                 TALog(@"LAYOUT METHOD class=%@ selector=%@ encoding=%s",name,selector,method_getTypeEncoding(methods[i])); --remaining;
             }
         }
@@ -596,6 +654,19 @@ static void TAListenSnapshots(void) {
 %end
 %end
 
+%group TACompactHome
+%hook UITabBar
+- (void)layoutSubviews {
+    TACompactTabs(self);
+    %orig;
+}
+- (void)didMoveToWindow {
+    %orig;
+    TACompactTabs(self);
+}
+%end
+%end
+
 %group TAClient
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
@@ -642,6 +713,7 @@ static void TAListenSnapshots(void) {
         if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
             if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+                %init(TACompactHome);
                 Class cls=NSClassFromString(@"CPUINowPlayingView");
                 SEL selector=NSSelectorFromString(@"recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:");
                 Method method=class_getInstanceMethod(cls,selector);
