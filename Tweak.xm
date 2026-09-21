@@ -1,4 +1,4 @@
-// TAduo 0.9.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.9] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -318,7 +318,7 @@ static void TATick(void) {
         buttonWindow = [[UIWindow alloc] initWithWindowScene:s]; buttonWindow.windowLevel = UIWindowLevelAlert + 80;
         buttonWindow.frame = CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-88, 0, 88, 30);
         buttonWindow.rootViewController = [UIViewController new];
-        UIButton *b = TAButton(@"TAduo 0.9", @selector(start)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
+        UIButton *b = TAButton(@"TAduo 0.10", @selector(start)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
     }
     buttonWindow.hidden = running || order.count < 2;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
@@ -576,6 +576,26 @@ static void TAListenSnapshots(void) {
         }
     });
 }
+// One controlled input to the system's own layout selection. No frame edits.
+%group TANowPlayingExperiment
+%hook CPUINowPlayingView
+- (void)recalculateLayout:(BOOL)recalculate allowsAlbumArt:(BOOL)allowsAlbumArt hasDataSource:(BOOL)hasDataSource viewArea:(CGRect)viewArea safeArea:(CGRect)safeArea rightHandDrive:(BOOL)rightHandDrive {
+    UIView *view=(UIView *)self;
+    BOOL narrow=TATemplateTarget(view.window,NULL) && viewArea.size.width>0 && viewArea.size.width<300;
+    BOOL effectiveArt=narrow ? NO : allowsAlbumArt;
+    %orig(recalculate,effectiveArt,hasDataSource,viewArea,safeArea,rightHandDrive);
+    static char stampKey;
+    NSString *stamp=[NSString stringWithFormat:@"%d/%d/%d/%@/%@",narrow,allowsAlbumArt,effectiveArt,NSStringFromCGRect(viewArea),NSStringFromCGRect(safeArea)];
+    if (![objc_getAssociatedObject(self,&stampKey) isEqual:stamp]) {
+        objc_setAssociatedObject(self,&stampKey,stamp,OBJC_ASSOCIATION_COPY_NONATOMIC);
+        id height=TAValue(self,@"songDetailsViewHeightConstraint");
+        CGFloat minimum=[height isKindOfClass:NSLayoutConstraint.class] ? ((NSLayoutConstraint *)height).constant : -1;
+        TALog(@"NATIVE LAYOUT narrow=%d artRequested=%d artEffective=%d recalculate=%d datasource=%d area=%@ safe=%@ songMinimum=%.2f layoutClass=%@",narrow,allowsAlbumArt,effectiveArt,recalculate,hasDataSource,NSStringFromCGRect(viewArea),NSStringFromCGRect(safeArea),minimum,NSStringFromClass([TAValue(self,@"nowPlayingLayout") class]));
+    }
+}
+%end
+%end
+
 %group TAClient
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
@@ -621,8 +641,17 @@ static void TAListenSnapshots(void) {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
         if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
-            if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"])
+            if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+                Class cls=NSClassFromString(@"CPUINowPlayingView");
+                SEL selector=NSSelectorFromString(@"recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:");
+                Method method=class_getInstanceMethod(cls,selector);
+                const char *encoding=method ? method_getTypeEncoding(method) : NULL;
+                if (encoding && strcmp(encoding,"v96@0:8B16B20B24{CGRect={CGPoint=dd}{CGSize=dd}}28{CGRect={CGPoint=dd}{CGSize=dd}}60B92")==0) {
+                    %init(TANowPlayingExperiment);
+                    TALog(@"NATIVE LAYOUT HOOK enabled");
+                } else TALog(@"NATIVE LAYOUT HOOK skipped encoding=%s",encoding ?: "missing");
                 dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); TAListenSnapshots(); });
+            }
             return;
         }
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;

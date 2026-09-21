@@ -67,3 +67,6 @@ Restore the exact 0.5 centered-actions implementation, with version identifiers 
 
 ## 0.9 — native/split comparison diagnostics
 Uses 0.8 layout behavior. Captures native Now Playing on appearance and settled geometry after target changes, including exit. Read-only bounded constraint attributes, class/pointer relationships, priorities, ambiguity, screen/window geometry, and relevant method names (never invoked). No new frame/constraint edits. Test native Now Playing first, enter split and log Now Playing, then exit and wait two seconds. Collect both log files, including .1 if rotated. The launch button shows 0.9.
+
+## 0.10 — native Now Playing without artwork in narrow active panes
+Device 0.9 evidence: native song minimum height 68pt; split 2pt, with artwork above the song details. Runtime exposes recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:. Guard its exact observed ABI and pass allowsAlbumArt=NO only in an active TAduo scene with viewArea width under 300pt. All other inputs and native/full-screen calls remain unchanged. No child frame changes, constraint deactivation, or recursive layout calls. This tests the system's no-art layout; it does not fix tabs or image rows. Compare same song native/split/native, touch and exit, and collect NATIVE LAYOUT plus geometry logs.
