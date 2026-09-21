@@ -1,4 +1,4 @@
-// TAduo 0.3.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.4.0: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.3] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.4] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -186,6 +186,7 @@ static void TAStop(NSString *reason) {
 @interface TAControls : NSObject
 - (void)start;
 - (void)stop;
+- (void)restartSplit;
 - (void)pick:(UIButton *)sender;
 - (void)attach:(NSString *)bundle slot:(NSInteger)slot;
 @end
@@ -198,6 +199,11 @@ static UIButton *TAButton(NSString *title, SEL action) {
 }
 @implementation TAControls
 - (void)stop { TAStop(@"user"); }
+- (void)restartSplit {
+    if (!running || splitWindow.rootViewController.presentedViewController) return;
+    TAStop(@"choose apps again");
+    dispatch_async(dispatch_get_main_queue(), ^{ [self start]; });
+}
 - (void)start {
     if (running || !dashboard || TADashboard() != dashboard) return;
     CGRect bounds = dashboard.coordinateSpace.bounds;
@@ -207,17 +213,22 @@ static UIButton *TAButton(NSString *title, SEL action) {
     splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
     splitWindow.rootViewController = [UIViewController new];
     UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.blackColor;
-    // Reserve a real toolbar above BOTH scenes; do not cover any app controls.
-    CGFloat toolbar = 32, half = bounds.size.width / 2;
+    // Both scenes occupy full display height. Only floating button hit areas
+    // cover content; no toolbar strip is reserved in scene geometry.
+    CGFloat half = bounds.size.width / 2;
     for (NSInteger i = 0; i < 2; i++) {
-        panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * half, toolbar, half, bounds.size.height - toolbar)];
+        panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * half, 0, half, bounds.size.height)];
         panes[i].clipsToBounds = YES; [root addSubview:panes[i]];
         choose[i] = TAButton(i == 0 ? @"Chọn app trái" : @"Chọn app phải", @selector(pick:));
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
-    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(8, 0, half, toolbar)];
-    label.text = @"TAduo 0.3 · 50/50"; label.textColor = UIColor.whiteColor; label.font = [UIFont systemFontOfSize:12]; [root addSubview:label];
-    UIButton *exit = TAButton(@"Thoát", @selector(stop)); exit.frame = CGRectMake(bounds.size.width - 64, 0, 64, toolbar); [root addSubview:exit];
+    UIButton *split = TAButton(@"Chia", @selector(restartSplit));
+    split.frame = CGRectMake(4, 4, 44, 28); split.layer.cornerRadius = 8;
+    split.accessibilityLabel = @"Chọn lại hai ứng dụng";
+    [root addSubview:split];
+    UIButton *exit = TAButton(@"Thoát", @selector(stop));
+    exit.frame = CGRectMake(bounds.size.width - 52, 4, 48, 28); exit.layer.cornerRadius = 8;
+    [root addSubview:exit];
     buttonWindow.hidden = YES; splitWindow.hidden = NO;
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
 }

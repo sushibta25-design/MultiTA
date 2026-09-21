@@ -43,3 +43,7 @@ Log 0.2 của thiết bị xác nhận scene/window/root đã nhận 213.33 x 20
 Đây là thử nghiệm có giả thuyết safe-area/layout cache, chưa chứng minh nguyên nhân duy nhất hay đã sửa chồng chữ. Phác họa giao diện là mục tiêu, không phải cam kết rằng template hệ thống hỗ trợ bố cục đó ở chiều rộng 213 điểm.
 
 Cài 0.3, respring và mở lại app. Test YouTube Music + Google Maps. Gửi ảnh và cả /var/mobile/TAduo.log lẫn /var/mobile/TAduo-template.log. Log template ghi safe-area, traits và tối đa 60 view sau một lần áp dụng; không ghi nội dung bài hát/tìm kiếm. Mỗi file xoay khoảng 1 MiB, giữ một bản cũ.
+
+## 0.4 — full chiều cao
+
+Bỏ thanh tiêu đề 32pt. Hai ô bắt đầu ở y=0 và nhận toàn bộ chiều cao màn hình (trên thiết bị test: 213.33 x 240 thay vì 213.33 x 208). Nút Chia và Thoát nổi ở góc trên trái/phải, chỉ vùng nút nhận chạm và có thể che một phần nhỏ nội dung phía dưới. Chia trả geometry cũ rồi mở lại hai ô trống để chọn lại app. Giữ nguyên xử lý template 0.3 để tách tác động của thay đổi chiều cao. Không thêm divider kéo.
