@@ -1,4 +1,4 @@
-# TAduo 0.16.0 — thử nghiệm 50/50
+# TAduo 0.17.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
 
@@ -111,3 +111,13 @@ Native app foreground and app-to-home presentation callbacks no longer stop the 
 Scene destruction checks scene identity before clearing an affected slot, never clears the companion, and retains the controller/activation record for an explicit retry (not a guarantee that the OS will recreate its scene). Added bounded event logs for foreground and scene destruction. Existing resize behavior is unchanged.
 
 Device gate: attach Apple Maps and Vietmap separately; replace either side of Google Maps + YouTube Music; verify companion touch and no split dismissal. Also check native external launch and explicit Fold/Exit. Build success is not device validation.
+
+## 0.17 — minimal controls and per-pane app grid
+
+Cyan/orange vector split icon mounts inside the discovered native vertical DBDock view. Uniformly compacts its interactive content to reserve a 36pt button, preserving native icon aspect ratios. No top-right launcher. Dock discovery/placement requires device validation on iOS versions.
+
+Full-height 50/50 panes initially say “Chạm để chọn ứng dụng”. Each pane offers a scrollable two-column grid of captured CarPlay apps, with system icons when available (initial-letter fallback), dimmed/disabled apps occupied by the companion, and cyan marking for the current selection. Apps must have been opened on CarPlay once; this is not an installed-app enumerator.
+
+Divider controls: Swap, curved-arrow Fold, Exit. Observe UIWindow sendEvent after forwarding; reveal for one second after touch without intercepting gestures. Long-press Swap for change-left/change-right/log; long-press Dock Split for log outside split. Explicit Fold and Exit retain 0.16 semantics. Existing geometry and lifecycle logic unchanged. Loading placeholder shows app icon but readiness still measures scene geometry, not first rendered frame.
+
+Validation: CI arm64/arm64e rootless build; on-device gates are Dock accessibility and preserved native Dock buttons, both picker orders/scrolling/dimmed duplicate, touch/drag/pinch unaffected, timed divider reveal, Swap/Fold/Exit and map switching.
