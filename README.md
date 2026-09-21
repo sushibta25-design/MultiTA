@@ -1,4 +1,4 @@
-# TAduo 0.14.0 — thử nghiệm 50/50
+# TAduo 0.15.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
 
@@ -98,3 +98,8 @@ Centered actions: Đổi trái / Đổi phải / Đổi bên / Thu / Cặp gần
 Google Maps review: template root is 213.33x240, but the nested map viewport is x45/y44, width168.33, height196. Latest 0.13 snapshot was native/full width, not split. Add bounded read-only controller method signatures and exact map-owner constraints/child frames, including during search transitions. No speculative global offset or frame correction. Need split-map and split-search screenshots plus logs to distinguish cached dock offset from intentional map layout.
 
 Test changing Maps to Apple Maps/Vietmap while music remains, failed-pane recovery, swap, Thu → native Home → open map → TAduo, and a recent pair. Log Google Maps first on map, then search menu. Do not claim device stability from compile success.
+
+## 0.15 — bounded activation readiness and pending-scene identity
+Replace fixed one-second capture with a bounded readiness check (250ms, minimum two turns, maximum four seconds). Foreground is called once; each check reads the current controller scene. During an outstanding attach, native foreground/Home-animation callbacks no longer tear down the split session. Capture may replace a pending controller with the current controller for the same bundle and dashboard. Preserve real launch activation settings when later refresh callbacks omit launch source. Identify occupied apps by bundle as well as controller pointer. Use unique presentation IDs per slot request; timeout, scene mismatch and presentation failure clear only the affected slot.
+
+This is a hypothesis-driven fix for navigation activation, not a confirmed root cause from the sparse 0.14 logs. Test Đổi trái/right → Apple Maps/Vietmap, keep companion visible, allow up to four seconds, no repeated tapping. Send logs containing ATTACH BEGIN / ATTACH REBIND / ATTACHED or ATTACH TIMEOUT, plus a screenshot if no attach request appears. Google Maps diagnostics and 0.14 menu remain.
