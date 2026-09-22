@@ -122,3 +122,7 @@ Replace ivory 20pt gap with clear 12pt gap and small translucent grip. Make spli
 
 ## 0.10.12 compact gap and two-color actions
 Visual transparent gap reduced to 4pt; centered divider hit region remains 12x56pt, extending 4pt into each pane only at mid-height. Grip stays centered. Swap uses bold cyan upper-left arrow and orange lower-right arrow; exit uses cyan and orange diagonal strokes. Native cached drawing, no new image assets/dependencies. Preserve capture eligibility, resize helpers and attachment lifecycle. Device gesture feel and icon appearance require verification.
+
+
+## 0.10.13 colored empty panes and gap input ownership
+Empty pane buttons use custom rendering with cyan left/orange right and dark bold text. Shared picker heading for either slot is uppercase UNICODE Vietnamese 'ỨNG DỤNG ĐÃ MỞ', bold 28pt (previous 14pt), side-colored; reserve extra header height. Transparent full-height 4pt gap shield plus explicit TASplitWindow hit-testing routes gap touches to the shield and center touches to the existing 12x56 grip; modal/menu priority retained. Gap shield is resized/released with split. This addresses UIKit event ownership; actual cross-process CarPlay touch behavior still requires device validation. No resize/activation logic changes.

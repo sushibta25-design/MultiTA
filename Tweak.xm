@@ -1,4 +1,4 @@
-// TAduo 0.10.12: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.13: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.12] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.13] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -61,6 +61,7 @@ static UIButton *choose[2];
 static UIWindow *splitWindow, *buttonWindow;
 static UIView *floatingActions;
 static UIView *dividerView;
+static UIControl *gapTouchShield;
 static const CGFloat TADividerGap=4;
 static const CGFloat TADividerHitWidth=12;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
@@ -70,6 +71,24 @@ static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSUInteger generation;
 static NSUInteger slotRequests[2];
+@interface TASplitWindow : UIWindow
+@end
+@implementation TASplitWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    // Modal picker and visible menu keep their normal priority.
+    if (self.rootViewController.presentedViewController) return [super hitTest:point withEvent:event];
+    if (floatingActions && !floatingActions.hidden &&
+        [floatingActions pointInside:[floatingActions convertPoint:point fromView:self] withEvent:event])
+        return [super hitTest:point withEvent:event];
+    if (dividerView && !dividerView.hidden &&
+        [dividerView pointInside:[dividerView convertPoint:point fromView:self] withEvent:event])
+        return [dividerView hitTest:[dividerView convertPoint:point fromView:self] withEvent:event];
+    if (gapTouchShield && !gapTouchShield.hidden &&
+        [gapTouchShield pointInside:[gapTouchShield convertPoint:point fromView:self] withEvent:event])
+        return gapTouchShield;
+    return [super hitTest:point withEvent:event];
+}
+@end
 static void TAStop(NSString *reason);
 static void TAClearSlot(NSInteger slot, NSString *reason);
 static NSArray<NSString *> *TAClientBundles(void);
@@ -200,7 +219,7 @@ static void TAStop(NSString *reason) {
     BOOL previous = ownCall; ownCall = YES;
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
-    splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil; dividerView=nil; dividerDragging=NO;
+    splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil; dividerView=nil; gapTouchShield=nil; dividerDragging=NO;
     buttonWindow.hidden = !dashboard;
 }
 static BOOL TAHasHostedSurface(CALayer *layer, NSUInteger depth, NSInteger *budget) {
@@ -331,6 +350,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     CGFloat left=available*splitRatio, center=left+TADividerGap/2;
     panes[0].frame=CGRectMake(0,0,left,height);
     panes[1].frame=CGRectMake(left+TADividerGap,0,available-left,height);
+    gapTouchShield.frame=CGRectMake(left,0,TADividerGap,height);
     dividerView.frame=CGRectMake(center-TADividerHitWidth/2,(height-56)/2,TADividerHitWidth,56);
     floatingActions.frame=CGRectMake(MAX(0,MIN(center-78,splitWindow.bounds.size.width-156)),height/2-15,156,30);
     for (NSInteger i=0;i<2;i++) {
@@ -422,7 +442,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     CGRect bounds = dashboard.coordinateSpace.bounds;
     if (bounds.size.width < 150 || bounds.size.height < 100) return;
     running = YES; ++generation; splitRatio=0.5;
-    splitWindow = [[UIWindow alloc] initWithWindowScene:dashboard];
+    splitWindow = [[TASplitWindow alloc] initWithWindowScene:dashboard];
     splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
     splitWindow.opaque=NO; splitWindow.backgroundColor=UIColor.clearColor;
     splitWindow.rootViewController = [UIViewController new];
@@ -435,9 +455,19 @@ static UIImage *TAActionIcon(BOOL exitAction) {
         panes[i].backgroundColor=UIColor.blackColor;
         panes[i].layer.cornerRadius=6;
         panes[i].clipsToBounds = YES; [root addSubview:panes[i]];
-        choose[i] = TAButton(i == 0 ? @"Chọn app trái" : @"Chọn app phải", @selector(pick:));
+        choose[i] = [UIButton buttonWithType:UIButtonTypeCustom];
+        [choose[i] setTitle:i==0 ? @"Chọn app trái" : @"Chọn app phải" forState:UIControlStateNormal];
+        choose[i].backgroundColor=i==0 ? [UIColor colorWithRed:0 green:0.88 blue:1 alpha:1] : [UIColor colorWithRed:1 green:0.43 blue:0.10 alpha:1];
+        [choose[i] setTitleColor:[UIColor colorWithWhite:0.10 alpha:1] forState:UIControlStateNormal];
+        choose[i].titleLabel.font=[UIFont boldSystemFontOfSize:18];
+        choose[i].titleLabel.numberOfLines=2; choose[i].titleLabel.textAlignment=NSTextAlignmentCenter;
+        choose[i].contentEdgeInsets=UIEdgeInsetsMake(8,8,8,8);
+        [choose[i] addTarget:self action:@selector(pick:) forControlEvents:UIControlEventTouchUpInside];
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
+    gapTouchShield=[[UIControl alloc] initWithFrame:CGRectMake(paneWidth,0,TADividerGap,bounds.size.height)];
+    gapTouchShield.backgroundColor=UIColor.clearColor; gapTouchShield.opaque=NO;
+    gapTouchShield.userInteractionEnabled=YES; [root addSubview:gapTouchShield];
     dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-TADividerHitWidth/2,(bounds.size.height-56)/2,TADividerHitWidth,56)];
     dividerView.backgroundColor=UIColor.clearColor;
     UIView *grip=[[UIView alloc] initWithFrame:CGRectMake((TADividerHitWidth-3)/2,18,3,20)];
@@ -506,15 +536,15 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     panel.backgroundColor = [UIColor colorWithWhite:0.16 alpha:0.98];
     panel.layer.cornerRadius = 14; [root addSubview:panel];
     CGFloat w = panel.bounds.size.width, h = panel.bounds.size.height;
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 5, w-24, 25)];
-    title.text = @"Chọn app đã mở"; title.font = [UIFont boldSystemFontOfSize:14];
-    title.textColor = UIColor.whiteColor; title.textAlignment = NSTextAlignmentCenter; [panel addSubview:title];
-    CGFloat cellW = (w-24)/3, cellH = (h-68)/2;
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 5, w-24, 40)];
+    title.text = @"ỨNG DỤNG ĐÃ MỞ"; title.font = [UIFont boldSystemFontOfSize:28];
+    title.textColor = self.iconSlot==0 ? [UIColor colorWithRed:0 green:0.88 blue:1 alpha:1] : [UIColor colorWithRed:1 green:0.43 blue:0.10 alpha:1]; title.textAlignment = NSTextAlignmentCenter; [panel addSubview:title];
+    CGFloat cellW = (w-24)/3, cellH = (h-88)/2;
     NSUInteger first = self.iconPage * 6, end = MIN(first+6, self.iconBundles.count);
     for (NSUInteger i = first; i < end; i++) {
         NSUInteger position = i-first;
         UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
-        button.frame = CGRectMake(12+(position%3)*cellW, 32+(position/3)*cellH, cellW, cellH);
+        button.frame = CGRectMake(12+(position%3)*cellW, 52+(position/3)*cellH, cellW, cellH);
         button.tag = i; button.accessibilityLabel = self.iconBundles[i];
         CGFloat size = MIN(32, cellH-8);
         UIImageView *icon = [[UIImageView alloc] initWithImage:TAChoiceIcon(self.iconBundles[i])];
@@ -533,7 +563,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
         next.frame = CGRectMake(w-56, h-33, 44, 30); next.enabled = end < self.iconBundles.count; [panel addSubview:next];
     }
     if (!self.iconBundles.count) {
-        UILabel *empty = [[UILabel alloc] initWithFrame:CGRectMake(12, 40, w-24, h-80)];
+        UILabel *empty = [[UILabel alloc] initWithFrame:CGRectMake(12, 52, w-24, h-92)];
         empty.text = @"Mở app từ CarPlay trước để đưa vào danh sách.";
         empty.numberOfLines = 0; empty.textAlignment = NSTextAlignmentCenter; empty.textColor = UIColor.whiteColor;
         [panel addSubview:empty];
