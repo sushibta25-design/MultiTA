@@ -1,3 +1,12 @@
+# TAduo 0.10.14
+
+- Nền chia và khe divider đen, đục ngay trước khi hiện hai ô chọn app. Vùng chạm divider vẫn chặn app phía dưới.
+- Riêng YouTube: giữ ô Đang mở phía trước presentation đang chạy ít nhất 1,25 giây; hiện khi geometry host khớp liên tiếp, tối đa chờ 3 giây. Không gửi lại foreground/resize trong bước chờ này.
+- Đây là xử lý hiển thị ban đầu; geometry khớp chưa chứng minh nội dung YouTube đã relayout xong. Cần kiểm tra thiết bị.
+- Giữ resize YouTube Music, map và cơ chế kéo hiện có.
+
+Test: mở chia trước khi chọn app, khe phải đen; chọn YouTube mỗi bên, kiểm tra nhảy kích thước; thoát trong lúc Đang mở rồi mở lại. Log có YOUTUBE REVEAL.
+
 # TAduo 0.2.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.

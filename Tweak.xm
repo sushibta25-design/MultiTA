@@ -1,4 +1,4 @@
-// TAduo 0.10.13: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.14: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.13] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.14] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -262,6 +262,7 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 - (void)replace:(NSString *)bundle slot:(NSInteger)slot;
 - (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
 - (void)checkPresentation:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
+- (void)settleYouTube:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt stable:(NSUInteger)stable;
 - (void)dragDivider:(UIPanGestureRecognizer *)gesture;
 - (void)layoutSplit:(BOOL)commit;
 - (void)dragEntry:(UIPanGestureRecognizer *)gesture;
@@ -444,9 +445,9 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     running = YES; ++generation; splitRatio=0.5;
     splitWindow = [[TASplitWindow alloc] initWithWindowScene:dashboard];
     splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
-    splitWindow.opaque=NO; splitWindow.backgroundColor=UIColor.clearColor;
+    splitWindow.opaque=YES; splitWindow.backgroundColor=UIColor.blackColor;
     splitWindow.rootViewController = [UIViewController new];
-    UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.clearColor; root.opaque=NO;
+    UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.blackColor; root.opaque=YES;
     // Thin visual gap, independent centered hit area; 4pt overlap per pane only in the 56pt center region.
     CGFloat half = bounds.size.width / 2;
     CGFloat gap=TADividerGap, paneWidth=(bounds.size.width-gap)/2;
@@ -466,7 +467,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
     gapTouchShield=[[UIControl alloc] initWithFrame:CGRectMake(paneWidth,0,TADividerGap,bounds.size.height)];
-    gapTouchShield.backgroundColor=UIColor.clearColor; gapTouchShield.opaque=NO;
+    gapTouchShield.backgroundColor=UIColor.blackColor; gapTouchShield.opaque=YES;
     gapTouchShield.userInteractionEnabled=YES; [root addSubview:gapTouchShield];
     dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-TADividerHitWidth/2,(bounds.size.height-56)/2,TADividerHitWidth,56)];
     dividerView.backgroundColor=UIColor.clearColor;
@@ -639,6 +640,11 @@ static UIImage *TAActionIcon(BOOL exitAction) {
             [choose[slot] setTitle:@"Đang tải bản đồ…" forState:UIControlStateNormal];
             TAPresentationEvidence(r,@"created");
             [self checkPresentation:slot generation:token request:request attempt:0];
+        } else if ([r.bundle isEqual:@"com.google.ios.youtube"]) {
+            // Keep the opaque chooser above the live surface while resize settles.
+            // Do not hide the presentation itself: its client must keep laying out.
+            [panes[slot] bringSubviewToFront:choose[slot]];
+            [self settleYouTube:slot generation:token request:request attempt:0 stable:0];
         } else {
             choose[slot].hidden=YES; r.attaching=NO;
             TALog(@"ATTACHED slot=%ld bundle=%@ attempt=%lu",(long)slot,r.bundle,(unsigned long)attempt);
@@ -648,6 +654,32 @@ static UIImage *TAActionIcon(BOOL exitAction) {
         if (running && slots[slot]==r) TAClearSlot(slot,@"presentation failed");
     } @finally { ownCall=old; }
 
+}
+- (void)settleYouTube:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt stable:(NSUInteger)stable {
+    if (!running || generation!=token || slotRequests[slot]!=request || !slots[slot].attaching) return;
+    TARecord *r=slots[slot];
+    if (r.scene!=TAValue(r.controller,@"scene") || !r.presentation) {
+        TAClearSlot(slot,@"YouTube scene changed while settling"); return;
+    }
+    CGRect actual=CGRectZero;
+    CGSize target=panes[slot].bounds.size, shown=r.presentation.bounds.size;
+    BOOL matches=TAReadFrame(r.scene,&actual) &&
+        fabs(actual.size.width-target.width)<0.5 && fabs(actual.size.height-target.height)<0.5 &&
+        fabs(shown.width-target.width)<0.5 && fabs(shown.height-target.height)<0.5 &&
+        CGAffineTransformIsIdentity(r.presentation.transform);
+    NSUInteger nextStable=matches ? stable+1 : 0;
+    // Five quarter-second intervals cover the observed first-second transition.
+    // Host geometry stability is not proof that all YouTube content is settled.
+    if ((attempt>=5 && nextStable>=3) || attempt>=12) {
+        choose[slot].hidden=YES; r.attaching=NO;
+        TALog(@"YOUTUBE REVEAL slot=%ld attempt=%lu stable=%lu geometry=%d timeout=%d target=%@",
+              (long)slot,(unsigned long)attempt,(unsigned long)nextStable,matches,
+              attempt>=12,NSStringFromCGSize(target));
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(), ^{
+        [self settleYouTube:slot generation:token request:request attempt:attempt+1 stable:nextStable];
+    });
 }
 - (void)checkPresentation:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt {
     if (!running || token!=generation || request!=slotRequests[slot] || !slots[slot].attaching) return;
