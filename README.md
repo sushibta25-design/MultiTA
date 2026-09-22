@@ -1,3 +1,9 @@
+# TAduo 0.10.16
+
+Sửa YouTube root giữ width cũ dù scene/window đã đổi: chỉ đồng bộ frame khi root nằm trực tiếp trong cửa sổ CarPlay, dùng autoresizing và transform identity. Giữ xử lý constraints/native layout cho root khác. Tối đa 3 lần mỗi target/root, không timer lặp; khôi phục autoresizing khi thoát. Log YOUTUBE ROOT SYNC ghi before/after và direct để xác nhận nhánh sửa có áp dụng.
+
+Cần test 50/50, kéo rộng/hẹp, đổi bên, thoát chia. Không xác nhận fix crash; giữ các sửa Google Maps và media template của 0.10.15.
+
 # TAduo 0.10.15
 
 - YouTube: invalidate layout/collection layout một lần mỗi geometry/safe-area/root khi scene, window và root đã khớp target; không ép frame hay scale. Log YOUTUBE CLIENT RELAYOUT. Cần xác nhận thực tế vì layout riêng của YouTube có thể vẫn cần xử lý thêm.

@@ -1,4 +1,4 @@
-// TAduo 0.10.15: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.16: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.15] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.16] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -990,9 +990,12 @@ static void TAInvalidateTree(UIView *view, NSUInteger depth, NSUInteger *budget)
     if ([view isKindOfClass:UICollectionView.class]) [((UICollectionView *)view).collectionViewLayout invalidateLayout];
     for (UIView *child in view.subviews) TAInvalidateTree(child, depth+1, budget);
 }
-// Relayout the bridged YouTube client only after all outer geometry agrees.
-// No screen spoofing, transforms, or forced root bounds.
-static char TAYoutubeLayoutStamp, TAYoutubeLayoutQueued;
+// Synchronize only YouTube's direct, frame-managed CarPlay root.
+// A mismatched root is the repair condition, not a prerequisite for relayout.
+static char TAYoutubeLayoutStamp, TAYoutubeLayoutQueued, TAYoutubeAttempts, TAYoutubeMask;
+static BOOL TAYoutubeSizeMatches(CGSize a, CGSize b) {
+    return fabs(a.width-b.width)<0.5 && fabs(a.height-b.height)<0.5;
+}
 static void TAYoutubeClientLayout(UIWindow *w) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.google.ios.youtube"]) return;
     NSString *sid=w.windowScene.session.persistentIdentifier ?: @"";
@@ -1002,33 +1005,54 @@ static void TAYoutubeClientLayout(UIWindow *w) {
     int token=TATargetToken(@"com.google.ios.youtube"); uint64_t packed=0;
     if (token<0 || notify_get_state(token,&packed)!=NOTIFY_STATUS_OK) return;
     if (!packed) {
-        if (objc_getAssociatedObject(w,&TAYoutubeLayoutStamp)) {
-            objc_setAssociatedObject(w,&TAYoutubeLayoutStamp,nil,OBJC_ASSOCIATION_COPY_NONATOMIC);
-            NSUInteger budget=100; TAInvalidateTree(root,0,&budget);
+        NSNumber *mask=objc_getAssociatedObject(root,&TAYoutubeMask);
+        if (mask) {
+            root.autoresizingMask=mask.unsignedIntegerValue;
+            objc_setAssociatedObject(root,&TAYoutubeMask,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            // The host's restore transaction can arrive later; restored autoresizing
+            // and UIKit own subsequent fullscreen geometry.
+            if (root.superview==w && root.translatesAutoresizingMaskIntoConstraints &&
+                CGAffineTransformIsIdentity(root.transform)) root.frame=w.bounds;
+            [root setNeedsLayout];
         }
+        objc_setAssociatedObject(w,&TAYoutubeLayoutStamp,nil,OBJC_ASSOCIATION_COPY_NONATOMIC);
+        objc_setAssociatedObject(w,&TAYoutubeAttempts,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
     CGSize target=CGSizeMake((packed>>32)/4.0,(packed&0xffffffff)/4.0);
-    for (NSValue *value in @[[NSValue valueWithCGSize:w.windowScene.coordinateSpace.bounds.size],
-                              [NSValue valueWithCGSize:w.bounds.size],[NSValue valueWithCGSize:root.bounds.size]]) {
-        CGSize actual=value.CGSizeValue;
-        if (fabs(actual.width-target.width)>=0.5 || fabs(actual.height-target.height)>=0.5) return;
-    }
-    NSString *stamp=[NSString stringWithFormat:@"%@/%@/%@/%p",sid,NSStringFromCGSize(target),NSStringFromUIEdgeInsets(root.safeAreaInsets),(__bridge void *)root];
-    if ([objc_getAssociatedObject(w,&TAYoutubeLayoutStamp) isEqual:stamp] ||
-        [objc_getAssociatedObject(w,&TAYoutubeLayoutQueued) boolValue]) return;
+    if (!TAYoutubeSizeMatches(w.windowScene.coordinateSpace.bounds.size,target) ||
+        !TAYoutubeSizeMatches(w.bounds.size,target)) return;
+    if ([objc_getAssociatedObject(w,&TAYoutubeLayoutQueued) boolValue]) return;
+    NSString *stamp=[NSString stringWithFormat:@"%@/%llu/%p",sid,(unsigned long long)packed,(__bridge void *)root];
+    BOOL same=[objc_getAssociatedObject(w,&TAYoutubeLayoutStamp) isEqual:stamp];
+    NSUInteger attempts=same ? [objc_getAssociatedObject(w,&TAYoutubeAttempts) unsignedIntegerValue] : 0;
+    if (same && TAYoutubeSizeMatches(root.bounds.size,target)) return;
+    if (attempts>=3) return; // Never fight an app that keeps resetting its root.
     objc_setAssociatedObject(w,&TAYoutubeLayoutStamp,stamp,OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(w,&TAYoutubeAttempts,@(attempts+1),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(w,&TAYoutubeLayoutQueued,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     dispatch_async(dispatch_get_main_queue(), ^{
-        objc_setAssociatedObject(w,&TAYoutubeLayoutQueued,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        uint64_t current=0;
-        if (notify_get_state(token,&current)!=NOTIFY_STATUS_OK || current!=packed || w.rootViewController.viewIfLoaded!=root) {
-            objc_setAssociatedObject(w,&TAYoutubeLayoutStamp,nil,OBJC_ASSOCIATION_COPY_NONATOMIC); return;
-        }
-        NSUInteger budget=100; TAInvalidateTree(root,0,&budget); [root layoutIfNeeded];
-        TALog(@"YOUTUBE CLIENT RELAYOUT target=%@ window=%@ root=%@ safe=%@",
-              NSStringFromCGSize(target),NSStringFromCGRect(w.bounds),NSStringFromCGRect(root.bounds),
-              NSStringFromUIEdgeInsets(root.safeAreaInsets));
+        @try {
+            uint64_t current=0;
+            if (notify_get_state(token,&current)!=NOTIFY_STATUS_OK || current!=packed ||
+                w.rootViewController.viewIfLoaded!=root ||
+                !TAYoutubeSizeMatches(w.bounds.size,target) ||
+                !TAYoutubeSizeMatches(w.windowScene.coordinateSpace.bounds.size,target)) return;
+            CGRect before=root.frame;
+            BOOL direct=root.superview==w && root.translatesAutoresizingMaskIntoConstraints &&
+                CGAffineTransformIsIdentity(root.transform);
+            if (direct) {
+                if (!objc_getAssociatedObject(root,&TAYoutubeMask))
+                    objc_setAssociatedObject(root,&TAYoutubeMask,@(root.autoresizingMask),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                root.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+                root.frame=w.bounds;
+            }
+            NSUInteger budget=100; TAInvalidateTree(root,0,&budget);
+            [w setNeedsLayout]; [w layoutIfNeeded]; [root layoutIfNeeded];
+            TALog(@"YOUTUBE ROOT SYNC direct=%d attempt=%lu target=%@ before=%@ after=%@ parent=%@",
+                  direct,(unsigned long)(attempts+1),NSStringFromCGSize(target),NSStringFromCGRect(before),
+                  NSStringFromCGRect(root.frame),NSStringFromClass(root.superview.class));
+        } @finally { objc_setAssociatedObject(w,&TAYoutubeLayoutQueued,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     });
 }
 static void TAListenYouTubeTarget(void) {
@@ -1289,6 +1313,11 @@ static void TAVisibleTransition(UIViewController *vc) {
 
 %group TAClient
 %hook UIViewController
+- (void)viewDidLayoutSubviews {
+    %orig;
+    UIWindow *w=self.viewIfLoaded.window;
+    if (w.rootViewController==self) TAYoutubeClientLayout(w);
+}
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     TAVisibleTransition(self);
