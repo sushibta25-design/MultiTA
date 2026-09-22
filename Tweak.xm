@@ -1,4 +1,4 @@
-// TAduo 0.10.9: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.10: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.9] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.10] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -61,6 +61,7 @@ static UIButton *choose[2];
 static UIWindow *splitWindow, *buttonWindow;
 static UIView *floatingActions;
 static UIView *dividerView;
+static const CGFloat TADividerGap=20;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static BOOL dividerDragging=NO;
 static CGPoint entryDragStart;
@@ -238,7 +239,6 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 @property(nonatomic) NSInteger iconSlot;
 @property(nonatomic) NSUInteger iconPage;
 @property(nonatomic) NSUInteger iconToken;
-- (void)offerNative:(NSString *)bundle;
 - (void)replace:(NSString *)bundle slot:(NSInteger)slot;
 - (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
 - (void)checkPresentation:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
@@ -292,11 +292,11 @@ static UIImage *TASplitIcon(void) {
 }
 - (void)layoutSplit:(BOOL)commit {
     if (!running) return;
-    CGFloat available=splitWindow.bounds.size.width-4, height=splitWindow.bounds.size.height;
-    CGFloat left=available*splitRatio, center=left+2;
+    CGFloat available=splitWindow.bounds.size.width-TADividerGap, height=splitWindow.bounds.size.height;
+    CGFloat left=available*splitRatio, center=left+TADividerGap/2;
     panes[0].frame=CGRectMake(0,0,left,height);
-    panes[1].frame=CGRectMake(left+4,0,available-left,height);
-    dividerView.frame=CGRectMake(center-10,0,20,height);
+    panes[1].frame=CGRectMake(left+TADividerGap,0,available-left,height);
+    dividerView.frame=CGRectMake(left,(height-56)/2,TADividerGap,56);
     floatingActions.frame=CGRectMake(MAX(0,MIN(center-78,splitWindow.bounds.size.width-156)),height/2-15,156,30);
     for (NSInteger i=0;i<2;i++) {
         choose[i].frame=panes[i].bounds;
@@ -317,7 +317,7 @@ static UIImage *TASplitIcon(void) {
         dividerDragging=YES; dragStartRatio=splitRatio; [self showChrome];
         floatingActions.hidden=YES;
     }
-    CGFloat available=splitWindow.bounds.size.width-4;
+    CGFloat available=splitWindow.bounds.size.width-TADividerGap;
     if (available<=0) return;
     if (gesture.state==UIGestureRecognizerStateBegan || gesture.state==UIGestureRecognizerStateChanged || gesture.state==UIGestureRecognizerStateEnded) {
         CGFloat minimum=MIN(140,available/2);
@@ -358,20 +358,12 @@ static UIImage *TASplitIcon(void) {
     floatingActions.hidden=YES; buttonWindow.hidden=running || !dashboard;
 }
 - (void)touchActivity:(UIEvent *)event {
-    BOOL active=NO, touched=NO;
+    if (!running || floatingActions.hidden) return;
     for (UITouch *touch in event.allTouches) {
-        UIWindow *w=touch.window;
-        if (!w || w.windowScene!=dashboard) continue;
-        touched=YES;
-        if (touch.phase==UITouchPhaseBegan || touch.phase==UITouchPhaseMoved || touch.phase==UITouchPhaseStationary) active=YES;
+        if (touch.window.windowScene!=dashboard || touch.phase!=UITouchPhaseBegan) continue;
+        if ([touch.view isDescendantOfView:floatingActions]) [self showChrome];
+        else if (![touch.view isDescendantOfView:dividerView]) floatingActions.hidden=YES;
     }
-    if (!touched) return;
-    for (UITouch *touch in event.allTouches) {
-        if (touch.phase==UITouchPhaseBegan && touch.window==splitWindow && ![touch.view isDescendantOfView:floatingActions] && ![touch.view isDescendantOfView:dividerView])
-            floatingActions.hidden=YES;
-    }
-    [self showChrome];
-    if (active) [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideChrome) object:nil];
 }
 - (void)stop { [self closeIcons]; TAStop(@"user"); [self showChrome]; }
 - (void)toggleActions { if (splitWindow.rootViewController.presentedViewController) return; [self showChrome]; floatingActions.hidden = !floatingActions.hidden; }
@@ -398,11 +390,10 @@ static UIImage *TASplitIcon(void) {
     splitWindow = [[UIWindow alloc] initWithWindowScene:dashboard];
     splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
     splitWindow.rootViewController = [UIViewController new];
-    UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.blackColor;
-    // Both scenes occupy full display height. Only floating button hit areas
-    // cover content; no toolbar strip is reserved in scene geometry.
+    UIView *root = splitWindow.rootViewController.view; root.backgroundColor = [UIColor colorWithRed:0.94 green:0.94 blue:0.92 alpha:1];
+    // Full-height panes with a dedicated gap. Divider hit area never overlaps either app.
     CGFloat half = bounds.size.width / 2;
-    CGFloat gap=4, paneWidth=(bounds.size.width-gap)/2;
+    CGFloat gap=TADividerGap, paneWidth=(bounds.size.width-gap)/2;
     for (NSInteger i = 0; i < 2; i++) {
         panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * (paneWidth+gap), 0, paneWidth, bounds.size.height)];
         panes[i].layer.cornerRadius=6;
@@ -410,8 +401,11 @@ static UIImage *TASplitIcon(void) {
         choose[i] = TAButton(i == 0 ? @"Chọn app trái" : @"Chọn app phải", @selector(pick:));
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
-    dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-10,0,20,bounds.size.height)];
+    dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-TADividerGap/2,(bounds.size.height-56)/2,TADividerGap,56)];
     dividerView.backgroundColor=UIColor.clearColor;
+    UIView *grip=[[UIView alloc] initWithFrame:CGRectMake((TADividerGap-4)/2,14,4,28)];
+    grip.backgroundColor=[UIColor colorWithWhite:0.35 alpha:1]; grip.layer.cornerRadius=2;
+    grip.userInteractionEnabled=NO; [dividerView addSubview:grip];
     UIPanGestureRecognizer *drag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
     drag.maximumNumberOfTouches=1; drag.delegate=self; [dividerView addGestureRecognizer:drag];
     UITapGestureRecognizer *tap=[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleActions)];
@@ -521,23 +515,6 @@ static UIImage *TASplitIcon(void) {
     picker.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
     [self renderIcons];
     [splitWindow.rootViewController presentViewController:picker animated:NO completion:nil];
-}
-- (void)offerNative:(NSString *)bundle {
-    if (!running || !records[bundle] || TAAttachPending() || [slots[0].bundle isEqual:bundle] || [slots[1].bundle isEqual:bundle]) return;
-    if (splitWindow.rootViewController.presentedViewController) { TALog(@"NATIVE OFFER deferred to picker bundle=%@",bundle); return; }
-    floatingActions.hidden=YES;
-    UIAlertController *picker=[UIAlertController alertControllerWithTitle:([bundle isEqual:@"vn.vietmap.live"] ? @"Vietmap Live" : ([bundle isEqual:@"com.google.ios.youtube"] ? @"YouTube" : @"Ứng dụng vừa mở")) message:@"Đưa app vào bên nào?" preferredStyle:UIAlertControllerStyleAlert];
-    NSUInteger token=generation;
-    for (NSInteger side=0;side<2;side++) {
-        [picker addAction:[UIAlertAction actionWithTitle:side==0 ? @"Bên trái" : @"Bên phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (running && generation==token) [self replace:bundle slot:side];
-            });
-        }]];
-    }
-    [picker addAction:[UIAlertAction actionWithTitle:@"Giữ nguyên" style:UIAlertActionStyleCancel handler:nil]];
-    TALog(@"NATIVE OFFER bundle=%@",bundle);
-    [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
 }
 - (void)replace:(NSString *)bundle slot:(NSInteger)slot {
     if (!running || slot<0 || slot>1 || !records[bundle]) return;
@@ -931,7 +908,7 @@ static void TATemplateLayout(UIWindow *w) {
             // Keep top/bottom navigation regions intact. Do not patch children.
             CGFloat left = MAX(0, before.left-root.additionalSafeAreaInsets.left);
             CGFloat right = MAX(0, before.right-root.additionalSafeAreaInsets.right);
-            CGFloat limit = w.bounds.size.width * 0.25;
+            CGFloat limit = MIN(64, w.screen.bounds.size.width * 0.25);
             if (left <= limit) desired.left -= left;
             if (right <= limit) desired.right -= right;
             root.additionalSafeAreaInsets = desired;
@@ -1137,7 +1114,7 @@ static void TAVisibleTransition(UIViewController *vc) {
                         return;
                     }
                 }
-                if (activation[@"DBActivationSettingLaunchSource"] || [lateBundle isEqual:@"vn.vietmap.live"]) [controls offerNative:lateBundle];
+                // Record native apps silently. Only the user picker chooses a split slot.
             }
         });
     }
