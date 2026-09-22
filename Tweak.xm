@@ -1,4 +1,4 @@
-// TAduo 0.10.22: resume the previous split and Vietnamese Telex input.
+// MultiTA 0.10.23: resume the previous split and Vietnamese Telex input.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -10,13 +10,13 @@ static void TALog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *s = [[NSString alloc] initWithFormat:format arguments:args]; va_end(args);
     @synchronized (NSFileManager.defaultManager) {
-        NSString *path = [NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/TAduo-template.log" : @"/var/mobile/TAduo.log";
+        NSString *path = [NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-template.log" : @"/var/mobile/MultiTA.log";
         NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
         if ([attrs fileSize] > 1024 * 1024) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.22] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [MultiTA 0.10.23] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -65,6 +65,8 @@ static void TAHideSideActions(void) {
     for (NSInteger i=0;i<2;i++) sideActions[i].hidden=YES;
 }
 static UIView *dividerView;
+static UIView *splitShortcut;
+static UILabel *dividerFeedback;
 static UIControl *gapTouchShield;
 static const CGFloat TADividerGap=4;
 static const CGFloat TADividerHitWidth=18;
@@ -73,6 +75,13 @@ static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static NSString *resumeBundles[2];
 static CGFloat resumeRatio=0.5;
 static BOOL dividerDragging=NO;
+static void TADividerFeedback(BOOL active) {
+    [UIView animateWithDuration:0.12 delay:0 options:UIViewAnimationOptionBeginFromCurrentState|UIViewAnimationOptionAllowUserInteraction animations:^{
+        dividerFeedback.alpha=active ? 1 : 0;
+        gapTouchShield.backgroundColor=active ? [UIColor colorWithRed:0 green:0.75 blue:0.95 alpha:1] : UIColor.blackColor;
+        splitShortcut.alpha=active ? 0.7 : 1;
+    } completion:nil];
+}
 static CGPoint entryDragStart;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
@@ -86,6 +95,8 @@ static BOOL TAYoutubeClientReady(CGSize target);
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     // Modal picker and visible menu keep their normal priority.
     if (self.rootViewController.presentedViewController) return [super hitTest:point withEvent:event];
+    if (splitShortcut && !splitShortcut.hidden && [splitShortcut pointInside:[splitShortcut convertPoint:point fromView:self] withEvent:event])
+        return [splitShortcut hitTest:[splitShortcut convertPoint:point fromView:self] withEvent:event];
     for (NSInteger i=0;i<2;i++) {
         UIButton *b=sideActions[i];
         if (b && !b.hidden && [b pointInside:[b convertPoint:point fromView:self] withEvent:event])
@@ -239,6 +250,9 @@ static void TAStop(NSString *reason) {
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; sideActions[i]=nil; }
     ownCall = previous;
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil; dividerView=nil; gapTouchShield=nil; dividerDragging=NO;
+    splitShortcut=nil; dividerFeedback=nil;
+    CGRect screen=dashboard.coordinateSpace.bounds;
+    buttonWindow.frame=CGRectMake(CGRectGetMinX(screen)+(screen.size.width-4)*resumeRatio+2-22,CGRectGetMinY(screen)+4,44,40);
     buttonWindow.hidden = !dashboard;
 }
 static BOOL TAHasHostedSurface(CALayer *layer, NSUInteger depth, NSInteger *budget) {
@@ -283,6 +297,7 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 - (void)checkPresentation:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
 - (void)settleYouTube:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt stable:(NSUInteger)stable;
 - (void)dragDivider:(UIPanGestureRecognizer *)gesture;
+- (void)pressDivider:(UILongPressGestureRecognizer *)gesture;
 - (void)layoutSplit:(BOOL)commit;
 - (void)dragEntry:(UIPanGestureRecognizer *)gesture;
 - (void)showChrome;
@@ -358,6 +373,13 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     return result;
 }
 @implementation TAControls
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)first shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)second {
+    return first.view==second.view && ([first isKindOfClass:UILongPressGestureRecognizer.class] || [second isKindOfClass:UILongPressGestureRecognizer.class]);
+}
+- (void)pressDivider:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state==UIGestureRecognizerStateBegan) TADividerFeedback(YES);
+    if ((gesture.state==UIGestureRecognizerStateEnded || gesture.state==UIGestureRecognizerStateCancelled || gesture.state==UIGestureRecognizerStateFailed) && !dividerDragging) TADividerFeedback(NO);
+}
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
     if (!running || TAAttachPending() || splitWindow.rootViewController.presentedViewController) return NO;
     if ([gesture isKindOfClass:UIPanGestureRecognizer.class]) {
@@ -374,7 +396,9 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     panes[1].frame=CGRectMake(left+TADividerGap,0,available-left,height);
     gapTouchShield.frame=CGRectMake(left,0,TADividerGap,height);
     dividerView.frame=CGRectMake(center-TADividerHitWidth/2,(height-TADividerHitHeight)/2,TADividerHitWidth,TADividerHitHeight);
-    floatingActions.frame=CGRectMake(MAX(0,MIN(center-78,splitWindow.bounds.size.width-156)),height/2-15,156,30);
+    splitShortcut.frame=CGRectMake(center-22,4,44,40);
+    dividerFeedback.frame=CGRectMake(center-30,height/2-16,60,32);
+    floatingActions.frame=CGRectMake(MAX(0,MIN(center-78,splitWindow.bounds.size.width-156)),48,156,30);
     for (NSInteger i=0;i<2;i++) {
         choose[i].frame=panes[i].bounds;
         sideActions[i].frame=CGRectMake(CGRectGetMidX(panes[i].frame)-22,CGRectGetMidY(panes[i].frame)-22,44,44);
@@ -393,6 +417,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     if (!running || TAAttachPending()) return;
     if (gesture.state==UIGestureRecognizerStateBegan) {
         dividerDragging=YES; dragStartRatio=splitRatio; [self showChrome];
+        TADividerFeedback(YES);
         floatingActions.hidden=YES;
         TAHideSideActions();
     }
@@ -409,6 +434,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     }
     if (gesture.state==UIGestureRecognizerStateEnded || gesture.state==UIGestureRecognizerStateCancelled || gesture.state==UIGestureRecognizerStateFailed) {
         dividerDragging=NO; [self showChrome];
+        TADividerFeedback(NO);
     }
 }
 - (void)dragEntry:(UIPanGestureRecognizer *)gesture {
@@ -501,15 +527,31 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     gapTouchShield.userInteractionEnabled=YES; [root addSubview:gapTouchShield];
     dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-TADividerHitWidth/2,(bounds.size.height-TADividerHitHeight)/2,TADividerHitWidth,TADividerHitHeight)];
     dividerView.backgroundColor=UIColor.clearColor;
-    UIView *grip=[[UIView alloc] initWithFrame:CGRectMake((TADividerHitWidth-3)/2,(TADividerHitHeight-20)/2,3,20)];
-    grip.backgroundColor=[UIColor colorWithWhite:1 alpha:0.65]; grip.layer.cornerRadius=1.5;
-    grip.userInteractionEnabled=NO; [dividerView addSubview:grip];
     UIPanGestureRecognizer *drag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
     drag.maximumNumberOfTouches=1; drag.delegate=self; [dividerView addGestureRecognizer:drag];
     UITapGestureRecognizer *tap=[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleActions)];
     [tap requireGestureRecognizerToFail:drag]; [dividerView addGestureRecognizer:tap];
     dividerView.accessibilityLabel=@"Chạm mở tác vụ, kéo để chia màn";
     [root addSubview:dividerView];
+    splitShortcut=[UIView new]; splitShortcut.backgroundColor=UIColor.clearColor;
+    UIImageView *logo=[[UIImageView alloc] initWithImage:TASplitIcon()];
+    logo.frame=CGRectMake(7,8,30,24); logo.userInteractionEnabled=NO; [splitShortcut addSubview:logo];
+    splitShortcut.accessibilityLabel=@"MultiTA: chạm mở tác vụ, kéo để chia màn";
+    splitShortcut.isAccessibilityElement=YES;
+    [root addSubview:splitShortcut];
+    UIPanGestureRecognizer *topDrag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
+    topDrag.maximumNumberOfTouches=1; topDrag.delegate=self; [splitShortcut addGestureRecognizer:topDrag];
+    UITapGestureRecognizer *topTap=[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleActions)];
+    [topTap requireGestureRecognizerToFail:topDrag]; [splitShortcut addGestureRecognizer:topTap];
+    for (UIView *handle in @[dividerView,splitShortcut]) {
+        UILongPressGestureRecognizer *press=[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(pressDivider:)];
+        press.minimumPressDuration=0; press.cancelsTouchesInView=NO; press.delegate=self;
+        [handle addGestureRecognizer:press];
+    }
+    dividerFeedback=[UILabel new]; dividerFeedback.text=@"‹   ›"; dividerFeedback.textAlignment=NSTextAlignmentCenter;
+    dividerFeedback.font=[UIFont boldSystemFontOfSize:26]; dividerFeedback.textColor=UIColor.whiteColor;
+    dividerFeedback.backgroundColor=[UIColor colorWithWhite:0 alpha:0.75]; dividerFeedback.layer.cornerRadius=10;
+    dividerFeedback.clipsToBounds=YES; dividerFeedback.alpha=0; dividerFeedback.userInteractionEnabled=NO; [root addSubview:dividerFeedback];
     floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-78,bounds.size.height/2-15,156,30)];
     floatingActions.backgroundColor = UIColor.clearColor;
     NSArray *titles = @[@"", @"", @""];
@@ -684,7 +726,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
         if (!running || slots[slot]!=r || !r.frameCaptured) @throw [NSException exceptionWithName:@"SceneNotReady" reason:r.bundle userInfo:nil];
         SEL create=NSSelectorFromString(@"presentationViewWithIdentifier:");
         if (![r.controller respondsToSelector:create]) @throw [NSException exceptionWithName:@"MissingPresentationAPI" reason:r.bundle userInfo:nil];
-        r.presentationID=[NSString stringWithFormat:@"com.sushibta.taduo.%lu.%ld.%lu",(unsigned long)token,(long)slot,(unsigned long)request];
+        r.presentationID=[NSString stringWithFormat:@"com.sushibta.multita.%lu.%ld.%lu",(unsigned long)token,(long)slot,(unsigned long)request];
         id v=((id(*)(id,SEL,id))objc_msgSend)(r.controller,create,r.presentationID);
         if (![v isKindOfClass:UIView.class] || ((UIView *)v).superview) @throw [NSException exceptionWithName:@"NotIndependent" reason:r.bundle userInfo:nil];
         r.presentation=v; r.presentation.transform=CGAffineTransformIdentity; r.presentation.frame=panes[slot].bounds;
@@ -854,12 +896,14 @@ static void TATick(void) {
     if (s && !buttonWindow) {
         buttonWindow=[[UIWindow alloc] initWithWindowScene:s];
         buttonWindow.windowLevel=UIWindowLevelAlert+80;
-        buttonWindow.frame=CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-40,4,36,32);
+        CGRect screen=s.coordinateSpace.bounds;
+        buttonWindow.frame=CGRectMake(CGRectGetMinX(screen)+(screen.size.width-4)*resumeRatio+2-22,CGRectGetMinY(screen)+4,44,40);
+        buttonWindow.backgroundColor=UIColor.clearColor; buttonWindow.opaque=NO;
         buttonWindow.rootViewController=[UIViewController new];
         buttonWindow.rootViewController.view.backgroundColor=UIColor.clearColor;
         UIButton *entry=TAButton(@"",@selector(enter));
         [entry setImage:TASplitIcon() forState:UIControlStateNormal];
-        entry.frame=buttonWindow.bounds; entry.layer.cornerRadius=8;
+        entry.frame=buttonWindow.bounds; entry.backgroundColor=UIColor.clearColor; entry.layer.borderWidth=0;
         entry.accessibilityLabel=@"Chia màn hình; kéo để di chuyển";
         UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragEntry:)];
         pan.maximumNumberOfTouches=1; [entry addGestureRecognizer:pan];
@@ -872,13 +916,13 @@ static void TATick(void) {
 // Darwin state channels carry only dimensions, never application content.
 // The host logs receipt as an observation, not proof of correct app layout.
 static NSString *TAChannel(NSString *bundle, NSString *kind) {
-    return [NSString stringWithFormat:@"com.sushibta.taduo.geometry.%@.%@", bundle, kind];
+    return [NSString stringWithFormat:@"com.sushibta.multita.geometry.%@.%@", bundle, kind];
 }
 static NSArray<NSString *> *TAClientBundles(void) {
     return @[@"com.apple.Maps", @"com.google.Maps", @"com.google.ios.youtube", @"com.google.ios.youtubemusic", @"vn.vietmap.live"];
 }
 // The layout experiment is enabled only for the exact scene dimensions
-// currently owned by TAduo. No global narrow-screen heuristics.
+// currently owned by MultiTA. No global narrow-screen heuristics.
 static int TATargetToken(NSString *bundle) {
     static NSMutableDictionary *tokens;
     if (!tokens) tokens = [NSMutableDictionary new];
@@ -893,7 +937,7 @@ static void TASetLayoutTarget(NSString *bundle, CGSize size) {
     uint64_t packed = ((uint64_t)llround(size.width * 4) << 32) | (uint32_t)llround(size.height * 4);
     if (notify_set_state(token, packed) == NOTIFY_STATUS_OK) {
         notify_post(TAChannel(bundle, @"layout-target").UTF8String);
-        notify_post("com.sushibta.taduo.template-targets-changed");
+        notify_post("com.sushibta.multita.template-targets-changed");
     }
 }
 static BOOL TATemplateTarget(UIWindow *w, NSString **bundleOut) {
@@ -1117,7 +1161,7 @@ static void TAYoutubeFitControllerRoots(UIViewController *parent, NSUInteger dep
 }
 static int TAYoutubeReadyToken(void) {
     static int token=-1; static dispatch_once_t once;
-    dispatch_once(&once, ^{ notify_register_check("com.sushibta.taduo.youtube-ready",&token); });
+    dispatch_once(&once, ^{ notify_register_check("com.sushibta.multita.youtube-ready",&token); });
     return token;
 }
 static BOOL TAYoutubeClientReady(CGSize target) {
@@ -1335,7 +1379,7 @@ static void TACompactGoogleBar(UIView *bar) {
 }
 static void TAListenTemplateTargets(void) {
     int token;
-    notify_register_dispatch("com.sushibta.taduo.template-targets-changed", &token, dispatch_get_main_queue(), ^(__unused int delivered) {
+    notify_register_dispatch("com.sushibta.multita.template-targets-changed", &token, dispatch_get_main_queue(), ^(__unused int delivered) {
         for (UITabBar *bar in TACompactTabBars.allObjects) TACompactTabs(bar);
         for (UIView *cell in TAImageRows.allObjects) TACompactImageRow(cell);
         for (UIView *bar in TAGoogleBars.allObjects) {

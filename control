@@ -1,10 +1,12 @@
-Package: com.sushibta.taduo
-Name: TAduo
-Version: 0.10.22
+Package: com.sushibta.multita
+Name: MultiTA
+Version: 0.10.23
 Architecture: iphoneos-arm64
-Description: Experimental fixed 50/50 CarPlay scenes with native geometry requests.
+Description: MultiTA CarPlay split screen with shared Vietnamese keyboard.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
 Depends: mobilesubstrate, firmware (>= 15.0)
-Conflicts: com.sushibta.duophone
+Conflicts: com.sushibta.duophone, com.sushibta.taduo
+Replaces: com.sushibta.taduo
+Provides: com.sushibta.taduo

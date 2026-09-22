@@ -1,21 +1,29 @@
-# TAduo 0.10.16
+# MultiTA 0.10.23
+
+Logo xanh/cam nền trong suốt ở đỉnh khe chia. Chạm logo để mở tác vụ, kéo ngang để chỉnh tỷ lệ. Bỏ vạch trắng giữa khe; hiệu ứng mũi tên và màu khe chỉ hiện khi chạm/kéo. Gói Dopamine rootless: com.sushibta.multita; thay thế com.sushibta.taduo để tránh nạp hai tweak. Log mới: /var/mobile/MultiTA.log và /var/mobile/MultiTA-template.log. Cần respring và mở lại các app sau khi đổi tên gói.
+
+Kiểm tra thiết bị: logo trên Home và trong chia; chạm menu; kéo và hủy kéo; đổi app từng bên; bàn phím và thoát/mở lại. Build CI không thay thế kiểm tra trên CarPlay.
+
+## Lịch sử phát triển
+
+# MultiTA 0.10.16
 
 Sửa YouTube root giữ width cũ dù scene/window đã đổi: chỉ đồng bộ frame khi root nằm trực tiếp trong cửa sổ CarPlay, dùng autoresizing và transform identity. Giữ xử lý constraints/native layout cho root khác. Tối đa 3 lần mỗi target/root, không timer lặp; khôi phục autoresizing khi thoát. Log YOUTUBE ROOT SYNC ghi before/after và direct để xác nhận nhánh sửa có áp dụng.
 
 Cần test 50/50, kéo rộng/hẹp, đổi bên, thoát chia. Không xác nhận fix crash; giữ các sửa Google Maps và media template của 0.10.15.
 
-# TAduo 0.10.15
+# MultiTA 0.10.15
 
 - YouTube: invalidate layout/collection layout một lần mỗi geometry/safe-area/root khi scene, window và root đã khớp target; không ép frame hay scale. Log YOUTUBE CLIENT RELAYOUT. Cần xác nhận thực tế vì layout riêng của YouTube có thể vẫn cần xử lý thêm.
 
 - Google Maps: thử thu gọn chữ tiêu đề navigation bar, dành chỗ cho nút; giữ nguyên font, icon và xử lý cảm ứng native. Khôi phục chữ khi thoát chia.
-- Mở rộng resize template cho app mới có scene CarPlay đang được TAduo chia: bỏ danh sách cố định tại kiểm tra target, dùng thông báo chung để cập nhật và khôi phục.
+- Mở rộng resize template cho app mới có scene CarPlay đang được MultiTA chia: bỏ danh sách cố định tại kiểm tra target, dùng thông báo chung để cập nhật và khôi phục.
 - Tab title và CPSImageRowCell dùng chung cho app template phù hợp; vẫn kiểm tra cấu trúc hàng ảnh và constraints trước khi sửa. Không inject thêm vào app iPhone.
 - Giữ divider đen và bước hiển thị YouTube từ 0.10.14.
 
 Cần test: Google Maps tìm kiếm ở cả hai bên và khi kéo divider; app nhạc khác tab/ảnh bìa; thoát chia khôi phục giao diện. Chưa đảm bảo app giao diện riêng hoặc CarBridge tự bố trí nội dung giống app template.
 
-# TAduo 0.10.14
+# MultiTA 0.10.14
 
 - Nền chia và khe divider đen, đục ngay trước khi hiện hai ô chọn app. Vùng chạm divider vẫn chặn app phía dưới.
 - Riêng YouTube: giữ ô Đang mở phía trước presentation đang chạy ít nhất 1,25 giây; hiện khi geometry host khớp liên tiếp, tối đa chờ 3 giây. Không gửi lại foreground/resize trong bước chờ này.
@@ -24,19 +32,19 @@ Cần test: Google Maps tìm kiếm ở cả hai bên và khi kéo divider; app 
 
 Test: mở chia trước khi chọn app, khe phải đen; chọn YouTube mỗi bên, kiểm tra nhảy kích thước; thoát trong lúc Đang mở rồi mở lại. Log có YOUTUBE REVEAL.
 
-# TAduo 0.2.0 — thử nghiệm 50/50
+# MultiTA 0.2.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
 
 ## Cài và thử
 
 - Dành cho Dopamine rootless, iOS 15 trở lên; cần kiểm chứng thực tế trên iOS của thiết bị.
-- Giữ DEB Duophone cũ để quay lại. Gỡ Duophone trước khi cài TAduo; hai gói khai báo xung đột để tránh cùng hook. Tắt MiniTa/DuoDash và các tweak chia màn hình khác trong lần test này.
+- Giữ DEB Duophone cũ để quay lại. Gỡ Duophone trước khi cài MultiTA; hai gói khai báo xung đột để tránh cùng hook. Tắt MiniTa/DuoDash và các tweak chia màn hình khác trong lần test này.
 - Kết nối CarPlay, mở Maps rồi YouTube Music từ dock mỗi app một lần.
-- Chạm TAduo, chọn app cho từng ô. Có thể chọn ô phải trước.
+- Chạm MultiTA, chọn app cho từng ô. Có thể chọn ô phải trước.
 - Hai ô bằng nhau, nằm dưới thanh Thoát cao 32pt. Không kéo divider ở bản này.
 - Chạm Thoát để trả geometry đã lưu và hủy presentation riêng.
-- Gửi ảnh hai ô và /var/mobile/TAduo.log; nếu có log .1 thì gửi kèm.
+- Gửi ảnh hai ô và /var/mobile/MultiTA.log; nếu có log .1 thì gửi kèm.
 
 ## Tiêu chí test thiết bị
 
@@ -49,13 +57,13 @@ Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 
 
 Đây là bản thử nghiệm, không phải bản hoàn chỉnh. Scene frame được cập nhật không chứng minh client đã relayout. Không có vòng ép foreground hay sửa safe-area để che lỗi. App nền có thể ngừng vẽ; log NATIVE BACKGROUND giúp phân biệt lỗi vòng đời và lỗi geometry. Mỗi app nhận một yêu cầu resize với fallback có giới hạn khi callback từ chối setter. Log xoay ở khoảng 1 MiB, giữ một bản trước.
 
-Source cũ và DEB đối chiếu: https://github.com/sushibta25-design/TAduo/actions/runs/34929416564
+Source cũ và DEB đối chiếu: https://github.com/sushibta25-design/MultiTA/actions/runs/34929416564
 
 ## Thay đổi 0.2
 
 - Yêu cầu geometry qua updateSettingsWithBlock trước khi tạo presentation. Chỉ chuyển sang updateUISettingsWithBlock khi thiếu API hoặc callback từ chối setter. Callback không tới thì báo lỗi, không chồng giao dịch.
 - Sau giao dịch, gọi refresh scene/presentation có kiểm tra chữ ký hàm; không giả callback hệ thống và không scale ảnh.
-- Quan sát scene/window/root bounds thật trong Maps, Google Maps, YouTube, YouTube Music, Vietmap và TemplateUIHost. Gửi kích thước qua Darwin notification về TAduo.log. Client hook chỉ đọc; không sửa bounds/safe-area/traits.
+- Quan sát scene/window/root bounds thật trong Maps, Google Maps, YouTube, YouTube Music, Vietmap và TemplateUIHost. Gửi kích thước qua Darwin notification về MultiTA.log. Client hook chỉ đọc; không sửa bounds/safe-area/traits.
 - CLIENT match=1 chỉ nói kích thước khớp, không chứng minh nút không bị cắt hoặc touch đúng. Không có dòng CLIENT cũng không chứng minh geometry sai (injection/role/notification có thể không phù hợp).
 - Cần đóng/mở lại app sau cài để hook phía app được nạp. Giữ hai ô mặc định; test Maps + YouTube Music trước, sau đó Google Maps + YouTube.
 - Chưa có log thiết bị của bản 0.1: đường giao dịch mới là thử nghiệm, chưa xác nhận giải quyết lỗi trong ảnh của người dùng.
@@ -64,11 +72,11 @@ Source cũ và DEB đối chiếu: https://github.com/sushibta25-design/TAduo/ac
 
 Log 0.2 của thiết bị xác nhận scene/window/root đã nhận 213.33 x 208 điểm; ảnh vẫn chồng chữ. Giữ nguyên đường geometry này.
 
-0.3 chỉ bật chỉnh layout trong CARTemplateUIApplicationSceneViewController khi scene khớp đúng kích thước mà phiên TAduo đang yêu cầu. Bù phần safe-area ngang kế thừa ở root (giới hạn 25% chiều rộng mỗi cạnh), giữ nguyên top/bottom, làm mới constraints và collection layout có giới hạn. Không đặt frame từng nút, không sửa cỡ chữ, không ép trait hoặc screen.bounds. Khôi phục additionalSafeAreaInsets đã lưu khi thoát.
+0.3 chỉ bật chỉnh layout trong CARTemplateUIApplicationSceneViewController khi scene khớp đúng kích thước mà phiên MultiTA đang yêu cầu. Bù phần safe-area ngang kế thừa ở root (giới hạn 25% chiều rộng mỗi cạnh), giữ nguyên top/bottom, làm mới constraints và collection layout có giới hạn. Không đặt frame từng nút, không sửa cỡ chữ, không ép trait hoặc screen.bounds. Khôi phục additionalSafeAreaInsets đã lưu khi thoát.
 
 Đây là thử nghiệm có giả thuyết safe-area/layout cache, chưa chứng minh nguyên nhân duy nhất hay đã sửa chồng chữ. Phác họa giao diện là mục tiêu, không phải cam kết rằng template hệ thống hỗ trợ bố cục đó ở chiều rộng 213 điểm.
 
-Cài 0.3, respring và mở lại app. Test YouTube Music + Google Maps. Gửi ảnh và cả /var/mobile/TAduo.log lẫn /var/mobile/TAduo-template.log. Log template ghi safe-area, traits và tối đa 60 view sau một lần áp dụng; không ghi nội dung bài hát/tìm kiếm. Mỗi file xoay khoảng 1 MiB, giữ một bản cũ.
+Cài 0.3, respring và mở lại app. Test YouTube Music + Google Maps. Gửi ảnh và cả /var/mobile/MultiTA.log lẫn /var/mobile/MultiTA-template.log. Log template ghi safe-area, traits và tối đa 60 view sau một lần áp dụng; không ghi nội dung bài hát/tìm kiếm. Mỗi file xoay khoảng 1 MiB, giữ một bản cũ.
 
 ## 0.4 — full chiều cao
 
@@ -78,15 +86,15 @@ Bỏ thanh tiêu đề 32pt. Hai ô bắt đầu ở y=0 và nhận toàn bộ c
 
 Giữ geometry 213.33 x 240 đã được xác nhận trên thiết bị. Thu Chia/Thoát vào nút ••• ở chính giữa màn, trên đường chia hai app; thêm Log để chụp trạng thái layout đang hiển thị. Nút nổi nhỏ vẫn có vùng che nội dung.
 
-Khi controller của template xuất hiện trong scene TAduo đang quản lý, yêu cầu làm mới constraints/collection layout một lần, ghi cây view sau 400ms. Log sâu tối đa 14 tầng/180 view để tới nhãn Đang phát; ghi font, số dòng, intrinsic size, không ghi nội dung text. Có giới hạn trùng sự kiện và xoay file. Đây chưa phải bản sửa trực tiếp font/frame của màn Đang phát.
+Khi controller của template xuất hiện trong scene MultiTA đang quản lý, yêu cầu làm mới constraints/collection layout một lần, ghi cây view sau 400ms. Log sâu tối đa 14 tầng/180 view để tới nhãn Đang phát; ghi font, số dòng, intrinsic size, không ghi nội dung text. Có giới hạn trùng sự kiện và xoay file. Đây chưa phải bản sửa trực tiếp font/frame của màn Đang phát.
 
-Test: mở Google Maps + YouTube Music; vào màn Đang phát, chờ 2 giây; bấm ••• → Log khi chữ chồng. Chụp ảnh và gửi TAduo.log, TAduo-template.log (kèm .1 nếu đã xoay). Thử Quay lại rồi vào Đang phát một lần nữa để so sánh.
+Test: mở Google Maps + YouTube Music; vào màn Đang phát, chờ 2 giây; bấm ••• → Log khi chữ chồng. Chụp ảnh và gửi MultiTA.log, MultiTA-template.log (kèm .1 nếu đã xoay). Thử Quay lại rồi vào Đang phát một lần nữa để so sánh.
 
 ## 0.6 — narrow template adapter (experimental)
-Runtime evidence: song details height 2.33pt and tab label 72pt inside a 53pt button. Within active TAduo scenes under 300pt only, post-layout adapters reserve song text height, reduce artwork, constrain tab labels, and arrange image-row items equally with square artwork. This is a template-specific layout adapter, not native system support for virtual displays. Original system layout runs first; adapters stop outside the active target. Verify home, Now Playing, tab switching, and exit back to native full screen on device.
+Runtime evidence: song details height 2.33pt and tab label 72pt inside a 53pt button. Within active MultiTA scenes under 300pt only, post-layout adapters reserve song text height, reduce artwork, constrain tab labels, and arrange image-row items equally with square artwork. This is a template-specific layout adapter, not native system support for virtual displays. Original system layout runs first; adapters stop outside the active target. Verify home, Now Playing, tab switching, and exit back to native full screen on device.
 
 ## 0.7 — own adapter geometry and restore constraints
-0.6 device evidence: song outer frame 55pt, inner title still 0pt; tab labels retain overflowing widths. Save/deactivate placement and own-size constraints for adapter-managed views, preserving descendant constraints. Reapply song/image-row layout after stack layout, and tab-label bounds after button layout. Restore saved constraints and autoresizing-mask settings when the TAduo target clears. Device validation required, especially native layout restoration and touch alignment.
+0.6 device evidence: song outer frame 55pt, inner title still 0pt; tab labels retain overflowing widths. Save/deactivate placement and own-size constraints for adapter-managed views, preserving descendant constraints. Reapply song/image-row layout after stack layout, and tab-label bounds after button layout. Restore saved constraints and autoresizing-mask settings when the MultiTA target clears. Device validation required, especially native layout restoration and touch alignment.
 
 ## 0.8 — recovery baseline
 Restore the exact 0.5 centered-actions implementation, with version identifiers bumped to 0.8. Remove all template-specific frame and constraint adapters introduced in 0.6/0.7. Latest freeze report's host log still identified 0.6; no crash report was supplied, so the termination cause and installation of 0.7 are unconfirmed. This recovery intentionally retains known narrow-template visual defects. Validate touch, 60-second session, exit, and re-entry before further layout experiments.
@@ -95,7 +103,7 @@ Restore the exact 0.5 centered-actions implementation, with version identifiers 
 Uses 0.8 layout behavior. Captures native Now Playing on appearance and settled geometry after target changes, including exit. Read-only bounded constraint attributes, class/pointer relationships, priorities, ambiguity, screen/window geometry, and relevant method names (never invoked). No new frame/constraint edits. Test native Now Playing first, enter split and log Now Playing, then exit and wait two seconds. Collect both log files, including .1 if rotated. The launch button shows 0.9.
 
 ## 0.10 — native Now Playing without artwork in narrow active panes
-Device 0.9 evidence: native song minimum height 68pt; split 2pt, with artwork above the song details. Runtime exposes recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:. Guard its exact observed ABI and pass allowsAlbumArt=NO only in an active TAduo scene with viewArea width under 300pt. All other inputs and native/full-screen calls remain unchanged. No child frame changes, constraint deactivation, or recursive layout calls. This tests the system's no-art layout; it does not fix tabs or image rows. Compare same song native/split/native, touch and exit, and collect NATIVE LAYOUT plus geometry logs.
+Device 0.9 evidence: native song minimum height 68pt; split 2pt, with artwork above the song details. Runtime exposes recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:. Guard its exact observed ABI and pass allowsAlbumArt=NO only in an active MultiTA scene with viewArea width under 300pt. All other inputs and native/full-screen calls remain unchanged. No child frame changes, constraint deactivation, or recursive layout calls. This tests the system's no-art layout; it does not fix tabs or image rows. Compare same song native/split/native, touch and exit, and collect NATIVE LAYOUT plus geometry logs.
 
 
 ## 0.10.1
@@ -152,3 +160,4 @@ Visual transparent gap reduced to 4pt; centered divider hit region remains 12x56
 
 ## 0.10.13 colored empty panes and gap input ownership
 Empty pane buttons use custom rendering with cyan left/orange right and dark bold text. Shared picker heading for either slot is uppercase UNICODE Vietnamese 'ỨNG DỤNG ĐÃ MỞ', bold 28pt (previous 14pt), side-colored; reserve extra header height. Transparent full-height 4pt gap shield plus explicit TASplitWindow hit-testing routes gap touches to the shield and center touches to the existing 12x56 grip; modal/menu priority retained. Gap shield is resized/released with split. This addresses UIKit event ownership; actual cross-process CarPlay touch behavior still requires device validation. No resize/activation logic changes.
+

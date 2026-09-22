@@ -1,4 +1,4 @@
-// TAduo shared keyboard. Included once by Tweak.xm after the scene helpers.
+// MultiTA shared keyboard. Included once by Tweak.xm after the scene helpers.
 // Session-bound stop-and-wait IPC: a repeated notification cannot duplicate a key.
 // Only CarPlay responders with a nonzero host-owned layout target participate.
 #import <stdint.h>
@@ -36,7 +36,7 @@ static void TAKBInsertVietnamese(UIView *input, uint32_t scalar) {
 }
 
 static NSString *TAKBName(NSString *bundle, NSString *kind) {
-    return [NSString stringWithFormat:@"com.sushibta.taduo.kb.%@.%@",bundle,kind];
+    return [NSString stringWithFormat:@"com.sushibta.multita.kb.%@.%@",bundle,kind];
 }
 static int TAKBToken(NSString *bundle, NSString *kind) {
     static NSMutableDictionary<NSString *,NSNumber *> *tokens;
