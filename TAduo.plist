@@ -1,1 +1,1 @@
-{ Filter = { Bundles = ("com.apple.CarPlayApp", "com.apple.CarPlayTemplateUIHost", "com.apple.Maps", "com.google.Maps", "com.google.ios.youtube", "com.google.ios.youtubemusic", "vn.vietmap.live"); }; }
+{ Filter = { Bundles = ("com.apple.CarPlayApp", "com.apple.CarPlayTemplateUIHost", "com.apple.Maps", "com.google.Maps", "com.google.ios.youtube", "com.google.ios.youtubemusic"); }; }

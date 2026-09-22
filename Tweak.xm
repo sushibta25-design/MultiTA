@@ -1,4 +1,4 @@
-// TAduo 0.10.8: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.9: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.8] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.9] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -60,8 +60,6 @@ static UIView *panes[2];
 static UIButton *choose[2];
 static UIWindow *splitWindow, *buttonWindow;
 static UIView *floatingActions;
-static UIButton *menuButton;
-static BOOL chromeVisible=YES;
 static UIView *dividerView;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static BOOL dividerDragging=NO;
@@ -200,7 +198,7 @@ static void TAStop(NSString *reason) {
     BOOL previous = ownCall; ownCall = YES;
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
-    splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil; menuButton=nil; dividerView=nil; dividerDragging=NO;
+    splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil; dividerView=nil; dividerDragging=NO;
     buttonWindow.hidden = !dashboard;
 }
 static BOOL TAHasHostedSurface(CALayer *layer, NSUInteger depth, NSInteger *budget) {
@@ -260,7 +258,6 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 - (void)stop;
 - (void)restartSplit;
 - (void)toggleActions;
-- (void)snapshot;
 - (void)pick:(UIButton *)sender;
 - (void)attach:(NSString *)bundle slot:(NSInteger)slot;
 @end
@@ -311,10 +308,7 @@ static UIImage *TASplitIcon(void) {
     }
     if (commit) {
         TALog(@"DIVIDER COMMIT ratio=%.3f left=%@ right=%@",splitRatio,NSStringFromCGRect(panes[0].bounds),NSStringFromCGRect(panes[1].bounds));
-        NSUInteger token=generation;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,600*NSEC_PER_MSEC),dispatch_get_main_queue(), ^{
-            if (running && token==generation) notify_post("com.sushibta.taduo.snapshot");
-        });
+
     }
 }
 - (void)dragDivider:(UIPanGestureRecognizer *)gesture {
@@ -352,8 +346,6 @@ static UIImage *TASplitIcon(void) {
     if (running) [self toggleActions]; else [self start];
 }
 - (void)showChrome {
-    chromeVisible=YES;
-    menuButton.hidden=NO;
     buttonWindow.hidden=running || !dashboard;
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideChrome) object:nil];
     [self performSelector:@selector(hideChrome) withObject:nil afterDelay:3.0 inModes:@[NSRunLoopCommonModes]];
@@ -363,7 +355,7 @@ static UIImage *TASplitIcon(void) {
     if (splitWindow.rootViewController.presentedViewController) {
         [self showChrome]; return;
     }
-    chromeVisible=NO; menuButton.hidden=YES; floatingActions.hidden=YES; buttonWindow.hidden=running || !dashboard;
+    floatingActions.hidden=YES; buttonWindow.hidden=running || !dashboard;
 }
 - (void)touchActivity:(UIEvent *)event {
     BOOL active=NO, touched=NO;
@@ -383,12 +375,6 @@ static UIImage *TASplitIcon(void) {
 }
 - (void)stop { [self closeIcons]; TAStop(@"user"); [self showChrome]; }
 - (void)toggleActions { if (splitWindow.rootViewController.presentedViewController) return; [self showChrome]; floatingActions.hidden = !floatingActions.hidden; }
-- (void)snapshot {
-    floatingActions.hidden = YES;
-    TALog(@"MANUAL SNAPSHOT REQUEST");
-    for (NSInteger i=0;i<2;i++) TAPresentationEvidence(slots[i],@"manual");
-    notify_post("com.sushibta.taduo.snapshot");
-}
 - (void)restartSplit {
     if (!running || TAAttachPending() || splitWindow.rootViewController.presentedViewController) return;
     floatingActions.hidden=YES;
@@ -917,20 +903,6 @@ static void TAInvalidateTree(UIView *view, NSUInteger depth, NSUInteger *budget)
     if ([view isKindOfClass:UICollectionView.class]) [((UICollectionView *)view).collectionViewLayout invalidateLayout];
     for (UIView *child in view.subviews) TAInvalidateTree(child, depth+1, budget);
 }
-static void TALayoutEvidence(UIView *view, NSString *bundle, NSUInteger depth, NSUInteger *budget) {
-    if (!view || !*budget || depth > 14) return; --*budget;
-    TALog(@"TEMPLATE VIEW %@ depth=%lu class=%@ frame=%@ bounds=%@ safe=%@ margins=%@ constraints=%lu",
-          bundle, (unsigned long)depth, NSStringFromClass(view.class), NSStringFromCGRect(view.frame),
-          NSStringFromCGRect(view.bounds), NSStringFromUIEdgeInsets(view.safeAreaInsets),
-          NSStringFromUIEdgeInsets(view.layoutMargins), (unsigned long)view.constraints.count);
-    if ([view isKindOfClass:UILabel.class]) {
-        UILabel *label = (UILabel *)view;
-        TALog(@"LABEL %@ class=%@ font=%.2f lines=%ld fit=%d minScale=%.2f intrinsic=%@ hidden=%d alpha=%.2f",
-              bundle, NSStringFromClass(view.class), label.font.pointSize, (long)label.numberOfLines,
-              label.adjustsFontSizeToFitWidth, label.minimumScaleFactor, NSStringFromCGSize(label.intrinsicContentSize), label.hidden, label.alpha);
-    }
-    for (UIView *child in view.subviews) TALayoutEvidence(child, bundle, depth+1, budget);
-}
 static char TAOriginalInsetsKey, TALayoutStampKey, TALayoutQueuedKey;
 static void TATemplateLayout(UIWindow *w) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"]) return;
@@ -977,11 +949,9 @@ static void TATemplateLayout(UIWindow *w) {
         if (currentActive) {
             TALog(@"TEMPLATE AFTER %@ safe=%@ traits=%ld/%ld", currentBundle, NSStringFromUIEdgeInsets(root.view.safeAreaInsets),
                   (long)root.traitCollection.horizontalSizeClass, (long)root.traitCollection.verticalSizeClass);
-            NSUInteger evidence = 60; TALayoutEvidence(root.view, currentBundle, 0, &evidence);
         }
     });
 }
-static void TACaptureVisible(UIWindow *w, NSString *reason);
 static void TAListenTemplateTargets(void) {
     for (NSString *bundle in TAClientBundles()) {
         int token;
@@ -992,11 +962,6 @@ static void TAListenTemplateTargets(void) {
                 if (![scene isKindOfClass:UIWindowScene.class]) continue;
                 for (UIWindow *w in ((UIWindowScene *)scene).windows) {
                     TATemplateLayout(w);
-                    if (![w.windowScene.session.persistentIdentifier hasSuffix:[@":" stringByAppendingString:bundle]]) continue;
-                    __weak UIWindow *weakWindow=w;
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(), ^{
-                        UIWindow *window=weakWindow; if (window) TACaptureVisible(window,@"target-settled");
-                    });
                 }
             }
         });
@@ -1058,47 +1023,6 @@ static NSString *TADiagnosticBundle(UIWindow *w) {
     if (parts.count!=3 || ![parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"]) return nil;
     return [TAClientBundles() containsObject:parts.lastObject] ? parts.lastObject : nil;
 }
-static NSString *TAItemDescription(id item) {
-    if (!item) return @"none";
-    return [NSString stringWithFormat:@"%@: %p",NSStringFromClass([item class]),(__bridge void *)item];
-}
-static void TAConstraintEvidence(UIView *view, NSUInteger depth, NSUInteger *views, NSUInteger *constraints) {
-    if (!view || !*views || depth>14) return; --*views;
-    NSString *name=NSStringFromClass(view.class);
-    BOOL focus=[name hasPrefix:@"CPUI"] || [name isEqual:@"UIStackView"] || [name hasPrefix:@"UITabBar"] || [name isEqual:@"CPSImageRowCell"];
-    if (focus) {
-        TALog(@"LAYOUT NODE %@ parent=%@ frame=%@ ambiguous=%d mask=%d compression=%.0f/%.0f hugging=%.0f/%.0f",TAItemDescription(view),TAItemDescription(view.superview),NSStringFromCGRect(view.frame),view.hasAmbiguousLayout,view.translatesAutoresizingMaskIntoConstraints,
-              [view contentCompressionResistancePriorityForAxis:UILayoutConstraintAxisHorizontal],[view contentCompressionResistancePriorityForAxis:UILayoutConstraintAxisVertical],
-              [view contentHuggingPriorityForAxis:UILayoutConstraintAxisHorizontal],[view contentHuggingPriorityForAxis:UILayoutConstraintAxisVertical]);
-        for (NSLayoutConstraint *c in view.constraints) {
-            if (!*constraints) break; --*constraints;
-            TALog(@"CONSTRAINT owner=%@ first=%@ attr=%ld relation=%ld second=%@ attr=%ld multiplier=%.3f constant=%.3f priority=%.0f active=%d",TAItemDescription(view),TAItemDescription(c.firstItem),(long)c.firstAttribute,(long)c.relation,TAItemDescription(c.secondItem),(long)c.secondAttribute,c.multiplier,c.constant,c.priority,c.active);
-        }
-    }
-    if ([name isEqual:@"CPUINowPlayingView"]) {
-        unsigned int count=0; Method *methods=class_copyMethodList(view.class,&count); NSUInteger remaining=40;
-        for (unsigned int i=0;i<count && remaining;i++) {
-            NSString *selector=NSStringFromSelector(method_getName(methods[i])); NSString *lower=selector.lowercaseString;
-            if ([lower containsString:@"layout"] || [lower containsString:@"constraint"] || [lower containsString:@"artwork"] || [lower containsString:@"size"] || [lower containsString:@"style"]) {
-                TALog(@"LAYOUT METHOD class=%@ selector=%@ encoding=%s",name,selector,method_getTypeEncoding(methods[i])); --remaining;
-            }
-        }
-        free(methods);
-    }
-    for (UIView *child in view.subviews) TAConstraintEvidence(child,depth+1,views,constraints);
-}
-
-// Capture both native and split geometry for comparison.
-static void TACaptureVisible(UIWindow *w, NSString *reason) {
-    NSString *bundle = TADiagnosticBundle(w);
-    if (!bundle) return;
-    TALog(@"COMPARE mode=%@ window=%@ screen=%@ scale=%.2f traits=%ld/%ld", TATemplateTarget(w,NULL) ? @"split" : @"native",NSStringFromCGRect(w.bounds),NSStringFromCGRect(w.screen.bounds),w.screen.scale,(long)w.traitCollection.horizontalSizeClass,(long)w.traitCollection.verticalSizeClass);
-    TALog(@"VISIBLE BEGIN %@ reason=%@ root=%@ scene=%@", bundle, reason,
-          NSStringFromClass(w.rootViewController.class), NSStringFromCGRect(w.windowScene.coordinateSpace.bounds));
-    NSUInteger budget = 180; TALayoutEvidence(w.rootViewController.viewIfLoaded, bundle, 0, &budget);
-    NSUInteger nodes=180, constraints=200; TAConstraintEvidence(w.rootViewController.viewIfLoaded,0,&nodes,&constraints);
-    TALog(@"VISIBLE END %@ remainingBudget=%lu constraintBudget=%lu", bundle, (unsigned long)budget,(unsigned long)constraints);
-}
 static void TAVisibleTransition(UIViewController *vc) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"]) return;
     UIWindow *w = vc.viewIfLoaded.window;
@@ -1107,28 +1031,6 @@ static void TAVisibleTransition(UIViewController *vc) {
     if (!active && ![NSStringFromClass(vc.class) isEqual:@"CPSNowPlayingViewController"]) return;
     // One native layout invalidation per appearance. No font/frame edits.
     NSUInteger budget = 100; if (active) TAInvalidateTree(vc.viewIfLoaded, 0, &budget);
-    __weak UIWindow *weakWindow = w;
-    __weak UIViewController *weakController = vc;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400*NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-        UIWindow *window = weakWindow; UIViewController *controller = weakController;
-        if (!window || !controller || controller.viewIfLoaded.window != window) return;
-        static char stampKey;
-        NSString *stamp = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(controller.class), NSStringFromCGRect(window.bounds)];
-        NSDictionary *previous = objc_getAssociatedObject(window, &stampKey);
-        NSTimeInterval now = NSDate.timeIntervalSinceReferenceDate;
-        if ([previous[@"stamp"] isEqual:stamp] && now-[previous[@"time"] doubleValue]<2) return;
-        objc_setAssociatedObject(window, &stampKey, @{@"stamp":stamp,@"time":@(now)}, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        TACaptureVisible(window, [@"appeared:" stringByAppendingString:NSStringFromClass(controller.class)]);
-    });
-}
-static void TAListenSnapshots(void) {
-    int token;
-    notify_register_dispatch("com.sushibta.taduo.snapshot", &token, dispatch_get_main_queue(), ^(__unused int delivered) {
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (![scene isKindOfClass:UIWindowScene.class]) continue;
-            for (UIWindow *w in ((UIWindowScene *)scene).windows) TACaptureVisible(w, @"manual");
-        }
-    });
 }
 // One controlled input to the system's own layout selection. No frame edits.
 %group TANowPlayingExperiment
@@ -1275,7 +1177,7 @@ static void TAListenSnapshots(void) {
 %ctor {
     @autoreleasepool {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
-        if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+        if (([TAClientBundles() containsObject:process] && ![process isEqual:@"vn.vietmap.live"]) || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
             if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
                 %init(TACompactHome);
@@ -1288,7 +1190,7 @@ static void TAListenSnapshots(void) {
                     %init(TANowPlayingExperiment);
                     TALog(@"NATIVE LAYOUT HOOK enabled");
                 } else TALog(@"NATIVE LAYOUT HOOK skipped encoding=%s",encoding ?: "missing");
-                dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); TAListenSnapshots(); });
+                dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); });
             }
             return;
         }

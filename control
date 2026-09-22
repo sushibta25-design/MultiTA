@@ -1,6 +1,6 @@
 Package: com.sushibta.taduo
 Name: TAduo
-Version: 0.10.8
+Version: 0.10.9
 Architecture: iphoneos-arm64
 Description: Experimental fixed 50/50 CarPlay scenes with native geometry requests.
 Maintainer: sushibta25-design

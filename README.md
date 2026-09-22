@@ -104,3 +104,9 @@ Keep a draggable 36x32 entry window whenever native Dock entry is absent, clippe
 
 ## 0.10.8 recovery
 0.10.6 supplied logs have no START or DOCK MOUNT and just one template initialization line; freeze cause is not established. Remove Dock search/transforms and new Maps title-size override, restore pre-0.10.6 invalidation behavior. Keep 0.16-derived Music compact helpers. Floating draggable entry remains visible in native mode; divider opens actions in split. Add native foreground-return and main-loop gap evidence. 0.10.7 superseded before delivery.
+
+
+## 0.10.9 diagnostic load reduction
+No explicit phone-app launcher was found in 0.10.8: foregroundSceneWithSettings is used on the CarPlay controller during attachment. Remove direct Vietmap process injection (size observation only); keep CarPlay template integration and user-selected Vietmap split support. Disable automatic deep hierarchy/constraint dumps, divider snapshots and delayed appearance/target-settled diagnostic capture. Keep layout changes, Music compact helpers, attach timeout and low-volume lifecycle/geometry evidence unchanged. Heat causation is unproven; this is an overhead-reduction build, not a verified thermal fix. Google Maps narrow-pane inset guard and Vietmap presentation timeout remain unresolved.
+
+Cleanup audit: delete retired menuButton/chromeVisible state and unbound snapshot selector, deep view/constraint/runtime-method walkers, snapshot notification listener, and delayed diagnostic capture scheduling. Retain native appearance layout invalidation, active menu/picker, divider gestures and scene recovery. No geometry/activation changes in this cleanup.
