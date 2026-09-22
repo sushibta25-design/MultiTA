@@ -1,4 +1,4 @@
-// TAduo 0.10.10: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.11: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.10] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.11] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -61,7 +61,7 @@ static UIButton *choose[2];
 static UIWindow *splitWindow, *buttonWindow;
 static UIView *floatingActions;
 static UIView *dividerView;
-static const CGFloat TADividerGap=20;
+static const CGFloat TADividerGap=12;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static BOOL dividerDragging=NO;
 static CGPoint entryDragStart;
@@ -389,13 +389,15 @@ static UIImage *TASplitIcon(void) {
     running = YES; ++generation; splitRatio=0.5;
     splitWindow = [[UIWindow alloc] initWithWindowScene:dashboard];
     splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
+    splitWindow.opaque=NO; splitWindow.backgroundColor=UIColor.clearColor;
     splitWindow.rootViewController = [UIViewController new];
-    UIView *root = splitWindow.rootViewController.view; root.backgroundColor = [UIColor colorWithRed:0.94 green:0.94 blue:0.92 alpha:1];
+    UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.clearColor; root.opaque=NO;
     // Full-height panes with a dedicated gap. Divider hit area never overlaps either app.
     CGFloat half = bounds.size.width / 2;
     CGFloat gap=TADividerGap, paneWidth=(bounds.size.width-gap)/2;
     for (NSInteger i = 0; i < 2; i++) {
         panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * (paneWidth+gap), 0, paneWidth, bounds.size.height)];
+        panes[i].backgroundColor=UIColor.blackColor;
         panes[i].layer.cornerRadius=6;
         panes[i].clipsToBounds = YES; [root addSubview:panes[i]];
         choose[i] = TAButton(i == 0 ? @"Chọn app trái" : @"Chọn app phải", @selector(pick:));
@@ -403,8 +405,8 @@ static UIImage *TASplitIcon(void) {
     }
     dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-TADividerGap/2,(bounds.size.height-56)/2,TADividerGap,56)];
     dividerView.backgroundColor=UIColor.clearColor;
-    UIView *grip=[[UIView alloc] initWithFrame:CGRectMake((TADividerGap-4)/2,14,4,28)];
-    grip.backgroundColor=[UIColor colorWithWhite:0.35 alpha:1]; grip.layer.cornerRadius=2;
+    UIView *grip=[[UIView alloc] initWithFrame:CGRectMake((TADividerGap-3)/2,18,3,20)];
+    grip.backgroundColor=[UIColor colorWithWhite:1 alpha:0.65]; grip.layer.cornerRadius=1.5;
     grip.userInteractionEnabled=NO; [dividerView addSubview:grip];
     UIPanGestureRecognizer *drag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
     drag.maximumNumberOfTouches=1; drag.delegate=self; [dividerView addGestureRecognizer:drag];
@@ -462,6 +464,7 @@ static UIImage *TASplitIcon(void) {
 }
 - (void)renderIcons {
     UIView *root = self.iconPicker.view;
+    root.backgroundColor=[UIColor colorWithWhite:0.10 alpha:1];
     for (UIView *v in [root.subviews copy]) [v removeFromSuperview];
     UIView *panel = [[UIView alloc] initWithFrame:CGRectInset(splitWindow.bounds, 12, 12)];
     panel.backgroundColor = [UIColor colorWithWhite:0.16 alpha:0.98];
@@ -660,11 +663,17 @@ static void TACapture(id controller, id settings) {
         if (launch && r.controller==controller) r.activation=[settings copy];
         return;
     }
+    // Unknown passive navigation callbacks must not seed the user's recent-app list.
+    // Existing/pending records still receive scene updates for split recovery.
+    if (!launch && !r) {
+        TALog(@"CAPTURE PASSIVE ignored bundle=%@",bundle);
+        return;
+    }
     if (!r || r.controller!=controller) {
         r=[TARecord new]; r.controller=controller; r.bundle=bundle;
     }
     if (launch || !r.activation) r.activation=[settings copy]; records[bundle]=r;
-    [order removeObject:bundle]; [order addObject:bundle];
+    if (launch) { [order removeObject:bundle]; [order addObject:bundle]; }
     // Keep resumable/active apps pinned when trimming recently seen apps.
     while (order.count>24) {
         NSString *victim=nil;
