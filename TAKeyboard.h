@@ -75,6 +75,61 @@ static UIView *TAKBFindInput(UIView *view, NSInteger *budget) {
     for (UIView *child in view.subviews) { UIView *found=TAKBFindInput(child,budget); if (found) return found; }
     return nil;
 }
+static BOOL TAKBCancelTitle(NSString *title) {
+    NSString *normalized=[[title stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    return [@[@"hủy",@"huỷ",@"cancel"] containsObject:normalized ?: @""];
+}
+static void TAKBFindCancel(UIView *view, UIView *input, CGRect inputRect, NSUInteger depth,
+                         NSInteger *budget, NSMutableArray<UIControl *> *matches) {
+    if (!view || depth>14 || --*budget<0 || view.hidden || view.alpha<0.01 || !view.userInteractionEnabled) return;
+    if ([view isKindOfClass:UIControl.class] && ((UIControl *)view).enabled && ![view isDescendantOfView:input]) {
+        UIControl *control=(UIControl *)view;
+        NSString *title=[view isKindOfClass:UIButton.class] ? ((UIButton *)view).currentTitle : nil;
+        if (!title.length && [view isKindOfClass:UIButton.class]) title=((UIButton *)view).currentAttributedTitle.string;
+        CGRect rect=[view convertRect:view.bounds toView:input.window];
+        // The cancel control must share the input's search bar row. Never
+        // activate a distant Cancel button belonging to navigation or a dialog.
+        BOOL sameRow=fabs(CGRectGetMidY(rect)-CGRectGetMidY(inputRect))<=MAX(32,inputRect.size.height);
+        if ((TAKBCancelTitle(title) || TAKBCancelTitle(view.accessibilityLabel)) && sameRow &&
+            !CGRectIsEmpty(rect) && CGRectIntersectsRect(rect,input.window.bounds) &&
+            (control.allControlEvents & (UIControlEventTouchUpInside|UIControlEventPrimaryActionTriggered)))
+            [matches addObject:control];
+    }
+    for (UIView *child in view.subviews) TAKBFindCancel(child,input,inputRect,depth+1,budget,matches);
+}
+static BOOL TAKBCancelSearch(UIView *input) {
+    // Use the search bar's actual cancel callback when it is available.
+    for (UIView *view=input;view && view!=input.window;view=view.superview) {
+        if (![view isKindOfClass:UISearchBar.class]) continue;
+        UISearchBar *bar=(UISearchBar *)view;
+        if (bar.showsCancelButton && [bar.delegate respondsToSelector:@selector(searchBarCancelButtonClicked:)]) {
+            [bar.delegate searchBarCancelButtonClicked:bar];
+            TALog(@"KEYBOARD CANCEL route=searchbar"); return YES;
+        }
+    }
+    // CarPlay template search fields may not be UISearchBar. Invoke their real
+    // visible Hủy/Cancel control, restricted to the responder's owning view.
+    UIView *scope=nil;
+    for (UIResponder *r=input.nextResponder;r;r=r.nextResponder) {
+        if ([r isKindOfClass:UIViewController.class]) {
+            UIView *v=((UIViewController *)r).viewIfLoaded;
+            if (v.window==input.window && [input isDescendantOfView:v]) { scope=v; break; }
+        }
+    }
+    if (!scope) scope=input.superview;
+    NSMutableArray<UIControl *> *matches=[NSMutableArray new]; NSInteger budget=350;
+    CGRect inputRect=[input convertRect:input.bounds toView:input.window];
+    TAKBFindCancel(scope,input,inputRect,0,&budget,matches);
+    if (matches.count!=1 || budget<0) {
+        TALog(@"KEYBOARD CANCEL unavailable input=%@ scope=%@ matches=%lu",NSStringFromClass(input.class),NSStringFromClass(scope.class),(unsigned long)matches.count);
+        return NO;
+    }
+    UIControl *cancel=matches.firstObject;
+    UIControlEvents event=(cancel.allControlEvents & UIControlEventTouchUpInside) ? UIControlEventTouchUpInside : UIControlEventPrimaryActionTriggered;
+    [cancel sendActionsForControlEvents:event];
+    TALog(@"KEYBOARD CANCEL route=control class=%@",NSStringFromClass(cancel.class));
+    return YES;
+}
 @interface TAKBClientSession : NSObject
 @property(nonatomic,weak) UIView *input;
 @property(nonatomic,weak) UIWindow *window;
@@ -205,7 +260,11 @@ static void TAKBReceive(NSString *bundle) {
                 if ([delegate textFieldShouldReturn:field]) [field resignFirstResponder];
             } else [field sendActionsForControlEvents:UIControlEventEditingDidEndOnExit];
         } else [(id<UIKeyInput>)input insertText:@"\n"];
-    } else if (op==3) { s.dismissed=YES; [input resignFirstResponder]; }
+    } else if (op==3) {
+        BOOL cancelled=TAKBCancelSearch(input);
+        TAKBWrite(bundle,@"cancel-failed",cancelled ? 0 : command);
+        if (cancelled) { s.dismissed=YES; [input resignFirstResponder]; }
+    }
     else accepted=NO;
     if (accepted) { s.lastSequence=sequence; TAKBPublishPreview(bundle,s); TAKBWrite(bundle,@"ack",command); }
 }
@@ -398,7 +457,13 @@ static void TAKBHostStop(void) {
     if (TAKBRead(self.bundle,@"ack")==self.pending) {
         BOOL close=((self.pending>>21)&7)==3;
         [self.queue removeObjectAtIndex:0]; self.pending=0;
-        if (close) { TAKBHostStop(); return; }
+        if (close) {
+            if (TAKBRead(self.bundle,@"cancel-failed")==TAKBRead(self.bundle,@"ack")) {
+                self.heading.text=@"  Chưa hủy được tìm kiếm trong app này.";
+                return;
+            }
+            TAKBHostStop(); return;
+        }
         [self tick]; return;
     }
     if (++self.retry>=15) {
