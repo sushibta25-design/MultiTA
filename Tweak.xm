@@ -1,4 +1,4 @@
-// TAduo 0.10.2: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.3: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.2] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.3] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -197,6 +197,23 @@ static void TAStop(NSString *reason) {
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
     buttonWindow.hidden = order.count < 2;
 }
+static BOOL TAHasHostedSurface(CALayer *layer, NSUInteger depth, NSInteger *budget) {
+    if (!layer || depth>14 || --*budget<0) return NO;
+    if ([NSStringFromClass(layer.class) containsString:@"LayerHost"]) {
+        id context=TAValue(layer,@"contextId");
+        if ([context respondsToSelector:@selector(unsignedLongLongValue)] && [context unsignedLongLongValue]!=0) return YES;
+    }
+    for (CALayer *child in layer.sublayers) if (TAHasHostedSurface(child,depth+1,budget)) return YES;
+    return NO;
+}
+static BOOL TAMapBundle(NSString *bundle) {
+    return [@[@"com.google.Maps",@"vn.vietmap.live",@"com.apple.Maps"] containsObject:bundle];
+}
+static void TAPresentationEvidence(TARecord *r, NSString *phase) {
+    if (!r) return;
+    NSInteger budget=240;
+    TALog(@"PRESENTATION %@ bundle=%@ controller=%p scene=%p current=%p view=%@ parent=%@ window=%d hidden=%d alpha=%.2f surface=%d",phase,r.bundle,r.controller,r.scene,TAValue(r.controller,@"scene"),NSStringFromClass(r.presentation.class),NSStringFromClass(r.presentation.superview.class),r.presentation.window!=nil,r.presentation.hidden,r.presentation.alpha,TAHasHostedSurface(r.presentation.layer,0,&budget));
+}
 static UIImage *TAChoiceIcon(NSString *bundle) {
     static NSMutableDictionary *cache;
     if (!cache) cache = [NSMutableDictionary new];
@@ -220,6 +237,7 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 - (void)offerNative:(NSString *)bundle;
 - (void)replace:(NSString *)bundle slot:(NSInteger)slot;
 - (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
+- (void)checkPresentation:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
 - (void)renderIcons;
 - (void)closeIcons;
 - (void)selectIcon:(UIButton *)sender;
@@ -246,6 +264,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
 - (void)snapshot {
     floatingActions.hidden = YES;
     TALog(@"MANUAL SNAPSHOT REQUEST");
+    for (NSInteger i=0;i<2;i++) TAPresentationEvidence(slots[i],@"manual");
     notify_post("com.sushibta.taduo.snapshot");
 }
 - (void)restartSplit {
@@ -304,7 +323,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
 }
 - (void)swapSides {
-    if (!running || !slots[0].presentation || !slots[1].presentation || splitWindow.rootViewController.presentedViewController) return;
+    if (!running || TAAttachPending() || !slots[0].presentation || !slots[1].presentation || splitWindow.rootViewController.presentedViewController) return;
     TARecord *left = slots[0]; slots[0] = slots[1]; slots[1] = left;
     for (NSInteger i = 0; i < 2; i++) {
         [panes[i] addSubview:slots[i].presentation];
@@ -453,14 +472,74 @@ static UIButton *TAButton(NSString *title, SEL action) {
         id v=((id(*)(id,SEL,id))objc_msgSend)(r.controller,create,r.presentationID);
         if (![v isKindOfClass:UIView.class] || ((UIView *)v).superview) @throw [NSException exceptionWithName:@"NotIndependent" reason:r.bundle userInfo:nil];
         r.presentation=v; r.presentation.transform=CGAffineTransformIdentity; r.presentation.frame=panes[slot].bounds;
-        [panes[slot] addSubview:r.presentation]; choose[slot].hidden=YES; r.attaching=NO;
-        TALog(@"ATTACHED slot=%ld bundle=%@ attempt=%lu",(long)slot,r.bundle,(unsigned long)attempt);
+        [panes[slot] addSubview:r.presentation];
+        if (TAMapBundle(r.bundle)) {
+            [panes[slot] bringSubviewToFront:choose[slot]];
+            [choose[slot] setTitle:@"Đang tải bản đồ…" forState:UIControlStateNormal];
+            TAPresentationEvidence(r,@"created");
+            [self checkPresentation:slot generation:token request:request attempt:0];
+        } else {
+            choose[slot].hidden=YES; r.attaching=NO;
+            TALog(@"ATTACHED slot=%ld bundle=%@ attempt=%lu",(long)slot,r.bundle,(unsigned long)attempt);
+        }
     } @catch (NSException *e) {
         TALog(@"PRESENTATION ERROR %@ bundle=%@",e.name,r.bundle);
         if (running && slots[slot]==r) TAClearSlot(slot,@"presentation failed");
     } @finally { ownCall=old; }
 
 }
+- (void)checkPresentation:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt {
+    if (!running || token!=generation || request!=slotRequests[slot] || !slots[slot].attaching) return;
+    TARecord *r=slots[slot];
+    if (r.scene!=TAValue(r.controller,@"scene")) {
+        TAClearSlot(slot,@"map scene changed while connecting");
+        return;
+    }
+    NSInteger budget=240;
+    BOOL connected=TAHasHostedSurface(r.presentation.layer,0,&budget);
+    if (connected && attempt>0) {
+        r.attaching=NO; choose[slot].hidden=YES;
+        TAPresentationEvidence(r,@"connected");
+        TALog(@"ATTACHED slot=%ld bundle=%@ surface=1 (not pixel validation)",(long)slot,r.bundle);
+        return;
+    }
+    if (attempt==8 && !connected) {
+        // One replacement of the presentation only. Do not relaunch the app,
+        // replay foreground, or restore/change the other pane's geometry.
+        BOOL previous=ownCall; ownCall=YES;
+        @try {
+            SEL invalidate=NSSelectorFromString(@"invalidatePresentationViewForIdentifier:");
+            SEL create=NSSelectorFromString(@"presentationViewWithIdentifier:");
+            if ([r.controller respondsToSelector:invalidate] && [r.controller respondsToSelector:create]) {
+                TAPresentationEvidence(r,@"before-rebind");
+                [r.presentation removeFromSuperview]; r.presentation=nil;
+                ((void(*)(id,SEL,id))objc_msgSend)(r.controller,invalidate,r.presentationID);
+                r.presentationID=[r.presentationID stringByAppendingString:@".rebind"];
+                id view=((id(*)(id,SEL,id))objc_msgSend)(r.controller,create,r.presentationID);
+                if (![view isKindOfClass:UIView.class] || ((UIView *)view).superview)
+                    @throw [NSException exceptionWithName:@"NotIndependent" reason:r.bundle userInfo:nil];
+                r.presentation=view; r.presentation.transform=CGAffineTransformIdentity;
+                r.presentation.frame=panes[slot].bounds;
+                [panes[slot] addSubview:r.presentation]; [panes[slot] bringSubviewToFront:choose[slot]];
+                TAPresentationEvidence(r,@"rebound");
+            }
+        } @catch (NSException *e) {
+            TALog(@"MAP REBIND ERROR %@ bundle=%@",e.name,r.bundle);
+            TAClearSlot(slot,@"map rebind failed");
+        } @finally { ownCall=previous; }
+        if (!running || slots[slot]!=r || request!=slotRequests[slot]) return;
+    }
+    if (attempt>=24) {
+        TAPresentationEvidence(r,@"timeout");
+        TAClearSlot(slot,@"map surface timeout");
+        [choose[slot] setTitle:@"Bản đồ chưa hiện. Chạm để chọn lại" forState:UIControlStateNormal];
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(), ^{
+        [self checkPresentation:slot generation:token request:request attempt:attempt+1];
+    });
+}
+
 @end
 static void TACapture(id controller, id settings) {
     if (ownCall || !NSThread.isMainThread || !dashboard || TADashboard()!=dashboard) return;
@@ -519,7 +598,7 @@ static void TATick(void) {
         buttonWindow = [[UIWindow alloc] initWithWindowScene:s]; buttonWindow.windowLevel = UIWindowLevelAlert + 80;
         buttonWindow.frame = CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-88, 0, 88, 30);
         buttonWindow.rootViewController = [UIViewController new];
-        UIButton *b = TAButton(@"TAduo 0.10.2", @selector(start)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
+        UIButton *b = TAButton(@"TAduo 0.10.3", @selector(start)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
     }
     buttonWindow.hidden = running || order.count < 2;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
