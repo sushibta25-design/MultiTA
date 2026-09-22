@@ -298,9 +298,7 @@ static UIImage *TASplitIcon(void) {
     panes[0].frame=CGRectMake(0,0,left,height);
     panes[1].frame=CGRectMake(left+4,0,available-left,height);
     dividerView.frame=CGRectMake(center-10,0,20,height);
-    menuButton.center=CGPointMake(center,height/2);
-    CGFloat actionsX=MAX(0,MIN(center-78,splitWindow.bounds.size.width-156));
-    floatingActions.frame=CGRectMake(actionsX,height/2-49,156,30);
+    floatingActions.frame=CGRectMake(MAX(0,splitWindow.bounds.size.width-160),40,156,30);
     for (NSInteger i=0;i<2;i++) {
         choose[i].frame=panes[i].bounds;
         TARecord *r=slots[i];
@@ -340,7 +338,7 @@ static UIImage *TASplitIcon(void) {
 }
 - (void)enter {
     [self showChrome];
-    if (running) [self restartSplit]; else [self start];
+    if (running) [self toggleActions]; else [self start];
 }
 - (void)showChrome {
     chromeVisible=YES;
@@ -416,7 +414,7 @@ static UIImage *TASplitIcon(void) {
     UIPanGestureRecognizer *drag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
     drag.maximumNumberOfTouches=1; drag.delegate=self; [dividerView addGestureRecognizer:drag];
     [root addSubview:dividerView];
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half - 78, bounds.size.height / 2 - 49, 156, 30)];
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(MAX(0,bounds.size.width-160),40,156,30)];
     floatingActions.backgroundColor = UIColor.clearColor;
     NSArray *titles = @[@"", @"", @"Thoát"];
     NSArray *actions = @[@"restartSplit", @"swapSides", @"stop"];
@@ -431,12 +429,6 @@ static UIImage *TASplitIcon(void) {
         [floatingActions addSubview:b];
     }
     floatingActions.hidden = YES; [root addSubview:floatingActions];
-    menuButton = TAButton(@"•••", @selector(toggleActions));
-    menuButton.frame = CGRectMake(half - 16, bounds.size.height / 2 - 15, 32, 30);
-    menuButton.layer.cornerRadius = 10; menuButton.accessibilityLabel = @"Tác vụ TAduo";
-    UIPanGestureRecognizer *menuDrag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
-    menuDrag.maximumNumberOfTouches=1; menuDrag.delegate=self; [menuButton addGestureRecognizer:menuDrag];
-    [root addSubview:menuButton];
     splitWindow.hidden = NO; [self showChrome];
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
 }

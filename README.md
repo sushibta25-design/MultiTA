@@ -90,3 +90,5 @@ Cyan/orange split icon at top right and in actions. Action row is Split, Swap, E
 
 ## 0.10.5 divider
 Horizontal drag on center menu or transparent 20pt hit region around the 4pt gap. Pan preview adjusts containers; release submits one scene resize per pane. Cancel restores previous ratio. Each pane stays at least 140pt on the test display. Swap resizes both scenes to destination widths. Controls stay during drag and hide three seconds after release. Automatic post-resize snapshots capture Google Maps layout; screenshot alone cannot distinguish clipped controls from stale geometry, so no speculative map font/control patch. Map recovery and background lifecycle unchanged.
+
+User refinement: remove center ellipsis entirely. Top-right split icon opens the three-action row directly below it while split is active; in native mode it starts split. Invisible center-gap drag region remains. Three-second auto-hide applies to the icon and opened menu.
