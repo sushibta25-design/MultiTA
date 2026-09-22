@@ -173,3 +173,13 @@ After YouTube attaches at 06:19:18, 0.23 stops producing scheduled observations 
 Device gates: page navigation/selection, cold Google Maps attach, Maps + YouTube interaction for at least one minute, replacement/retry, Fold and Exit. Neither compilation nor these mitigations prove the crash resolved.
 
 User follow-up: remove the up/down arrow rail. The prior device hierarchy identifies `_UIStaticScrollBar` and `_UIStaticScrollbarButton` on YouTube Music's right edge. Hide and disable that exact rail in targeted split app windows; restore native visibility/interaction when the target clears or the rail leaves the window. Native scrolling remains enabled. This removes the rail's hit targets; it does not prove the rail caused all reported gesture errors.
+
+## 0.25 — separate native preparation from split attachment
+
+Replace always-native Dashboard launch plus suppressed background completion. An app with a live controller, matching display, valid scene frame and captured activation settings reuses its already foreground scene, or is foregrounded directly through that controller when backgrounded. No Dashboard app switch occurs on this warm path. Native background calls and their original completion arguments always run normally; the tweak never invokes a supplied native completion itself.
+
+An uncaptured app is prepared outside split: save the pair, release/restore presentations, launch normally, wait for a fresh foreground observation, valid scene and at least 1.25s of transition quiet, then rebuild the saved pair through direct activation. Preparation is bounded to 10s and cancelled by display/session change or a tap on the split launcher. Automatic pair restoration cannot recursively prepare apps. A scene that is missing/backgrounded shows an explicit per-pane retry instead of a foreground loop.
+
+Cold preparation can briefly show the app full-screen. Menu, icon pages, rounded geometry and hidden up/down rails remain. Existing surface checks do not prove visible pixels. Main-thread stall probe remains; native foreground/background and preparation return boundaries identify which operation fails to return.
+
+Device gates: both Maps/YouTube launch orders, already-open versus cold YouTube, existing companion preserved on warm replacement, cancelled/timed-out preparation, rapid selection, retry, Fold/Exit and disconnect. This removes the suspect lifecycle bypass, but exact original termination cause remains unknown without a matching crash stack. Compile validation is not device stability validation.
