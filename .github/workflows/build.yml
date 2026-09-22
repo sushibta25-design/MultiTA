@@ -32,11 +32,13 @@ jobs:
 
       - name: Build package
         run: |
+          clang++ -std=c++14 -Wall -Wextra -Werror tests/telex.cpp -o /tmp/taduo-telex-test
+          /tmp/taduo-telex-test
           gmake clean package FINALPACKAGE=1
 
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: TAduo-0.10.18-rootless
+          name: TAduo-0.10.19-rootless
           path: packages/*.deb
           if-no-files-found: error

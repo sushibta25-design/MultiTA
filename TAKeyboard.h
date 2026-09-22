@@ -2,6 +2,38 @@
 // Session-bound stop-and-wait IPC: a repeated notification cannot duplicate a key.
 // Only CarPlay responders with a nonzero host-owned layout target participate.
 #import <stdint.h>
+#include "TATelex.hpp"
+
+static void TAKBInsertVietnamese(UIView *input, uint32_t scalar) {
+    NSString *key=[[NSString alloc] initWithBytes:&scalar length:4 encoding:NSUTF32LittleEndianStringEncoding];
+    if (!key) return;
+    if (![input conformsToProtocol:@protocol(UITextInput)] || !tatelex::letter(scalar) ||
+        ([input respondsToSelector:@selector(isSecureTextEntry)] && [(id<UITextInputTraits>)input isSecureTextEntry])) {
+        [(id<UIKeyInput>)input insertText:key]; return;
+    }
+    id<UITextInput> field=(id<UITextInput>)input;
+    UITextRange *selection=field.selectedTextRange;
+    if (!selection || !selection.empty || field.markedTextRange) { [(id<UIKeyInput>)input insertText:key]; return; }
+    NSInteger offset=[field offsetFromPosition:field.beginningOfDocument toPosition:selection.start];
+    UITextPosition *start=[field positionFromPosition:selection.start offset:-MIN(MAX(0,offset),64)];
+    UITextRange *prefixRange=start ? [field textRangeFromPosition:start toPosition:selection.start] : nil;
+    NSString *prefix=prefixRange ? [field textInRange:prefixRange] : nil;
+    NSUInteger index=prefix.length;
+    while (index && tatelex::letter([prefix characterAtIndex:index-1])) --index;
+    NSString *word=[[prefix substringFromIndex:index] precomposedStringWithCanonicalMapping] ?: @"";
+    std::u32string before;
+    for (NSUInteger i=0;i<word.length;i++) before.push_back([word characterAtIndex:i]);
+    std::u32string after=tatelex::append(before,scalar);
+    if (after==before+std::u32string(1,scalar)) { [(id<UIKeyInput>)input insertText:key]; return; }
+    NSString *replacement=[[NSString alloc] initWithBytes:after.data() length:after.size()*sizeof(char32_t) encoding:NSUTF32LittleEndianStringEncoding];
+    UITextPosition *wordStart=[field positionFromPosition:selection.start offset:-(NSInteger)(prefix.length-index)];
+    UITextRange *range=wordStart ? [field textRangeFromPosition:wordStart toPosition:selection.start] : nil;
+    if (!range || !replacement) { [(id<UIKeyInput>)input insertText:key]; return; }
+    // One native insertion replaces the selected word and triggers the app's
+    // normal search/editing path. Never synthesize a series of backspaces.
+    field.selectedTextRange=range;
+    [(id<UIKeyInput>)input insertText:replacement];
+}
 
 static NSString *TAKBName(NSString *bundle, NSString *kind) {
     return [NSString stringWithFormat:@"com.sushibta.taduo.kb.%@.%@",bundle,kind];
@@ -163,7 +195,8 @@ static void TAKBReceive(NSString *bundle) {
     if (op==0 && scalar<=0x10ffff && !(scalar>=0xd800 && scalar<=0xdfff)) {
         NSString *text=[[NSString alloc] initWithBytes:&scalar length:sizeof(scalar) encoding:NSUTF32LittleEndianStringEncoding];
         if (text) [(id<UIKeyInput>)input insertText:text]; else accepted=NO;
-    } else if (op==1) [(id<UIKeyInput>)input deleteBackward];
+    } else if (op==4 && scalar<=0x10ffff && !(scalar>=0xd800 && scalar<=0xdfff)) TAKBInsertVietnamese(input,scalar);
+    else if (op==1) [(id<UIKeyInput>)input deleteBackward];
     else if (op==2) {
         if ([input isKindOfClass:UITextField.class]) {
             UITextField *field=(UITextField *)input;
@@ -203,6 +236,7 @@ static void TAKBInstallClients(void) {
 @property(nonatomic) NSUInteger retry;
 @property(nonatomic) BOOL shifted;
 @property(nonatomic) BOOL numbers;
+@property(nonatomic) BOOL english;
 @property(nonatomic) BOOL stalled;
 @property(nonatomic,copy) NSString *shownText;
 @property(nonatomic,strong) UILabel *heading;
@@ -276,10 +310,10 @@ static void TAKBHostStop(void) {
     NSArray<NSArray<NSString *> *> *labels=self.numbers ?
         @[@[@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"0"],
           @[@"-",@"/",@":",@";",@"(",@")",@"₫",@"&",@"@"],
-          @[@".",@",",@"?",@"!",@"'",@"\"",@"⌫"],@[@"ABC",@"Dấu cách",@"Tìm"]] :
+          @[@".",@",",@"?",@"!",@"'",@"\"",@"⌫"],@[@"ABC",self.english ? @"EN" : @"VI",@"Dấu cách",@"Tìm"]] :
         @[@[@"Q",@"W",@"E",@"R",@"T",@"Y",@"U",@"I",@"O",@"P"],
           @[@"A",@"S",@"D",@"F",@"G",@"H",@"J",@"K",@"L"],
-          @[@"⇧",@"Z",@"X",@"C",@"V",@"B",@"N",@"M",@"⌫"],@[@"123",@"Dấu cách",@"Tìm"]];
+          @[@"⇧",@"Z",@"X",@"C",@"V",@"B",@"N",@"M",@"⌫"],@[@"123",self.english ? @"EN" : @"VI",@"Dấu cách",@"Tìm"]];
     NSMutableArray *rows=[NSMutableArray new];
     for (NSArray *row in labels) {
         NSMutableArray *keys=[NSMutableArray new];
@@ -305,10 +339,11 @@ static void TAKBHostStop(void) {
     for (NSUInteger r=0;r<self.rows.count;r++) {
         NSArray<UIButton *> *keys=self.rows[r]; CGFloat y=gap+r*(kh+gap);
         if (r==3) {
-            CGFloat small=(pw-4*gap)*0.17,space=pw-4*gap-2*small;
+            CGFloat small=(pw-5*gap)*0.15,space=pw-5*gap-3*small;
             keys[0].frame=CGRectMake(gap,y,small,kh);
-            keys[1].frame=CGRectMake(2*gap+small,y,space,kh);
-            keys[2].frame=CGRectMake(3*gap+small+space,y,small,kh);
+            keys[1].frame=CGRectMake(2*gap+small,y,small,kh);
+            keys[2].frame=CGRectMake(3*gap+2*small,y,space,kh);
+            keys[3].frame=CGRectMake(4*gap+2*small+space,y,small,kh);
         } else {
             CGFloat start=(pw-(keys.count*kw+(keys.count-1)*gap))/2;
             for (NSUInteger i=0;i<keys.count;i++) keys[i].frame=CGRectMake(start+i*(kw+gap),y,kw,kh);
@@ -323,6 +358,7 @@ static void TAKBHostStop(void) {
 }
 - (void)press:(UIButton *)sender {
     NSString *label=sender.accessibilityIdentifier;
+    if ([label isEqual:@"VI"] || [label isEqual:@"EN"]) { self.english=!self.english; [self buildKeys]; return; }
     if ([label isEqual:@"⇧"]) { self.shifted=!self.shifted; [self buildKeys]; return; }
     if ([label isEqual:@"123"] || [label isEqual:@"ABC"]) { self.numbers=!self.numbers; [self buildKeys]; return; }
     if ([label isEqual:@"×"]) { if (self.stalled) TAKBHostStop(); else [self enqueue:3 scalar:0]; return; }
@@ -330,7 +366,7 @@ static void TAKBHostStop(void) {
     if ([label isEqual:@"Tìm"]) { [self enqueue:2 scalar:0]; return; }
     NSString *text=[label isEqual:@"Dấu cách"] ? @" " : (self.shifted ? label : label.lowercaseString);
     NSData *data=[text dataUsingEncoding:NSUTF32LittleEndianStringEncoding];
-    if (data.length==4) { uint32_t scalar=0; [data getBytes:&scalar length:4]; [self enqueue:0 scalar:scalar]; }
+    if (data.length==4) { uint32_t scalar=0; [data getBytes:&scalar length:4]; [self enqueue:self.english ? 0 : 4 scalar:scalar]; }
     [self.variants removeFromSuperview]; self.variants=nil;
 }
 - (void)accents:(UILongPressGestureRecognizer *)gesture {

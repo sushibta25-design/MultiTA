@@ -1,4 +1,4 @@
-// TAduo 0.10.18: keyboard text snapshots/focus continuity; scoped YouTube container resize.
+// TAduo 0.10.19: resume the previous split and Vietnamese Telex input.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.18] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.19] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -65,6 +65,8 @@ static UIControl *gapTouchShield;
 static const CGFloat TADividerGap=4;
 static const CGFloat TADividerHitWidth=12;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
+static NSString *resumeBundles[2];
+static CGFloat resumeRatio=0.5;
 static BOOL dividerDragging=NO;
 static CGPoint entryDragStart;
 static __weak UIWindowScene *dashboard;
@@ -217,6 +219,9 @@ static void TAClearSlot(NSInteger slot, NSString *reason) {
 }
 static void TAStop(NSString *reason) {
     if (!running) return;
+    // Remember identities, never retain hosted views or stale scene pointers.
+    for (NSInteger i=0;i<2;i++) resumeBundles[i]=[slots[i].bundle copy];
+    resumeRatio=splitRatio;
     TAKBHostStop();
     running = NO; ++generation;
     TALog(@"STOP %@", reason);
@@ -280,6 +285,7 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 - (void)iconPage:(UIButton *)sender;
 - (void)swapSides;
 - (void)start;
+- (void)resumeSlot:(NSInteger)slot token:(NSUInteger)token attempt:(NSUInteger)attempt;
 - (void)stop;
 - (void)restartSplit;
 - (void)toggleActions;
@@ -446,7 +452,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     if (running || !dashboard || TADashboard() != dashboard) return;
     CGRect bounds = dashboard.coordinateSpace.bounds;
     if (bounds.size.width < 150 || bounds.size.height < 100) return;
-    running = YES; ++generation; splitRatio=0.5;
+    running = YES; ++generation; splitRatio=MAX(0.2,MIN(0.8,resumeRatio));
     splitWindow = [[TASplitWindow alloc] initWithWindowScene:dashboard];
     splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
     splitWindow.opaque=YES; splitWindow.backgroundColor=UIColor.blackColor;
@@ -502,6 +508,20 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     floatingActions.hidden = YES; [root addSubview:floatingActions];
     splitWindow.hidden = NO; buttonWindow.hidden=YES; [self showChrome];
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
+    [self layoutSplit:NO];
+    [self resumeSlot:0 token:generation attempt:0];
+}
+- (void)resumeSlot:(NSInteger)slot token:(NSUInteger)token attempt:(NSUInteger)attempt {
+    if (!running || generation!=token || slot>1 || attempt>=60) return;
+    if (TAAttachPending() || splitWindow.rootViewController.presentedViewController) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(),^{
+            [self resumeSlot:slot token:token attempt:attempt+1];
+        });
+        return;
+    }
+    NSString *bundle=resumeBundles[slot];
+    if (!slots[slot] && bundle.length && records[bundle]) [self attach:bundle slot:slot];
+    [self resumeSlot:slot+1 token:token attempt:0];
 }
 - (void)swapSides {
     if (!running || TAAttachPending() || !slots[0].presentation || !slots[1].presentation || splitWindow.rootViewController.presentedViewController) return;
