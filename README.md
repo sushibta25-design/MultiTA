@@ -82,3 +82,7 @@ Ports selected lifecycle handling from 0.16 onto 0.10.1: native launch/Home anim
 
 ## 0.10.3 – map presentation recovery trial
 Device logs on 0.10.2 show Google Maps client root/window/scene match 213.33x240 and TemplateUIHost has map controls while the user sees a blank right pane. This does not establish the precise compositor failure. For Google Maps, Vietmap and Apple Maps, keep the loading placeholder until an attached LayerHost has a nonzero context. If missing after two seconds, recreate only that presentation once; no repeated foreground or native launch. Six-second surface timeout restores the affected pane to selection. Manual Log includes per-pane host/presentation evidence. Connected context is not proof of visible pixels. Keep YouTube attachment and all resize transactions/client layout unchanged; no new background interception.
+
+
+## 0.10.4 UI
+Cyan/orange split icon at top right and in actions. Action row is Split, Swap, Exit; no Log button or duplicate swap. Controls wake after original CarPlay touch delivery, stay during touch and app selection, hide after three idle seconds. Fixed panes have 6pt corner radius, 4pt gap, transparent noninteractive divider. Geometry is (display width - 4)/2 by full display height. 0.10.3 map recovery/scene lifecycle retained. Device validation required for external CarPlay touch delivery.

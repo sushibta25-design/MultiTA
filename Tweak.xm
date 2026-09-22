@@ -1,4 +1,4 @@
-// TAduo 0.10.3: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.4: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.3] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.4] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -60,6 +60,8 @@ static UIView *panes[2];
 static UIButton *choose[2];
 static UIWindow *splitWindow, *buttonWindow;
 static UIView *floatingActions;
+static UIButton *menuButton;
+static BOOL chromeVisible=YES;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSUInteger generation;
@@ -194,7 +196,7 @@ static void TAStop(NSString *reason) {
     BOOL previous = ownCall; ownCall = YES;
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
-    splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
+    splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil; menuButton=nil;
     buttonWindow.hidden = order.count < 2;
 }
 static BOOL TAHasHostedSurface(CALayer *layer, NSUInteger depth, NSInteger *budget) {
@@ -238,6 +240,10 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 - (void)replace:(NSString *)bundle slot:(NSInteger)slot;
 - (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
 - (void)checkPresentation:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
+- (void)showChrome;
+- (void)hideChrome;
+- (void)touchActivity:(UIEvent *)event;
+- (void)enter;
 - (void)renderIcons;
 - (void)closeIcons;
 - (void)selectIcon:(UIButton *)sender;
@@ -258,9 +264,51 @@ static UIButton *TAButton(NSString *title, SEL action) {
     b.backgroundColor = [UIColor colorWithWhite:0.16 alpha:0.95];
     [b addTarget:controls action:action forControlEvents:UIControlEventTouchUpInside]; return b;
 }
+static UIImage *TASplitIcon(void) {
+    static UIImage *icon;
+    if (!icon) {
+        UIGraphicsBeginImageContextWithOptions(CGSizeMake(30,24),NO,0);
+        [[UIColor colorWithRed:0 green:0.88 blue:1 alpha:1] setFill];
+        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(1,2,12,20) cornerRadius:2] fill];
+        [[UIColor colorWithRed:1 green:0.43 blue:0.10 alpha:1] setFill];
+        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(17,2,12,20) cornerRadius:2] fill];
+        icon=[UIGraphicsGetImageFromCurrentImageContext() imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+        UIGraphicsEndImageContext();
+    }
+    return icon;
+}
 @implementation TAControls
-- (void)stop { [self closeIcons]; TAStop(@"user"); }
-- (void)toggleActions { floatingActions.hidden = !floatingActions.hidden; }
+- (void)enter {
+    [self showChrome];
+    if (running) [self restartSplit]; else [self start];
+}
+- (void)showChrome {
+    chromeVisible=YES;
+    menuButton.hidden=NO;
+    buttonWindow.hidden=!dashboard || order.count<1 || splitWindow.rootViewController.presentedViewController!=nil;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideChrome) object:nil];
+    [self performSelector:@selector(hideChrome) withObject:nil afterDelay:3.0 inModes:@[NSRunLoopCommonModes]];
+}
+- (void)hideChrome {
+    if (splitWindow.rootViewController.presentedViewController) {
+        [self showChrome]; return;
+    }
+    chromeVisible=NO; menuButton.hidden=YES; floatingActions.hidden=YES; buttonWindow.hidden=YES;
+}
+- (void)touchActivity:(UIEvent *)event {
+    BOOL active=NO, touched=NO;
+    for (UITouch *touch in event.allTouches) {
+        UIWindow *w=touch.window;
+        if (!w || w.windowScene!=dashboard) continue;
+        touched=YES;
+        if (touch.phase==UITouchPhaseBegan || touch.phase==UITouchPhaseMoved || touch.phase==UITouchPhaseStationary) active=YES;
+    }
+    if (!touched) return;
+    [self showChrome];
+    if (active) [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideChrome) object:nil];
+}
+- (void)stop { [self closeIcons]; TAStop(@"user"); [self showChrome]; }
+- (void)toggleActions { [self showChrome]; floatingActions.hidden = !floatingActions.hidden; }
 - (void)snapshot {
     floatingActions.hidden = YES;
     TALog(@"MANUAL SNAPSHOT REQUEST");
@@ -294,32 +342,37 @@ static UIButton *TAButton(NSString *title, SEL action) {
     // Both scenes occupy full display height. Only floating button hit areas
     // cover content; no toolbar strip is reserved in scene geometry.
     CGFloat half = bounds.size.width / 2;
+    CGFloat gap=4, paneWidth=(bounds.size.width-gap)/2;
     for (NSInteger i = 0; i < 2; i++) {
-        panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * half, 0, half, bounds.size.height)];
+        panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * (paneWidth+gap), 0, paneWidth, bounds.size.height)];
+        panes[i].layer.cornerRadius=6;
         panes[i].clipsToBounds = YES; [root addSubview:panes[i]];
         choose[i] = TAButton(i == 0 ? @"Chọn app trái" : @"Chọn app phải", @selector(pick:));
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half - 78, bounds.size.height / 2 - 83, 156, 64)];
+    UIView *divider=[[UIView alloc] initWithFrame:CGRectMake(paneWidth,0,gap,bounds.size.height)];
+    divider.backgroundColor=UIColor.clearColor; divider.userInteractionEnabled=NO;
+    [root addSubview:divider];
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half - 78, bounds.size.height / 2 - 49, 156, 30)];
     floatingActions.backgroundColor = UIColor.clearColor;
-    NSArray *titles = @[@"Chia", @"Log", @"Thoát"];
-    NSArray *actions = @[@"restartSplit", @"snapshot", @"stop"];
+    NSArray *titles = @[@"", @"", @"Thoát"];
+    NSArray *actions = @[@"restartSplit", @"swapSides", @"stop"];
     for (NSUInteger i=0; i<titles.count; i++) {
         UIButton *b = TAButton(titles[i], NSSelectorFromString(actions[i]));
-        b.frame = CGRectMake(i*52, 34, 50, 30); b.layer.cornerRadius = 8;
+        b.frame = CGRectMake(i*52, 0, 50, 30); b.layer.cornerRadius = 8;
+        if (i==0) { [b setImage:TASplitIcon() forState:UIControlStateNormal]; b.accessibilityLabel=@"Chia màn hình"; }
+        if (i==1) {
+            [b setImage:[UIImage systemImageNamed:@"arrow.left.arrow.right"] forState:UIControlStateNormal];
+            b.accessibilityLabel=@"Đổi vị trí hai ứng dụng";
+        }
         [floatingActions addSubview:b];
     }
-    UIButton *swap = TAButton(@"", @selector(swapSides));
-    [swap setImage:[UIImage systemImageNamed:@"arrow.left.arrow.right"] forState:UIControlStateNormal];
-    swap.frame = CGRectMake(52, 0, 50, 30); swap.layer.cornerRadius = 8;
-    swap.accessibilityLabel = @"Đổi vị trí hai ứng dụng";
-    [floatingActions addSubview:swap];
     floatingActions.hidden = YES; [root addSubview:floatingActions];
-    UIButton *menu = TAButton(@"•••", @selector(toggleActions));
-    menu.frame = CGRectMake(half - 16, bounds.size.height / 2 - 15, 32, 30);
-    menu.layer.cornerRadius = 10; menu.accessibilityLabel = @"Tác vụ TAduo";
-    [root addSubview:menu];
-    buttonWindow.hidden = YES; splitWindow.hidden = NO;
+    menuButton = TAButton(@"•••", @selector(toggleActions));
+    menuButton.frame = CGRectMake(half - 16, bounds.size.height / 2 - 15, 32, 30);
+    menuButton.layer.cornerRadius = 10; menuButton.accessibilityLabel = @"Tác vụ TAduo";
+    [root addSubview:menuButton];
+    splitWindow.hidden = NO; [self showChrome];
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
 }
 - (void)swapSides {
@@ -584,7 +637,7 @@ static void TACapture(id controller, id settings) {
         [records removeObjectForKey:victim]; [order removeObject:victim];
     }
     TALog(@"CAPTURE %@ sid=%@ launchSource=%d",bundle,sid,launch);
-    if (!running) buttonWindow.hidden=NO;
+    if (!running) [controls showChrome];
 }
 static void TATick(void) {
     UIWindowScene *s = TADashboard();
@@ -596,11 +649,16 @@ static void TATick(void) {
     if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
     if (s && !buttonWindow) {
         buttonWindow = [[UIWindow alloc] initWithWindowScene:s]; buttonWindow.windowLevel = UIWindowLevelAlert + 80;
-        buttonWindow.frame = CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-88, 0, 88, 30);
+        buttonWindow.frame = CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-46, 4, 42, 32);
         buttonWindow.rootViewController = [UIViewController new];
-        UIButton *b = TAButton(@"TAduo 0.10.3", @selector(start)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
+        UIButton *b = TAButton(@"", @selector(enter));
+        [b setImage:TASplitIcon() forState:UIControlStateNormal];
+        b.accessibilityLabel=@"Chia màn hình"; b.layer.cornerRadius=8; b.frame=buttonWindow.bounds;
+        buttonWindow.rootViewController.view.backgroundColor=UIColor.clearColor;
+        [buttonWindow.rootViewController.view addSubview:b];
+        [controls showChrome];
     }
-    buttonWindow.hidden = running || order.count < 2;
+    buttonWindow.hidden = !chromeVisible || !s || order.count<1 || splitWindow.rootViewController.presentedViewController!=nil;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
 }
 // Darwin state channels carry only dimensions, never application content.
@@ -892,6 +950,14 @@ static void TAListenSnapshots(void) {
 %end
 %end
 %group TAHost
+%hook UIWindow
+- (void)sendEvent:(UIEvent *)event {
+    // Deliver first so waking controls cannot steal the touch.
+    %orig;
+    if (event.type==UIEventTypeTouches && ((UIWindow *)self).windowScene==dashboard)
+        [controls touchActivity:event];
+}
+%end
 %hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
     BOOL external=!ownCall;
