@@ -1,3 +1,14 @@
+# TAduo 0.10.15
+
+- YouTube: invalidate layout/collection layout một lần mỗi geometry/safe-area/root khi scene, window và root đã khớp target; không ép frame hay scale. Log YOUTUBE CLIENT RELAYOUT. Cần xác nhận thực tế vì layout riêng của YouTube có thể vẫn cần xử lý thêm.
+
+- Google Maps: thử thu gọn chữ tiêu đề navigation bar, dành chỗ cho nút; giữ nguyên font, icon và xử lý cảm ứng native. Khôi phục chữ khi thoát chia.
+- Mở rộng resize template cho app mới có scene CarPlay đang được TAduo chia: bỏ danh sách cố định tại kiểm tra target, dùng thông báo chung để cập nhật và khôi phục.
+- Tab title và CPSImageRowCell dùng chung cho app template phù hợp; vẫn kiểm tra cấu trúc hàng ảnh và constraints trước khi sửa. Không inject thêm vào app iPhone.
+- Giữ divider đen và bước hiển thị YouTube từ 0.10.14.
+
+Cần test: Google Maps tìm kiếm ở cả hai bên và khi kéo divider; app nhạc khác tab/ảnh bìa; thoát chia khôi phục giao diện. Chưa đảm bảo app giao diện riêng hoặc CarBridge tự bố trí nội dung giống app template.
+
 # TAduo 0.10.14
 
 - Nền chia và khe divider đen, đục ngay trước khi hiện hai ô chọn app. Vùng chạm divider vẫn chặn app phía dưới.

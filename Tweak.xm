@@ -1,4 +1,4 @@
-// TAduo 0.10.14: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.15: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.14] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.15] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -837,14 +837,17 @@ static int TATargetToken(NSString *bundle) {
 static void TASetLayoutTarget(NSString *bundle, CGSize size) {
     int token = TATargetToken(bundle); if (token < 0) return;
     uint64_t packed = ((uint64_t)llround(size.width * 4) << 32) | (uint32_t)llround(size.height * 4);
-    if (notify_set_state(token, packed) == NOTIFY_STATUS_OK) notify_post(TAChannel(bundle, @"layout-target").UTF8String);
+    if (notify_set_state(token, packed) == NOTIFY_STATUS_OK) {
+        notify_post(TAChannel(bundle, @"layout-target").UTF8String);
+        notify_post("com.sushibta.taduo.template-targets-changed");
+    }
 }
 static BOOL TATemplateTarget(UIWindow *w, NSString **bundleOut) {
     NSString *sid = w.windowScene.session.persistentIdentifier;
     NSArray *parts = [sid componentsSeparatedByString:@":"];
     if (parts.count != 3 || ![parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"]) return NO;
     NSString *bundle = parts.lastObject; if (bundleOut) *bundleOut = bundle;
-    if (![TAClientBundles() containsObject:bundle]) return NO;
+    if (![bundle containsString:@"."]) return NO;
     int token = TATargetToken(bundle); uint64_t packed = 0;
     if (token < 0 || notify_get_state(token, &packed) != NOTIFY_STATUS_OK || !packed) return NO;
     CGSize target = CGSizeMake((packed >> 32)/4.0, (packed & 0xffffffff)/4.0);
@@ -869,7 +872,7 @@ static NSString *TAFitTabTitle(NSString *title, CGFloat width) {
 static void TACompactTabs(UITabBar *bar) {
     if ([objc_getAssociatedObject(bar,&TATabBusyKey) boolValue]) return;
     NSString *bundle=nil;
-    BOOL active=TATemplateTarget(bar.window,&bundle) && [bundle isEqual:@"com.google.ios.youtubemusic"] && bar.bounds.size.width>0 && bar.bounds.size.width<300;
+    BOOL active=TATemplateTarget(bar.window,&bundle) && bar.bounds.size.width>0 && bar.bounds.size.width<300;
     if (!active && ![TACompactTabBars containsObject:bar]) return;
     objc_setAssociatedObject(bar,&TATabBusyKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     @try {
@@ -921,7 +924,7 @@ static void TARestoreImageRow(UIView *cell) {
 static void TACompactImageRow(UIView *cell) {
     if ([objc_getAssociatedObject(cell,&TARowBusyKey) boolValue]) return;
     NSString *bundle=nil;
-    BOOL active=TATemplateTarget(cell.window,&bundle) && [bundle isEqual:@"com.google.ios.youtubemusic"] && cell.bounds.size.width>48 && cell.bounds.size.width<300;
+    BOOL active=TATemplateTarget(cell.window,&bundle) && cell.bounds.size.width>48 && cell.bounds.size.width<300;
     if (!active) { TARestoreImageRow(cell); return; }
     objc_setAssociatedObject(cell,&TARowBusyKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     @try {
@@ -987,6 +990,57 @@ static void TAInvalidateTree(UIView *view, NSUInteger depth, NSUInteger *budget)
     if ([view isKindOfClass:UICollectionView.class]) [((UICollectionView *)view).collectionViewLayout invalidateLayout];
     for (UIView *child in view.subviews) TAInvalidateTree(child, depth+1, budget);
 }
+// Relayout the bridged YouTube client only after all outer geometry agrees.
+// No screen spoofing, transforms, or forced root bounds.
+static char TAYoutubeLayoutStamp, TAYoutubeLayoutQueued;
+static void TAYoutubeClientLayout(UIWindow *w) {
+    if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.google.ios.youtube"]) return;
+    NSString *sid=w.windowScene.session.persistentIdentifier ?: @"";
+    NSString *role=w.windowScene.session.role ?: @"";
+    if (![sid hasPrefix:@"Car["] && ![role containsString:@"CarPlay"]) return;
+    UIView *root=w.rootViewController.viewIfLoaded; if (!root) return;
+    int token=TATargetToken(@"com.google.ios.youtube"); uint64_t packed=0;
+    if (token<0 || notify_get_state(token,&packed)!=NOTIFY_STATUS_OK) return;
+    if (!packed) {
+        if (objc_getAssociatedObject(w,&TAYoutubeLayoutStamp)) {
+            objc_setAssociatedObject(w,&TAYoutubeLayoutStamp,nil,OBJC_ASSOCIATION_COPY_NONATOMIC);
+            NSUInteger budget=100; TAInvalidateTree(root,0,&budget);
+        }
+        return;
+    }
+    CGSize target=CGSizeMake((packed>>32)/4.0,(packed&0xffffffff)/4.0);
+    for (NSValue *value in @[[NSValue valueWithCGSize:w.windowScene.coordinateSpace.bounds.size],
+                              [NSValue valueWithCGSize:w.bounds.size],[NSValue valueWithCGSize:root.bounds.size]]) {
+        CGSize actual=value.CGSizeValue;
+        if (fabs(actual.width-target.width)>=0.5 || fabs(actual.height-target.height)>=0.5) return;
+    }
+    NSString *stamp=[NSString stringWithFormat:@"%@/%@/%@/%p",sid,NSStringFromCGSize(target),NSStringFromUIEdgeInsets(root.safeAreaInsets),(__bridge void *)root];
+    if ([objc_getAssociatedObject(w,&TAYoutubeLayoutStamp) isEqual:stamp] ||
+        [objc_getAssociatedObject(w,&TAYoutubeLayoutQueued) boolValue]) return;
+    objc_setAssociatedObject(w,&TAYoutubeLayoutStamp,stamp,OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(w,&TAYoutubeLayoutQueued,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        objc_setAssociatedObject(w,&TAYoutubeLayoutQueued,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        uint64_t current=0;
+        if (notify_get_state(token,&current)!=NOTIFY_STATUS_OK || current!=packed || w.rootViewController.viewIfLoaded!=root) {
+            objc_setAssociatedObject(w,&TAYoutubeLayoutStamp,nil,OBJC_ASSOCIATION_COPY_NONATOMIC); return;
+        }
+        NSUInteger budget=100; TAInvalidateTree(root,0,&budget); [root layoutIfNeeded];
+        TALog(@"YOUTUBE CLIENT RELAYOUT target=%@ window=%@ root=%@ safe=%@",
+              NSStringFromCGSize(target),NSStringFromCGRect(w.bounds),NSStringFromCGRect(root.bounds),
+              NSStringFromUIEdgeInsets(root.safeAreaInsets));
+    });
+}
+static void TAListenYouTubeTarget(void) {
+    int token;
+    notify_register_dispatch(TAChannel(@"com.google.ios.youtube",@"layout-target").UTF8String,
+        &token,dispatch_get_main_queue(),^(__unused int delivered) {
+            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                if (![scene isKindOfClass:UIWindowScene.class]) continue;
+                for (UIWindow *w in ((UIWindowScene *)scene).windows) TAYoutubeClientLayout(w);
+            }
+        });
+}
 static char TAOriginalInsetsKey, TALayoutStampKey, TALayoutQueuedKey;
 static void TATemplateLayout(UIWindow *w) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"]) return;
@@ -1036,20 +1090,82 @@ static void TATemplateLayout(UIWindow *w) {
         }
     });
 }
-static void TAListenTemplateTargets(void) {
-    for (NSString *bundle in TAClientBundles()) {
-        int token;
-        notify_register_dispatch(TAChannel(bundle, @"layout-target").UTF8String, &token, dispatch_get_main_queue(), ^(__unused int delivered) {
-            for (UITabBar *bar in TACompactTabBars.allObjects) TACompactTabs(bar);
-            for (UIView *cell in TAImageRows.allObjects) TACompactImageRow(cell);
-            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-                if (![scene isKindOfClass:UIWindowScene.class]) continue;
-                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                    TATemplateLayout(w);
-                }
-            }
-        });
+// Google Maps navigation title competes with back and two trailing controls.
+// Shorten only title text; native layout, hit targets, and icon sizes stay native.
+static NSHashTable<UIView *> *TAGoogleBars;
+static char TAGoogleTitleKey, TAGoogleBusyKey;
+static NSString *TAFitGoogleTitle(NSString *text, UIFont *font, CGFloat width) {
+    NSDictionary *attrs=@{NSFontAttributeName:font};
+    if ([text sizeWithAttributes:attrs].width<=width) return text;
+    NSString *prefix=text;
+    while (prefix.length) {
+        NSRange last=[prefix rangeOfComposedCharacterSequenceAtIndex:prefix.length-1];
+        prefix=[prefix substringToIndex:last.location];
+        NSString *candidate=[prefix stringByAppendingString:@"…"];
+        if ([candidate sizeWithAttributes:attrs].width<=width) return candidate;
     }
+    return @"…";
+}
+static void TAGoogleTitleWalk(UIView *view, BOOL title, BOOL active, CGFloat width, NSUInteger depth) {
+    if (depth>4) return;
+    title=title || [NSStringFromClass(view.class) isEqual:@"_CarTitleView"];
+    if (title && [view isKindOfClass:UILabel.class]) {
+        UILabel *label=(UILabel *)view;
+        NSDictionary *saved=objc_getAssociatedObject(label,&TAGoogleTitleKey);
+        if (saved && ![label.text isEqual:saved[@"applied"]]) {
+            if ([label.accessibilityLabel isEqual:saved[@"original"]])
+                label.accessibilityLabel=saved[@"accessibility"]==NSNull.null ? nil : saved[@"accessibility"];
+            saved=nil; objc_setAssociatedObject(label,&TAGoogleTitleKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        NSString *original=saved ? saved[@"original"] : label.text;
+        if (original.length && (!label.attributedText || saved)) {
+            NSString *desired=active ? TAFitGoogleTitle(original,label.font,width) : original;
+            if (![desired isEqual:original]) {
+                id accessibility=saved ? saved[@"accessibility"] : (label.accessibilityLabel ?: (id)NSNull.null);
+                objc_setAssociatedObject(label,&TAGoogleTitleKey,@{@"original":original,@"applied":desired,@"accessibility":accessibility},OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                if (!label.accessibilityLabel) label.accessibilityLabel=original;
+            } else if (saved) {
+                if ([label.accessibilityLabel isEqual:original])
+                    label.accessibilityLabel=saved[@"accessibility"]==NSNull.null ? nil : saved[@"accessibility"];
+                objc_setAssociatedObject(label,&TAGoogleTitleKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            if (![label.text isEqual:desired]) {
+                label.text=desired;
+                [label invalidateIntrinsicContentSize]; [label.superview invalidateIntrinsicContentSize];
+                TALog(@"GOOGLE BAR titleFit active=%d budget=%.1f",active,width);
+            }
+        }
+    }
+    for (UIView *child in view.subviews) TAGoogleTitleWalk(child,title,active,width,depth+1);
+}
+static void TACompactGoogleBar(UIView *bar) {
+    if ([objc_getAssociatedObject(bar,&TAGoogleBusyKey) boolValue]) return;
+    NSString *bundle=nil;
+    BOOL active=TATemplateTarget(bar.window,&bundle) && [bundle isEqual:@"com.google.Maps"] &&
+        bar.bounds.size.width>0 && bar.bounds.size.width<300;
+    if (!active && ![TAGoogleBars containsObject:bar]) return;
+    objc_setAssociatedObject(bar,&TAGoogleBusyKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @try {
+        if (!TAGoogleBars) TAGoogleBars=[NSHashTable weakObjectsHashTable];
+        if (active) [TAGoogleBars addObject:bar];
+        // Observed controls: back 44pt, trailing 37+8+37pt, plus margins.
+        TAGoogleTitleWalk(bar,NO,active,MAX(20,bar.bounds.size.width-160),0);
+        if (!active) [TAGoogleBars removeObject:bar];
+    } @finally { objc_setAssociatedObject(bar,&TAGoogleBusyKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+}
+static void TAListenTemplateTargets(void) {
+    int token;
+    notify_register_dispatch("com.sushibta.taduo.template-targets-changed", &token, dispatch_get_main_queue(), ^(__unused int delivered) {
+        for (UITabBar *bar in TACompactTabBars.allObjects) TACompactTabs(bar);
+        for (UIView *cell in TAImageRows.allObjects) TACompactImageRow(cell);
+        for (UIView *bar in TAGoogleBars.allObjects) {
+            TACompactGoogleBar(bar); [bar setNeedsLayout];
+        }
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) TATemplateLayout(w);
+        }
+    });
 }
 static void TASendSize(NSString *bundle, NSString *kind, CGSize size) {
     if (!isfinite(size.width) || !isfinite(size.height) || size.width <= 0 || size.height <= 0 || size.width > 16000 || size.height > 16000) return;
@@ -1105,7 +1221,7 @@ static NSString *TADiagnosticBundle(UIWindow *w) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"] || w.hidden) return nil;
     NSArray *parts=[w.windowScene.session.persistentIdentifier componentsSeparatedByString:@":"];
     if (parts.count!=3 || ![parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"]) return nil;
-    return [TAClientBundles() containsObject:parts.lastObject] ? parts.lastObject : nil;
+    return [parts.lastObject containsString:@"."] ? parts.lastObject : nil;
 }
 static void TAVisibleTransition(UIViewController *vc) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"]) return;
@@ -1149,6 +1265,15 @@ static void TAVisibleTransition(UIViewController *vc) {
 %end
 %end
 
+%group TAGoogleNavigation
+%hook CPSNavigationBar
+- (void)layoutSubviews {
+    TACompactGoogleBar((UIView *)self);
+    %orig;
+}
+%end
+%end
+
 %group TACompactHome
 %hook UITabBar
 - (void)layoutSubviews {
@@ -1174,6 +1299,7 @@ static void TAVisibleTransition(UIViewController *vc) {
     %orig;
     TAClientObserve(self);
     TATemplateLayout(self);
+    TAYoutubeClientLayout(self);
 }
 %end
 %end
@@ -1263,8 +1389,10 @@ static void TAVisibleTransition(UIViewController *vc) {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
         if (([TAClientBundles() containsObject:process] && ![process isEqual:@"vn.vietmap.live"]) || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
+            if ([process isEqual:@"com.google.ios.youtube"]) dispatch_async(dispatch_get_main_queue(), ^{ TAListenYouTubeTarget(); });
             if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
                 %init(TACompactHome);
+                if (NSClassFromString(@"CPSNavigationBar")) { %init(TAGoogleNavigation); }
                 if (NSClassFromString(@"CPSImageRowCell")) { %init(TAImageRowExperiment); }
                 Class cls=NSClassFromString(@"CPUINowPlayingView");
                 SEL selector=NSSelectorFromString(@"recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:");
