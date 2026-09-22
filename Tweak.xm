@@ -1,4 +1,4 @@
-// TAduo 0.21.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.22.0: unified actions menu and filtered icon-only app picker.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.21] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.22] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -25,13 +25,22 @@ static void TALog(NSString *format, ...) {
 static id TAValue(id o, NSString *key) {
     @try { return [o valueForKey:key]; } @catch (__unused NSException *e) { return nil; }
 }
+// Apply this to captured scenes AND installed catalog entries. CarPlay's
+// shell pages are not standalone applications that can occupy a split pane.
+static BOOL TASelectableBundle(NSString *bundle) {
+    if (![bundle isKindOfClass:NSString.class] || ![bundle containsString:@"."]) return NO;
+    NSString *key=bundle.lowercaseString;
+    if ([key hasPrefix:@"com.apple.carplay"]) return NO;
+    return ![@[@"com.apple.springboard", @"com.apple.backboardd",
+               @"com.apple.home", @"com.apple.siri", @"com.apple.siriviewservice"] containsObject:key];
+}
 static NSString *TABundle(id controller) {
     NSString *sid = TAValue(controller, @"sceneID");
     if (![sid isKindOfClass:NSString.class] || ![sid hasPrefix:@"Car["]) return nil;
     NSArray *parts = [sid componentsSeparatedByString:@":"];
     NSString *bundle = parts.count == 2 ? parts[1] :
         (parts.count == 3 && [parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"] ? parts[2] : nil);
-    if (![bundle containsString:@"."] || [@[@"com.apple.CarPlayApp", @"com.apple.CarPlaySettings", @"com.apple.CarPlayWallpaper", @"com.apple.CarPlayTemplateUIHost"] containsObject:bundle]) return nil;
+    if (!TASelectableBundle(bundle)) return nil;
     return bundle;
 }
 @interface TARecord : NSObject
@@ -225,7 +234,7 @@ static void TARefreshCatalog(void) {
         for (id proxy in proxies) {
             if (++examined>600) break;
             NSString *bundle=TAValue(proxy,@"bundleIdentifier");
-            if (![bundle isKindOfClass:NSString.class] || !bundle.length) continue;
+            if (!TASelectableBundle(bundle)) continue;
             @try {
                 id allocated=[infoClass alloc]; SEL initializer=NSSelectorFromString(@"initWithApplicationProxy:");
                 if (!TAObjectMethod(allocated,initializer,1)) break;
@@ -245,7 +254,9 @@ static NSArray<NSString *> *TAPickerBundles(void) {
     TARefreshCatalog();
     NSMutableOrderedSet *all=[NSMutableOrderedSet orderedSetWithArray:[[order reverseObjectEnumerator] allObjects]];
     [all addObjectsFromArray:[[catalog allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]];
-    return all.array;
+    NSMutableArray *selectable=[NSMutableArray new];
+    for (NSString *bundle in all) if (TASelectableBundle(bundle)) [selectable addObject:bundle];
+    return selectable;
 }
 static BOOL TANativeLaunch(NSString *bundle) {
     id info=catalog[bundle]; Class launchClass=NSClassFromString(@"DBApplicationLaunchInfo");
@@ -306,14 +317,9 @@ static UIImage *TAAppIcon(NSString *bundle) {
     if (image) cache[bundle]=image;
     return image;
 }
-static NSUInteger actionVisibilitySerial;
 static void TARevealActions(void) {
     if (!running || !floatingActions) return;
     floatingActions.hidden=NO;
-    NSUInteger serial=++actionVisibilitySerial, token=generation;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(), ^{
-        if (running && generation==token && actionVisibilitySerial==serial) floatingActions.hidden=YES;
-    });
 }
 @interface TASplitWindow : UIWindow
 @end
@@ -403,7 +409,7 @@ static void TAClearSlot(NSInteger slot, NSString *reason) {
 static void TAStop(NSString *reason) {
     resumeBundles=nil; resumeCandidate=nil;
     if (!running) return;
-    running = NO; ++generation; ++actionVisibilitySerial;
+    running = NO; ++generation;
     for (NSInteger i=0;i<2;i++) { [appPickers[i] removeFromSuperview]; appPickers[i]=nil; retryTargets[i]=nil; }
     TALog(@"STOP %@", reason);
     BOOL previous = ownCall; ownCall = YES;
@@ -427,7 +433,7 @@ static void TASuspend(NSString *reason) {
 - (void)enter;
 - (void)selectTile:(TAAppTile *)tile;
 - (void)closePicker:(UIButton *)sender;
-- (void)holdSwap:(UILongPressGestureRecognizer *)gesture;
+- (void)showActions;
 - (void)holdDock:(UILongPressGestureRecognizer *)gesture;
 - (void)offerNative:(NSString *)bundle;
 - (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
@@ -497,7 +503,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
 - (void)offerNative:(NSString *)bundle {
     if (!running || !records[bundle] || TAAttachPending() || [slots[0].bundle isEqual:bundle] || [slots[1].bundle isEqual:bundle]) return;
     if (splitWindow.rootViewController.presentedViewController) { TALog(@"NATIVE OFFER deferred to picker bundle=%@",bundle); return; }
-    floatingActions.hidden=YES;
+    floatingActions.hidden=NO;
     UIAlertController *picker=[UIAlertController alertControllerWithTitle:TAAppName(bundle) message:@"Đưa app vào bên nào?" preferredStyle:UIAlertControllerStyleAlert];
     NSUInteger token=generation;
     for (NSInteger side=0;side<2;side++) {
@@ -511,7 +517,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     TALog(@"NATIVE OFFER bundle=%@",bundle);
     [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
 }
-- (void)fold { floatingActions.hidden=YES; TARememberPair(); TASuspend(@"fold"); }
+- (void)fold { floatingActions.hidden=NO; TARememberPair(); TASuspend(@"fold"); }
 - (void)changeLeft { [self pick:choose[0]]; }
 - (void)changeRight { [self pick:choose[1]]; }
 - (void)replace:(NSString *)bundle slot:(NSInteger)slot {
@@ -535,11 +541,11 @@ static UIButton *TAButton(NSString *title, SEL action) {
     for (NSInteger i=0;i<2;i++) {
         [panes[i] addSubview:slots[i].presentation]; slots[i].presentation.frame=panes[i].bounds;
     }
-    floatingActions.hidden=YES; TARememberPair(); TALog(@"SWAP completed");
+    floatingActions.hidden=NO; TARememberPair(); TALog(@"SWAP completed");
 }
 - (void)showPairs {
     if (!running || splitWindow.rootViewController.presentedViewController) return;
-    floatingActions.hidden=YES;
+    floatingActions.hidden=NO;
     UIAlertController *picker=[UIAlertController alertControllerWithTitle:@"Cặp gần dùng" message:recentPairs.count ? nil : @"Ghép hai app để lưu cặp gần dùng." preferredStyle:UIAlertControllerStyleAlert];
     NSUInteger token=generation;
     for (NSArray *pair in [recentPairs copy]) {
@@ -556,9 +562,9 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
 }
 - (void)stop { TARememberPair(); TAStop(@"user"); }
-- (void)toggleActions { TARevealActions(); }
+- (void)toggleActions { [self showActions]; }
 - (void)snapshot {
-    floatingActions.hidden = YES;
+    floatingActions.hidden = NO;
     TALog(@"MANUAL SNAPSHOT REQUEST");
     TADumpDock();
     notify_post("com.sushibta.taduo.snapshot");
@@ -592,44 +598,50 @@ static UIButton *TAButton(NSString *title, SEL action) {
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
 
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-28,MAX(4,(bounds.size.height-148)/2),56,148)];
-    floatingActions.backgroundColor=[UIColor colorWithWhite:0.04 alpha:1]; floatingActions.layer.cornerRadius=10;
-    floatingActions.layer.borderWidth=1; floatingActions.layer.borderColor=[UIColor colorWithWhite:0.5 alpha:1].CGColor;
-    NSArray *titles=@[@"Đổi trái phải",@"Thu về CarPlay",@"Thoát chia màn"];
-    NSArray *actions=@[@"swapSides",@"fold",@"stop"];
-    for (NSUInteger i=0;i<3;i++) {
-        UIButton *b=TAButton(@"",NSSelectorFromString(actions[i]));
-        b.frame=CGRectMake(2,2+i*48,52,46); b.backgroundColor=UIColor.clearColor;
-        NSArray *symbols=@[@"arrow.left.arrow.right",@"arrow.uturn.backward",@"xmark"];
-        UIImage *glyph=[UIImage systemImageNamed:symbols[i] withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIImageSymbolWeightBold]];
-        UIImageView *iv=[[UIImageView alloc] initWithImage:glyph]; iv.frame=CGRectMake(14,3,24,23); iv.contentMode=UIViewContentModeScaleAspectFit;
-        iv.tintColor=i==2 ? TAOrange() : UIColor.whiteColor; [b addSubview:iv];
-        UILabel *caption=[[UILabel alloc] initWithFrame:CGRectMake(0,28,52,15)]; caption.text=(@[@"Đổi",@"Thu",@"Thoát"])[i]; caption.textAlignment=NSTextAlignmentCenter; caption.font=[UIFont boldSystemFontOfSize:11]; caption.textColor=iv.tintColor; [b addSubview:caption];
-        b.accessibilityLabel=titles[i];
-        if (i==0) [b addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(holdSwap:)]];
-        [floatingActions addSubview:b];
-    }
-    floatingActions.hidden=YES; [root addSubview:floatingActions];
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-22,MAX(4,(bounds.size.height-44)/2),44,44)];
+    floatingActions.backgroundColor=[UIColor colorWithWhite:0.04 alpha:0.96];
+    floatingActions.layer.cornerRadius=12;
+    floatingActions.layer.borderWidth=1;
+    floatingActions.layer.borderColor=[UIColor colorWithWhite:0.5 alpha:1].CGColor;
+    UIButton *more=TAButton(@"…",@selector(showActions));
+    more.frame=floatingActions.bounds; more.backgroundColor=UIColor.clearColor;
+    more.titleLabel.font=[UIFont boldSystemFontOfSize:28];
+    more.accessibilityLabel=@"Tác vụ chia màn hình";
+    [floatingActions addSubview:more]; [root addSubview:floatingActions];
     buttonWindow.hidden = YES; splitWindow.hidden = NO;
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
 }
 - (void)holdDock:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state==UIGestureRecognizerStateBegan) [self snapshot];
 }
-- (void)holdSwap:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state!=UIGestureRecognizerStateBegan || !running || splitWindow.rootViewController.presentedViewController) return;
-    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"Đổi ứng dụng" message:nil preferredStyle:UIAlertControllerStyleAlert];
+- (void)showActions {
+    if (!running || splitWindow.rootViewController.presentedViewController) return;
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"Tác vụ" message:nil preferredStyle:UIAlertControllerStyleAlert];
     NSUInteger token=generation;
-    for (NSInteger i=0;i<2;i++) [menu addAction:[UIAlertAction actionWithTitle:i==0 ? @"Đổi app trái" : @"Đổi app phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-        dispatch_async(dispatch_get_main_queue(), ^{ if (running && generation==token) [self pick:choose[i]]; });
-    }]];
+    __weak UIAlertController *weakMenu=menu;
+    // Wait for dismissal before opening a picker or another modal, and reject
+    // callbacks from an ended/replaced split session.
+    void (^add)(NSString *, UIAlertActionStyle, BOOL, void (^)(void)) = ^(NSString *title, UIAlertActionStyle style, BOOL enabled, void (^perform)(void)) {
+        UIAlertAction *action=[UIAlertAction actionWithTitle:title style:style handler:^(__unused UIAlertAction *a) {
+            [weakMenu dismissViewControllerAnimated:YES completion:^{
+                if (running && generation==token) perform();
+            }];
+        }];
+        action.enabled=enabled; [menu addAction:action];
+    };
+    add(@"Đổi app trái",UIAlertActionStyleDefault,YES,^{ [self changeLeft]; });
+    add(@"Đổi app phải",UIAlertActionStyleDefault,YES,^{ [self changeRight]; });
+    add(@"Đổi trái ↔ phải",UIAlertActionStyleDefault,
+        slots[0].presentation && slots[1].presentation && !TAAttachPending(),^{ [self swapSides]; });
+    add(@"Cặp gần dùng",UIAlertActionStyleDefault,!TAAttachPending(),^{ [self showPairs]; });
     for (NSInteger i=0;i<2;i++) {
-        if (!slots[i].bundle && !retryTargets[i]) continue;
-        [menu addAction:[UIAlertAction actionWithTitle:i==0 ? @"Tải lại ô trái" : @"Tải lại ô phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-            dispatch_async(dispatch_get_main_queue(), ^{ if (running && generation==token) [self retryPane:i]; });
-        }]];
+        add(i==0 ? @"Tải lại ô trái" : @"Tải lại ô phải",UIAlertActionStyleDefault,
+            (slots[i].bundle || retryTargets[i]) && !slots[i].attaching,^{ [self retryPane:i]; });
     }
-    [menu addAction:[UIAlertAction actionWithTitle:@"Lấy log" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { [self snapshot]; }]];
+    add(@"Chọn lại hai app",UIAlertActionStyleDefault,YES,^{ [self restartSplit]; });
+    add(@"Thu về CarPlay",UIAlertActionStyleDefault,YES,^{ [self fold]; });
+    add(@"Lấy log",UIAlertActionStyleDefault,YES,^{ [self snapshot]; });
+    add(@"Thoát chia màn",UIAlertActionStyleDestructive,YES,^{ [self stop]; });
     [menu addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
     [splitWindow.rootViewController presentViewController:menu animated:YES completion:nil];
 }
@@ -638,7 +650,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [appPickers[slot] removeFromSuperview]; appPickers[slot]=nil;
 }
 - (void)selectTile:(TAAppTile *)tile {
-    if (!running || tile.token!=generation || tile.slot<0 || tile.slot>1 || [slots[1-tile.slot].bundle isEqual:tile.bundle]) return;
+    if (!TASelectableBundle(tile.bundle) || !running || tile.token!=generation || tile.slot<0 || tile.slot>1 || [slots[1-tile.slot].bundle isEqual:tile.bundle]) return;
     NSInteger slot=tile.slot; NSString *bundle=tile.bundle;
     [appPickers[slot] removeFromSuperview]; appPickers[slot]=nil;
     TALog(@"PICK SELECT side=%ld bundle=%@",(long)slot,bundle);
@@ -663,18 +675,19 @@ static UIButton *TAButton(NSString *title, SEL action) {
         TARecord *r=records[bundle];
         BOOL used=[slots[1-slot].bundle isEqual:bundle] || (r.controller && slots[1-slot] && slots[1-slot].controller==r.controller);
         TAAppTile *tile=[TAAppTile buttonWithType:UIButtonTypeCustom]; tile.bundle=bundle; tile.slot=slot; tile.token=generation;
-        tile.frame=CGRectMake((index%2)*width,(index/2)*80,width,76); tile.enabled=!used; tile.alpha=used ? 0.25 : 1;
+        tile.frame=CGRectMake((index%2)*width,(index/2)*64,width,60); tile.enabled=!used; tile.alpha=used ? 0.25 : 1;
         tile.accessibilityLabel=[TAAppName(bundle) stringByAppendingString:used ? @", đang dùng ở ô kia" : @""];
-        UIImageView *icon=[[UIImageView alloc] initWithFrame:CGRectMake((width-44)/2,3,44,44)]; icon.image=TAAppIcon(bundle); icon.contentMode=UIViewContentModeScaleAspectFit; icon.layer.cornerRadius=10; icon.clipsToBounds=YES; [tile addSubview:icon];
+        UIImageView *icon=[[UIImageView alloc] initWithFrame:CGRectMake((width-48)/2,6,48,48)]; icon.image=TAAppIcon(bundle); icon.contentMode=UIViewContentModeScaleAspectFit; icon.layer.cornerRadius=10; icon.clipsToBounds=YES; [tile addSubview:icon];
         if (!icon.image) {
             icon.backgroundColor=[UIColor colorWithWhite:0.2 alpha:1];
-            UILabel *fallback=[[UILabel alloc] initWithFrame:icon.bounds]; fallback.text=[[TAAppName(bundle) substringToIndex:1] uppercaseString]; fallback.font=[UIFont boldSystemFontOfSize:24]; fallback.textAlignment=NSTextAlignmentCenter; fallback.textColor=UIColor.whiteColor; [icon addSubview:fallback];
+            icon.image=[UIImage systemImageNamed:@"app"];
+            icon.tintColor=UIColor.lightGrayColor;
         }
         if ([slots[slot].bundle isEqual:bundle]) { icon.layer.borderWidth=2; icon.layer.borderColor=TACyan().CGColor; }
-        UILabel *label=[[UILabel alloc] initWithFrame:CGRectMake(2,50,width-4,24)]; label.text=TAAppName(bundle); label.textColor=UIColor.whiteColor; label.font=[UIFont systemFontOfSize:10 weight:UIFontWeightMedium]; label.textAlignment=NSTextAlignmentCenter; label.numberOfLines=2; [tile addSubview:label];
+
         [tile addTarget:self action:@selector(selectTile:) forControlEvents:UIControlEventTouchUpInside]; [grid addSubview:tile]; index++;
     }
-    grid.contentSize=CGSizeMake(grid.bounds.size.width,((index+1)/2)*80);
+    grid.contentSize=CGSizeMake(grid.bounds.size.width,((index+1)/2)*64);
     if (!index) {
         UILabel *empty=[[UILabel alloc] initWithFrame:grid.bounds]; empty.text=@"Chưa đọc được danh sách ứng dụng CarPlay. Hãy kết nối lại rồi thử chọn."; empty.textColor=UIColor.lightGrayColor; empty.font=[UIFont systemFontOfSize:13]; empty.numberOfLines=0; empty.textAlignment=NSTextAlignmentCenter; [grid addSubview:empty];
     }

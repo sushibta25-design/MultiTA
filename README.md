@@ -143,3 +143,11 @@ Local change based on 0.20. Catalog merges captured apps with installed DBApplic
 Pending requests wait for a fresh foreground callback to rebind the controller; a captured-controller fallback remains when native launch is unsupported. Build the presentation behind the loading placeholder and wait up to 8 seconds for a nonzero LayerHost context. This verifies a hosting connection, NOT visible pixels; unsupported layer structures fail visibly instead of claiming success. Error placeholder is tappable to retry, and the companion remains selected.
 
 Not compiled or device-tested yet. GitHub connector currently fails with HTTP 400 Invalid MCP request metadata. Required gates: compile, catalog availability before first app launch, fresh app activation, Google Maps cold/warm attach, timeout/retry, companion input, Fold/Exit. Existing 0.20 install remains the last built artifact.
+
+## 0.22 — unified actions and icon-only picker
+
+Keep a visible 44pt ellipsis button at the divider. Its menu contains both app pickers, swap, recent pairs, individual retries, reset selection, Fold, log and Exit. Picker tiles show only icons, with accessibility names retained, current-app cyan borders and companion-app disabling.
+
+A shared case-insensitive bundle filter excludes CarPlay shell pages (including Settings, Wallpaper and TemplateUIHost), SpringBoard, Home and Siri service entries from both captured scenes and installed candidates. It keeps Apple Maps/Music and third-party apps; existing CarPlay eligibility checks still apply.
+
+Device checks: open both pickers before launching apps; check no Wallpaper/Settings/Home entries or visible app names; scroll and select each side; use all ellipsis actions, including cancel/reopen, retries and recent pairs. This UI/filter change does not establish a fix for the existing black-scene/crash issue.
