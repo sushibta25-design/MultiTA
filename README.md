@@ -183,3 +183,10 @@ An uncaptured app is prepared outside split: save the pair, release/restore pres
 Cold preparation can briefly show the app full-screen. Menu, icon pages, rounded geometry and hidden up/down rails remain. Existing surface checks do not prove visible pixels. Main-thread stall probe remains; native foreground/background and preparation return boundaries identify which operation fails to return.
 
 Device gates: both Maps/YouTube launch orders, already-open versus cold YouTube, existing companion preserved on warm replacement, cancelled/timed-out preparation, rapid selection, retry, Fold/Exit and disconnect. This removes the suspect lifecycle bypass, but exact original termination cause remains unknown without a matching crash stack. Compile validation is not device stability validation.
+
+
+## 0.26.0 — split lifecycle rebuild (device validation pending)
+
+Based on main 0.25. Preparation keeps the split window alive and clears only the chosen pane. Native launches are scoped to that preparation. Presentations must expose a connected host before resizing; one empty-presentation replacement is allowed. Removed synchronous layoutIfNeeded and redundant private scene UI refresh during attachment. Normal background callbacks run normally; companion scene/surface is checked after the transition, with at most one geometry correction per event. A disconnected companion exposes retry rather than starting foreground loops. Added begin/return trace markers around presentation and transaction calls. Surface connection is not proof of rendered pixels or working input.
+
+Validation: CI compile/package; real CarPlay tests still required, especially cold app launches, Maps/YouTube switching and touch responsiveness. This is an experimental build, not a confirmed crash fix.

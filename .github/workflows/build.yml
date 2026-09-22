@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - taduo/rebuild-v026
 
 jobs:
   build:
@@ -36,5 +37,5 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: DuoPhone-DEB
+          name: TAduo-0.26.0-rootless
           path: packages/*.deb
