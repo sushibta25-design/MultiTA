@@ -1,4 +1,4 @@
-// TAduo 0.10.20: resume the previous split and Vietnamese Telex input.
+// TAduo 0.10.21: resume the previous split and Vietnamese Telex input.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.20] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.21] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -60,6 +60,10 @@ static UIView *panes[2];
 static UIButton *choose[2];
 static UIWindow *splitWindow, *buttonWindow;
 static UIView *floatingActions;
+static UIButton *sideActions[2];
+static void TAHideSideActions(void) {
+    for (NSInteger i=0;i<2;i++) sideActions[i].hidden=YES;
+}
 static UIView *dividerView;
 static UIControl *gapTouchShield;
 static const CGFloat TADividerGap=4;
@@ -82,6 +86,11 @@ static BOOL TAYoutubeClientReady(CGSize target);
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     // Modal picker and visible menu keep their normal priority.
     if (self.rootViewController.presentedViewController) return [super hitTest:point withEvent:event];
+    for (NSInteger i=0;i<2;i++) {
+        UIButton *b=sideActions[i];
+        if (b && !b.hidden && [b pointInside:[b convertPoint:point fromView:self] withEvent:event])
+            return [b hitTest:[b convertPoint:point fromView:self] withEvent:event];
+    }
     if (floatingActions && !floatingActions.hidden &&
         [floatingActions pointInside:[floatingActions convertPoint:point fromView:self] withEvent:event])
         return [super hitTest:point withEvent:event];
@@ -227,7 +236,7 @@ static void TAStop(NSString *reason) {
     running = NO; ++generation;
     TALog(@"STOP %@", reason);
     BOOL previous = ownCall; ownCall = YES;
-    for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
+    for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; sideActions[i]=nil; }
     ownCall = previous;
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil; dividerView=nil; gapTouchShield=nil; dividerDragging=NO;
     buttonWindow.hidden = !dashboard;
@@ -289,6 +298,7 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 - (void)resumeSlot:(NSInteger)slot token:(NSUInteger)token attempt:(NSUInteger)attempt;
 - (void)stop;
 - (void)restartSplit;
+- (void)changeSide:(UIButton *)sender;
 - (void)toggleActions;
 - (void)pick:(UIButton *)sender;
 - (void)attach:(NSString *)bundle slot:(NSInteger)slot;
@@ -367,6 +377,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     floatingActions.frame=CGRectMake(MAX(0,MIN(center-78,splitWindow.bounds.size.width-156)),height/2-15,156,30);
     for (NSInteger i=0;i<2;i++) {
         choose[i].frame=panes[i].bounds;
+        sideActions[i].frame=CGRectMake(CGRectGetMidX(panes[i].frame)-22,CGRectGetMidY(panes[i].frame)-22,44,44);
         TARecord *r=slots[i];
         r.presentation.frame=panes[i].bounds;
         if (commit && r.presentation && !r.attaching) {
@@ -383,6 +394,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     if (gesture.state==UIGestureRecognizerStateBegan) {
         dividerDragging=YES; dragStartRatio=splitRatio; [self showChrome];
         floatingActions.hidden=YES;
+        TAHideSideActions();
     }
     CGFloat available=splitWindow.bounds.size.width-TADividerGap;
     if (available<=0) return;
@@ -423,31 +435,38 @@ static UIImage *TAActionIcon(BOOL exitAction) {
         [self showChrome]; return;
     }
     floatingActions.hidden=YES; buttonWindow.hidden=running || !dashboard;
+    TAHideSideActions();
 }
 - (void)touchActivity:(UIEvent *)event {
-    if (!running || floatingActions.hidden) return;
+    if (!running || (floatingActions.hidden && sideActions[0].hidden && sideActions[1].hidden)) return;
     for (UITouch *touch in event.allTouches) {
         if (touch.window.windowScene!=dashboard || touch.phase!=UITouchPhaseBegan) continue;
+        if ([touch.view isDescendantOfView:sideActions[0]] || [touch.view isDescendantOfView:sideActions[1]]) {
+            [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideChrome) object:nil];
+            continue;
+        }
+        TAHideSideActions();
         if ([touch.view isDescendantOfView:floatingActions]) [self showChrome];
         else if (![touch.view isDescendantOfView:dividerView]) floatingActions.hidden=YES;
     }
 }
 - (void)stop { [self closeIcons]; TAStop(@"user"); [self showChrome]; }
-- (void)toggleActions { if (splitWindow.rootViewController.presentedViewController) return; [self showChrome]; floatingActions.hidden = !floatingActions.hidden; }
+- (void)toggleActions { if (splitWindow.rootViewController.presentedViewController) return; TAHideSideActions(); [self showChrome]; floatingActions.hidden = !floatingActions.hidden; }
 - (void)restartSplit {
     if (!running || TAAttachPending() || splitWindow.rootViewController.presentedViewController) return;
     floatingActions.hidden=YES;
-    UIAlertController *picker=[UIAlertController alertControllerWithTitle:@"Chọn bên cần đổi app" message:nil preferredStyle:UIAlertControllerStyleAlert];
-    NSUInteger token=generation;
     for (NSInteger side=0;side<2;side++) {
-        [picker addAction:[UIAlertAction actionWithTitle:side==0 ? @"Bên trái" : @"Bên phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (running && generation==token) [self pick:choose[side]];
-            });
-        }]];
+        sideActions[side].hidden=NO;
+        [splitWindow.rootViewController.view bringSubviewToFront:sideActions[side]];
     }
-    [picker addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
-    [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideChrome) object:nil];
+    [self performSelector:@selector(hideChrome) withObject:nil afterDelay:5.0 inModes:@[NSRunLoopCommonModes]];
+}
+- (void)changeSide:(UIButton *)sender {
+    NSInteger side=sender.tag;
+    if (!running || side<0 || side>1 || TAAttachPending() || splitWindow.rootViewController.presentedViewController) return;
+    TAHideSideActions();
+    [self pick:choose[side]];
 }
 - (void)start {
     if (running || !dashboard || TADashboard() != dashboard) return;
@@ -507,6 +526,16 @@ static UIImage *TAActionIcon(BOOL exitAction) {
         [floatingActions addSubview:b];
     }
     floatingActions.hidden = YES; [root addSubview:floatingActions];
+    for (NSInteger side=0;side<2;side++) {
+        UIButton *b=TAButton(@"",@selector(changeSide:));
+        b.tag=side; b.layer.cornerRadius=22; b.layer.borderWidth=2;
+        b.tintColor=side==0 ? [UIColor colorWithRed:0 green:0.88 blue:1 alpha:1] : [UIColor colorWithRed:1 green:0.43 blue:0.10 alpha:1];
+        b.layer.borderColor=b.tintColor.CGColor;
+        UIImageSymbolConfiguration *config=[UIImageSymbolConfiguration configurationWithPointSize:24 weight:UIImageSymbolWeightSemibold];
+        [b setImage:[UIImage systemImageNamed:@"arrow.triangle.2.circlepath" withConfiguration:config] forState:UIControlStateNormal];
+        b.accessibilityLabel=side==0 ? @"Đổi ứng dụng bên trái" : @"Đổi ứng dụng bên phải";
+        b.hidden=YES; [root addSubview:b]; sideActions[side]=b;
+    }
     splitWindow.hidden = NO; buttonWindow.hidden=YES; [self showChrome];
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
     [self layoutSplit:NO];

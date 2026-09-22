@@ -436,6 +436,7 @@ static void TAKBShow(NSString *bundle) {
     TAKBWindow.rootViewController=TAKBHost; TAKBWindow.hidden=NO;
     // Do not makeKeyWindow: the remote input must keep its focus and selection.
     floatingActions.hidden=YES;
+    TAHideSideActions();
     TALog(@"KEYBOARD OPEN side=%ld bundle=%@",(long)(slots[0]==r ? 0 : 1),bundle);
 }
 static void TAKBInstallHost(void) {
