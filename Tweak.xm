@@ -1,4 +1,4 @@
-// TAduo 0.10.16: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.17: based on 43ed06f (0.10.16), shared keyboard and YouTube client readiness.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.16] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.17] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -71,6 +71,8 @@ static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSUInteger generation;
 static NSUInteger slotRequests[2];
+static void TAKBHostStop(void);
+static BOOL TAYoutubeClientReady(CGSize target);
 @interface TASplitWindow : UIWindow
 @end
 @implementation TASplitWindow
@@ -205,6 +207,7 @@ static void TACleanup(TARecord *r) {
     r.presentationID = nil; r.scene = nil; r.changed = NO; r.frameCaptured = NO; ++r.resizeSerial;
 }
 static void TAClearSlot(NSInteger slot, NSString *reason) {
+    TAKBHostStop();
     ++slotRequests[slot];
     TARecord *r=slots[slot]; r.attaching=NO; slots[slot]=nil;
     BOOL previous=ownCall; ownCall=YES; TACleanup(r); ownCall=previous;
@@ -214,6 +217,7 @@ static void TAClearSlot(NSInteger slot, NSString *reason) {
 }
 static void TAStop(NSString *reason) {
     if (!running) return;
+    TAKBHostStop();
     running = NO; ++generation;
     TALog(@"STOP %@", reason);
     BOOL previous = ownCall; ownCall = YES;
@@ -666,7 +670,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     BOOL matches=TAReadFrame(r.scene,&actual) &&
         fabs(actual.size.width-target.width)<0.5 && fabs(actual.size.height-target.height)<0.5 &&
         fabs(shown.width-target.width)<0.5 && fabs(shown.height-target.height)<0.5 &&
-        CGAffineTransformIsIdentity(r.presentation.transform);
+        CGAffineTransformIsIdentity(r.presentation.transform) && TAYoutubeClientReady(target);
     NSUInteger nextStable=matches ? stable+1 : 0;
     // Five quarter-second intervals cover the observed first-second transition.
     // Host geometry stability is not proof that all YouTube content is settled.
@@ -996,6 +1000,46 @@ static char TAYoutubeLayoutStamp, TAYoutubeLayoutQueued, TAYoutubeAttempts, TAYo
 static BOOL TAYoutubeSizeMatches(CGSize a, CGSize b) {
     return fabs(a.width-b.width)<0.5 && fabs(a.height-b.height)<0.5;
 }
+static CGRect TAYoutubeOwnedRootFrame(UIView *view, CGRect requested) {
+    UIWindow *w=view.window;
+    if (!w || w.rootViewController.viewIfLoaded!=view || view.superview!=w ||
+        !view.translatesAutoresizingMaskIntoConstraints || !CGAffineTransformIsIdentity(view.transform)) return requested;
+    NSString *sid=w.windowScene.session.persistentIdentifier ?: @"";
+    NSString *role=w.windowScene.session.role ?: @"";
+    if (![sid hasPrefix:@"Car["] && ![role containsString:@"CarPlay"]) return requested;
+    int token=TATargetToken(@"com.google.ios.youtube"); uint64_t packed=0;
+    if (token<0 || notify_get_state(token,&packed)!=NOTIFY_STATUS_OK || !packed) return requested;
+    CGSize target=CGSizeMake((packed>>32)/4.0,(packed&0xffffffff)/4.0);
+    if (!TAYoutubeSizeMatches(w.bounds.size,target) ||
+        !TAYoutubeSizeMatches(w.windowScene.coordinateSpace.bounds.size,target)) return requested;
+    // Correct the stale assignment before UIKit commits a full-screen root frame.
+    // No transform scaling and no changes to nested app views or iPhone windows.
+    return w.bounds;
+}
+static int TAYoutubeReadyToken(void) {
+    static int token=-1; static dispatch_once_t once;
+    dispatch_once(&once, ^{ notify_register_check("com.sushibta.taduo.youtube-ready",&token); });
+    return token;
+}
+static BOOL TAYoutubeClientReady(CGSize target) {
+    int token=TAYoutubeReadyToken(); uint64_t packed=0;
+    if (token<0 || notify_get_state(token,&packed)!=NOTIFY_STATUS_OK || !packed) return NO;
+    return TAYoutubeSizeMatches(target,CGSizeMake((packed>>32)/4.0,(packed&0xffffffff)/4.0));
+}
+static void TAYoutubeReportReady(UIWindow *w) {
+    if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.google.ios.youtube"]) return;
+    NSString *sid=w.windowScene.session.persistentIdentifier ?: @"";
+    if (![sid hasPrefix:@"Car["] && ![w.windowScene.session.role containsString:@"CarPlay"]) return;
+    int targetToken=TATargetToken(@"com.google.ios.youtube"), ready=TAYoutubeReadyToken();
+    uint64_t packed=0; if (targetToken<0 || ready<0) return;
+    notify_get_state(targetToken,&packed);
+    CGSize target=CGSizeMake((packed>>32)/4.0,(packed&0xffffffff)/4.0);
+    UIView *root=w.rootViewController.viewIfLoaded;
+    BOOL match=packed && root && !w.hidden && TAYoutubeSizeMatches(w.bounds.size,target) &&
+        TAYoutubeSizeMatches(w.windowScene.coordinateSpace.bounds.size,target) &&
+        TAYoutubeSizeMatches(root.bounds.size,target) && CGAffineTransformIsIdentity(root.transform);
+    notify_set_state(ready,match ? packed : 0);
+}
 static void TAYoutubeClientLayout(UIWindow *w) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.google.ios.youtube"]) return;
     NSString *sid=w.windowScene.session.persistentIdentifier ?: @"";
@@ -1059,6 +1103,7 @@ static void TAListenYouTubeTarget(void) {
     int token;
     notify_register_dispatch(TAChannel(@"com.google.ios.youtube",@"layout-target").UTF8String,
         &token,dispatch_get_main_queue(),^(__unused int delivered) {
+            int ready=TAYoutubeReadyToken(); if (ready>=0) notify_set_state(ready,0);
             for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
                 if (![scene isKindOfClass:UIWindowScene.class]) continue;
                 for (UIWindow *w in ((UIWindowScene *)scene).windows) TAYoutubeClientLayout(w);
@@ -1311,12 +1356,14 @@ static void TAVisibleTransition(UIViewController *vc) {
 %end
 %end
 
+#import "TAKeyboard.h"
+
 %group TAClient
 %hook UIViewController
 - (void)viewDidLayoutSubviews {
     %orig;
     UIWindow *w=self.viewIfLoaded.window;
-    if (w.rootViewController==self) TAYoutubeClientLayout(w);
+    if (w.rootViewController==self) { TAYoutubeClientLayout(w); TAYoutubeReportReady(w); }
 }
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
@@ -1329,6 +1376,14 @@ static void TAVisibleTransition(UIViewController *vc) {
     TAClientObserve(self);
     TATemplateLayout(self);
     TAYoutubeClientLayout(self);
+    TAYoutubeReportReady(self);
+}
+%end
+%end
+%group TAYoutubeRootGuard
+%hook UIView
+- (void)setFrame:(CGRect)frame {
+    %orig(TAYoutubeOwnedRootFrame(self,frame));
 }
 %end
 %end
@@ -1418,7 +1473,11 @@ static void TAVisibleTransition(UIViewController *vc) {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
         if (([TAClientBundles() containsObject:process] && ![process isEqual:@"vn.vietmap.live"]) || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
-            if ([process isEqual:@"com.google.ios.youtube"]) dispatch_async(dispatch_get_main_queue(), ^{ TAListenYouTubeTarget(); });
+            dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallClients(); });
+            if ([process isEqual:@"com.google.ios.youtube"]) {
+                %init(TAYoutubeRootGuard);
+                dispatch_async(dispatch_get_main_queue(), ^{ TAListenYouTubeTarget(); });
+            }
             if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
                 %init(TACompactHome);
                 if (NSClassFromString(@"CPSNavigationBar")) { %init(TAGoogleNavigation); }
@@ -1438,6 +1497,7 @@ static void TAVisibleTransition(UIViewController *vc) {
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
+        dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallHost(); });
         dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED"); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }
