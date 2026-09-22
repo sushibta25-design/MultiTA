@@ -151,3 +151,11 @@ Keep a visible 44pt ellipsis button at the divider. Its menu contains both app p
 A shared case-insensitive bundle filter excludes CarPlay shell pages (including Settings, Wallpaper and TemplateUIHost), SpringBoard, Home and Siri service entries from both captured scenes and installed candidates. It keeps Apple Maps/Music and third-party apps; existing CarPlay eligibility checks still apply.
 
 Device checks: open both pickers before launching apps; check no Wallpaper/Settings/Home entries or visible app names; scroll and select each side; use all ellipsis actions, including cancel/reopen, retries and recent pairs. This UI/filter change does not establish a fix for the existing black-scene/crash issue.
+
+## 0.23 — retain the companion scene, picker touch handling
+
+Device evidence from 0.22: at 06:09:44 UTC, YouTube Music attached successfully, then native backgrounding of Google Maps reset its client geometry from 207.25x234 to 426.75x240. Hold native background requests only for live independently hosted split scenes; validate the completion block ABI before acknowledging, otherwise use the original path. Remember the deferred background state so pane release/Fold/Exit can perform the real background. A single guarded post-callback geometry check repairs a reset without repeated foreground launches.
+
+Picker buttons now respond without the scroll-view touch delay; real drags cancel selection, deceleration stops on contact, and bounce is disabled. This targets the TAduo app chooser, not arbitrary native-app gestures. Add up to 40 passive input summaries per targeted client window to diagnose reported taps turning into scrolls inside hosted apps. No global input remapping.
+
+Device gates: Maps first then YouTube Music, reverse order, switch each side, retry, swap, Fold/restore and Exit. Confirm BACKGROUND HELD and both panes remain visible and interactive. If hosted-app taps still scroll, reproduce several taps and one deliberate swipe then collect both logs for INPUT records. Build success alone does not establish either device fix.

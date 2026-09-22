@@ -1,4 +1,4 @@
-// TAduo 0.22.0: unified actions menu and filtered icon-only app picker.
+// TAduo 0.23.0: preserve hosted foreground scenes and distinguish picker taps from drags.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.22] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.23] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -33,6 +33,22 @@ static BOOL TASelectableBundle(NSString *bundle) {
     if ([key hasPrefix:@"com.apple.carplay"]) return NO;
     return ![@[@"com.apple.springboard", @"com.apple.backboardd",
                @"com.apple.home", @"com.apple.siri", @"com.apple.siriviewservice"] containsObject:key];
+}
+static BOOL TAIsVoidCompletion(id completion) {
+    if (!completion) return YES;
+    Class blockClass=NSClassFromString(@"NSBlock");
+    if (!blockClass || ![completion isKindOfClass:blockClass]) return NO;
+    struct TABlockHeader { void *isa; int flags; int reserved; void *invoke; void *descriptor; };
+    const struct TABlockHeader *block=(const struct TABlockHeader *)(__bridge const void *)completion;
+    if (!(block->flags & (1 << 30)) || !block->descriptor) return NO;
+    const uint8_t *descriptor=(const uint8_t *)block->descriptor+2*sizeof(unsigned long);
+    if (block->flags & (1 << 25)) descriptor+=2*sizeof(void *);
+    const char *types=*(const char * const *)descriptor;
+    if (!types) return NO;
+    @try {
+        NSMethodSignature *sig=[NSMethodSignature signatureWithObjCTypes:types];
+        return sig.numberOfArguments==1 && !strcmp(sig.methodReturnType,@encode(void)) && !strcmp([sig getArgumentTypeAtIndex:0],"@?");
+    } @catch (__unused NSException *e) { return NO; }
 }
 static NSString *TABundle(id controller) {
     NSString *sid = TAValue(controller, @"sceneID");
@@ -61,6 +77,7 @@ static NSString *TABundle(id controller) {
 @property(nonatomic) BOOL attaching;
 @property(nonatomic) BOOL nativeRequested;
 @property(nonatomic) BOOL foregroundSeen;
+@property(nonatomic) NSUInteger heldBackgrounds;
 @end
 @implementation TARecord
 @end
@@ -190,7 +207,7 @@ static void TACleanup(TARecord *r) {
         SEL bg = NSSelectorFromString(@"backgroundSceneWithCompletion:");
         if (r.restoreBackground && [r.controller respondsToSelector:bg]) ((void(*)(id,SEL,id))objc_msgSend)(r.controller, bg, nil);
     } @catch (__unused NSException *e) {}
-    r.backgrounded = r.restoreBackground;
+    r.backgrounded = r.restoreBackground; r.heldBackgrounds=0;
     r.presentationID = nil; r.scene = nil; r.changed = NO; r.frameCaptured = NO; ++r.resizeSerial;
 }
 static NSString *TAAppName(NSString *bundle) {
@@ -329,12 +346,39 @@ static void TARevealActions(void) {
     if (event.type==UIEventTypeTouches && event.allTouches.count) TARevealActions();
 }
 @end
+@interface TAPickerScrollView : UIScrollView
+@end
+@implementation TAPickerScrollView
+- (BOOL)touchesShouldCancelInContentView:(UIView *)view { return YES; }
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (event.type==UIEventTypeTouches && self.decelerating) [self setContentOffset:self.contentOffset animated:NO];
+    return [super hitTest:point withEvent:event];
+}
+@end
 @interface TAAppTile : UIButton
 @property(nonatomic,copy) NSString *bundle;
 @property(nonatomic) NSInteger slot;
 @property(nonatomic) NSUInteger token;
+@property(nonatomic) CGPoint touchStart;
+@property(nonatomic) BOOL dragged;
 @end
 @implementation TAAppTile
+- (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    self.touchStart=[touch locationInView:self.window]; self.dragged=NO;
+    return [super beginTrackingWithTouch:touch withEvent:event];
+}
+- (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    CGPoint p=[touch locationInView:self.window];
+    if (hypot(p.x-self.touchStart.x,p.y-self.touchStart.y)>10) self.dragged=YES;
+    if (self.dragged) { self.highlighted=NO; return NO; }
+    return [super continueTrackingWithTouch:touch withEvent:event];
+}
+- (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    CGPoint p=[touch locationInView:self.window];
+    if (hypot(p.x-self.touchStart.x,p.y-self.touchStart.y)>10) self.dragged=YES;
+    if (self.dragged) { [self cancelTrackingWithEvent:event]; return; }
+    [super endTrackingWithTouch:touch withEvent:event];
+}
 @end
 static UIView *appPickers[2];
 static NSString *retryTargets[2];
@@ -650,7 +694,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [appPickers[slot] removeFromSuperview]; appPickers[slot]=nil;
 }
 - (void)selectTile:(TAAppTile *)tile {
-    if (!TASelectableBundle(tile.bundle) || !running || tile.token!=generation || tile.slot<0 || tile.slot>1 || [slots[1-tile.slot].bundle isEqual:tile.bundle]) return;
+    if (tile.dragged || !TASelectableBundle(tile.bundle) || !running || tile.token!=generation || tile.slot<0 || tile.slot>1 || [slots[1-tile.slot].bundle isEqual:tile.bundle]) return;
     NSInteger slot=tile.slot; NSString *bundle=tile.bundle;
     [appPickers[slot] removeFromSuperview]; appPickers[slot]=nil;
     TALog(@"PICK SELECT side=%ld bundle=%@",(long)slot,bundle);
@@ -669,7 +713,10 @@ static UIButton *TAButton(NSString *title, SEL action) {
     UILabel *title=[[UILabel alloc] initWithFrame:CGRectMake(10,6,panel.bounds.size.width-46,28)];
     title.text=slot==0 ? @"Ứng dụng bên trái" : @"Ứng dụng bên phải"; title.font=[UIFont systemFontOfSize:12 weight:UIFontWeightSemibold]; title.textColor=UIColor.whiteColor; [panel addSubview:title];
     UIButton *close=TAButton(@"×",@selector(closePicker:)); close.tag=slot; close.frame=CGRectMake(panel.bounds.size.width-34,4,30,30); close.accessibilityLabel=@"Đóng chọn ứng dụng"; [panel addSubview:close];
-    UIScrollView *grid=[[UIScrollView alloc] initWithFrame:CGRectMake(6,38,panel.bounds.size.width-12,panel.bounds.size.height-42)]; [panel addSubview:grid];
+    TAPickerScrollView *grid=[[TAPickerScrollView alloc] initWithFrame:CGRectMake(6,38,panel.bounds.size.width-12,panel.bounds.size.height-42)];
+    grid.delaysContentTouches=NO; grid.canCancelContentTouches=YES;
+    grid.bounces=NO; grid.directionalLockEnabled=YES; grid.decelerationRate=UIScrollViewDecelerationRateFast;
+    [panel addSubview:grid];
     CGFloat width=grid.bounds.size.width/2; NSUInteger index=0;
     for (NSString *bundle in available) {
         TARecord *r=records[bundle];
@@ -1334,6 +1381,40 @@ static void TAListenSnapshots(void) {
         }
     });
 }
+// Record only bounded gesture summaries in targeted CarPlay client windows.
+// No gesture delegates, event replacement or coordinate remapping.
+static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
+    if (event.type!=UIEventTypeTouches || !NSThread.isMainThread) return;
+    NSString *bundle=nil; if (!TATemplateTarget(window,&bundle)) return;
+    static char touchKey, countKey;
+    NSUInteger count=[objc_getAssociatedObject(window,&countKey) unsignedIntegerValue];
+    if (count>=40) return;
+    for (UITouch *touch in [event touchesForWindow:window]) {
+        CGPoint point=[touch locationInView:window];
+        NSMutableDictionary *state=objc_getAssociatedObject(touch,&touchKey);
+        if (touch.phase==UITouchPhaseBegan) {
+            UIView *view=touch.view; UIScrollView *scroll=nil;
+            for (UIView *v=view;v && v!=window;v=v.superview) if ([v isKindOfClass:UIScrollView.class]) { scroll=(UIScrollView *)v; break; }
+            state=[@{@"start":[NSValue valueWithCGPoint:point],@"max":@0,
+                     @"view":NSStringFromClass(view.class) ?: @"nil",
+                     @"offset":[NSValue valueWithCGPoint:scroll ? scroll.contentOffset : CGPointZero]} mutableCopy];
+            objc_setAssociatedObject(touch,&touchKey,state,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (!state) continue;
+        CGPoint start=[state[@"start"] CGPointValue];
+        state[@"max"]=@(MAX([state[@"max"] doubleValue],hypot(point.x-start.x,point.y-start.y)));
+        if (touch.phase==UITouchPhaseEnded || touch.phase==UITouchPhaseCancelled) {
+            UIScrollView *scroll=nil;
+            for (UIView *v=touch.view;v && v!=window;v=v.superview) if ([v isKindOfClass:UIScrollView.class]) { scroll=(UIScrollView *)v; break; }
+            TALog(@"INPUT bundle=%@ phase=%ld target=%@ start=%@ end=%@ travel=%.2f scroll=%@ offsetBefore=%@ offsetAfter=%@ pan=%ld window=%@",
+                  bundle,(long)touch.phase,state[@"view"],NSStringFromCGPoint(start),NSStringFromCGPoint(point),[state[@"max"] doubleValue],
+                  NSStringFromClass(scroll.class),NSStringFromCGPoint([state[@"offset"] CGPointValue]),NSStringFromCGPoint(scroll ? scroll.contentOffset : CGPointZero),
+                  (long)scroll.panGestureRecognizer.state,NSStringFromCGRect(window.bounds));
+            objc_setAssociatedObject(touch,&touchKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(window,&countKey,@(++count),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
+}
 // One controlled input to the system's own layout selection. No frame edits.
 %group TANowPlayingExperiment
 %hook CPUINowPlayingView
@@ -1388,6 +1469,10 @@ static void TAListenSnapshots(void) {
 }
 %end
 %hook UIWindow
+- (void)sendEvent:(UIEvent *)event {
+    %orig;
+    TATraceClientTouch(self,event);
+}
 - (void)layoutSubviews {
     %orig;
     TAClientObserve(self);
@@ -1442,6 +1527,29 @@ static void TAListenSnapshots(void) {
 }
 - (void)backgroundSceneWithCompletion:(id)completion {
     TARecord *r = records[TABundle(self) ?: @""];
+    BOOL owned=NSThread.isMainThread && !ownCall && running && !splitWindow.hidden &&
+        r && r.controller==self && (r==slots[0] || r==slots[1]) &&
+        r.presentation.window==splitWindow && r.scene && r.scene==TAValue(self,@"scene");
+    if (owned && TAIsVoidCompletion(completion)) {
+        // Dashboard backgrounds its previous app after launching the next one.
+        // Keep only an independently hosted, live split scene foreground.
+        // Cleanup/explicit Fold/Exit still execute the real native background.
+        r.backgrounded=NO; r.restoreBackground=YES; ++r.heldBackgrounds;
+        TALog(@"BACKGROUND HELD bundle=%@ count=%lu scene=%p",r.bundle,(unsigned long)r.heldBackgrounds,r.scene);
+        if (completion) ((void (^)(void))completion)();
+        NSUInteger token=generation, serial=r.resizeSerial;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!running || generation!=token || r.resizeSerial!=serial || (r!=slots[0] && r!=slots[1])) return;
+            CGRect actual=CGRectZero;
+            if (r.scene!=TAValue(r.controller,@"scene")) return;
+            if (TAReadFrame(r.scene,&actual) && (fabs(actual.size.width-r.targetSize.width)>0.5 || fabs(actual.size.height-r.targetSize.height)>0.5)) {
+                TALog(@"BACKGROUND GEOMETRY REPAIR %@ actual=%@ target=%@",r.bundle,NSStringFromCGRect(actual),NSStringFromCGSize(r.targetSize));
+                TAResize(r,r.targetSize);
+            } else TAObserve(r,token,serial,@"background-held");
+        });
+        return;
+    }
+    if (owned) TALog(@"BACKGROUND PASSTHROUGH unknown completion ABI bundle=%@",r.bundle);
     if (!ownCall && r.controller == self) { r.backgrounded = YES; if (running) TALog(@"NATIVE BACKGROUND %@", r.bundle); }
     %orig;
 }
