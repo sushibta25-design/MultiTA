@@ -1,4 +1,4 @@
-// TAduo 0.10.17: based on 43ed06f (0.10.16), shared keyboard and YouTube client readiness.
+// TAduo 0.10.18: keyboard text snapshots/focus continuity; scoped YouTube container resize.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.17] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.18] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -1002,8 +1002,18 @@ static BOOL TAYoutubeSizeMatches(CGSize a, CGSize b) {
 }
 static CGRect TAYoutubeOwnedRootFrame(UIView *view, CGRect requested) {
     UIWindow *w=view.window;
-    if (!w || w.rootViewController.viewIfLoaded!=view || view.superview!=w ||
-        !view.translatesAutoresizingMaskIntoConstraints || !CGAffineTransformIsIdentity(view.transform)) return requested;
+    UIView *root=w.rootViewController.viewIfLoaded;
+    if (!w || !root || !CGAffineTransformIsIdentity(view.transform)) return requested;
+    // A root can sit inside UIKit transition wrappers and use Auto Layout.
+    // 0.10.17 silently skipped both cases, so the guard never reached those roots.
+    BOOL owns=NO, reachesWindow=NO; UIView *cursor=root;
+    for (NSUInteger depth=0;cursor && depth<6;depth++,cursor=cursor.superview) {
+        if (cursor==w) { reachesWindow=YES; break; }
+        if (!CGAffineTransformIsIdentity(cursor.transform)) return requested;
+        if (cursor!=root && ![@[@"UIView",@"UITransitionView",@"UIViewControllerWrapperView",@"UILayoutContainerView"] containsObject:NSStringFromClass(cursor.class)]) return requested;
+        if (cursor==view) owns=YES;
+    }
+    if (!owns || !reachesWindow) return requested;
     NSString *sid=w.windowScene.session.persistentIdentifier ?: @"";
     NSString *role=w.windowScene.session.role ?: @"";
     if (![sid hasPrefix:@"Car["] && ![role containsString:@"CarPlay"]) return requested;
@@ -1012,9 +1022,48 @@ static CGRect TAYoutubeOwnedRootFrame(UIView *view, CGRect requested) {
     CGSize target=CGSizeMake((packed>>32)/4.0,(packed&0xffffffff)/4.0);
     if (!TAYoutubeSizeMatches(w.bounds.size,target) ||
         !TAYoutubeSizeMatches(w.windowScene.coordinateSpace.bounds.size,target)) return requested;
-    // Correct the stale assignment before UIKit commits a full-screen root frame.
-    // No transform scaling and no changes to nested app views or iPhone windows.
-    return w.bounds;
+    // Restrict this to the root/wrapper chain. Collection cells and scroll content
+    // must remain free to exceed their viewport, so never clamp arbitrary subviews.
+    return [view.superview convertRect:w.bounds fromView:w];
+}
+static NSMapTable<NSLayoutConstraint *,NSNumber *> *TAYoutubeSavedConstraints;
+static void TAYoutubeRootConstraints(UIView *root, CGSize size, BOOL active) {
+    if (!TAYoutubeSavedConstraints) TAYoutubeSavedConstraints=[NSMapTable weakToStrongObjectsMapTable];
+    if (!active) {
+        for (NSLayoutConstraint *c in TAYoutubeSavedConstraints.keyEnumerator.allObjects) {
+            c.constant=[TAYoutubeSavedConstraints objectForKey:c].doubleValue;
+            [TAYoutubeSavedConstraints removeObjectForKey:c];
+        }
+        return;
+    }
+    NSMutableArray *constraints=[NSMutableArray arrayWithArray:root.constraints];
+    if (root.superview) [constraints addObjectsFromArray:root.superview.constraints];
+    for (NSLayoutConstraint *c in constraints) {
+        if (c.firstItem!=root || c.secondItem || c.relation!=NSLayoutRelationEqual || !c.active || c.constant<=0) continue;
+        if (c.firstAttribute!=NSLayoutAttributeWidth && c.firstAttribute!=NSLayoutAttributeHeight) continue;
+        CGFloat wanted=c.firstAttribute==NSLayoutAttributeWidth ? size.width : size.height;
+        if (fabs(c.constant-wanted)<0.5) continue;
+        if (![TAYoutubeSavedConstraints objectForKey:c]) [TAYoutubeSavedConstraints setObject:@(c.constant) forKey:c];
+        c.constant=wanted;
+    }
+}
+static void TAYoutubeFitControllerRoots(UIViewController *parent, NSUInteger depth, NSUInteger *budget) {
+    if (!parent || depth>5 || !*budget) return; --*budget;
+    UIView *container=parent.viewIfLoaded; if (!container) return;
+    for (UIViewController *child in parent.childViewControllers) {
+        UIView *v=child.viewIfLoaded; if (!v || !v.window) continue;
+        // Repair only a full-height direct child controller that overflows its
+        // parent. This excludes scroll views, page offsets, cards, and artwork.
+        if (v.superview==container && v.translatesAutoresizingMaskIntoConstraints &&
+            ![v isKindOfClass:UIScrollView.class] && CGAffineTransformIsIdentity(v.transform) &&
+            fabs(v.frame.origin.x)<0.5 && fabs(v.frame.origin.y)<0.5 &&
+            fabs(v.bounds.size.height-container.bounds.size.height)<1 &&
+            v.bounds.size.width>container.bounds.size.width+0.5) {
+            CGRect frame=v.frame; frame.size.width=container.bounds.size.width;
+            v.frame=frame; [v setNeedsLayout];
+        }
+        TAYoutubeFitControllerRoots(child,depth+1,budget);
+    }
 }
 static int TAYoutubeReadyToken(void) {
     static int token=-1; static dispatch_once_t once;
@@ -1049,6 +1098,7 @@ static void TAYoutubeClientLayout(UIWindow *w) {
     int token=TATargetToken(@"com.google.ios.youtube"); uint64_t packed=0;
     if (token<0 || notify_get_state(token,&packed)!=NOTIFY_STATUS_OK) return;
     if (!packed) {
+        TAYoutubeRootConstraints(root,CGSizeZero,NO);
         NSNumber *mask=objc_getAssociatedObject(root,&TAYoutubeMask);
         if (mask) {
             root.autoresizingMask=mask.unsignedIntegerValue;
@@ -1070,6 +1120,8 @@ static void TAYoutubeClientLayout(UIWindow *w) {
     NSString *stamp=[NSString stringWithFormat:@"%@/%llu/%p",sid,(unsigned long long)packed,(__bridge void *)root];
     BOOL same=[objc_getAssociatedObject(w,&TAYoutubeLayoutStamp) isEqual:stamp];
     NSUInteger attempts=same ? [objc_getAssociatedObject(w,&TAYoutubeAttempts) unsignedIntegerValue] : 0;
+    // One pass per target also invalidates cached collection layouts when the
+    // root already matches but its contained controller still has the old width.
     if (same && TAYoutubeSizeMatches(root.bounds.size,target)) return;
     if (attempts>=3) return; // Never fight an app that keeps resetting its root.
     objc_setAssociatedObject(w,&TAYoutubeLayoutStamp,stamp,OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -1083,19 +1135,28 @@ static void TAYoutubeClientLayout(UIWindow *w) {
                 !TAYoutubeSizeMatches(w.bounds.size,target) ||
                 !TAYoutubeSizeMatches(w.windowScene.coordinateSpace.bounds.size,target)) return;
             CGRect before=root.frame;
-            BOOL direct=root.superview==w && root.translatesAutoresizingMaskIntoConstraints &&
-                CGAffineTransformIsIdentity(root.transform);
-            if (direct) {
+            CGRect sentinel=CGRectMake(-12345,-12345,1,1);
+            CGRect desired=TAYoutubeOwnedRootFrame(root,sentinel);
+            BOOL owned=!CGRectEqualToRect(desired,sentinel);
+            if (owned) {
                 if (!objc_getAssociatedObject(root,&TAYoutubeMask))
                     objc_setAssociatedObject(root,&TAYoutubeMask,@(root.autoresizingMask),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                root.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
-                root.frame=w.bounds;
+                if (root.translatesAutoresizingMaskIntoConstraints)
+                    root.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+                TAYoutubeRootConstraints(root,target,YES);
+                // Ancestors first, then the app root; preserve UIKit view ownership.
+                NSMutableArray<UIView *> *chain=[NSMutableArray new];
+                for (UIView *v=root;v && v!=w;v=v.superview) [chain addObject:v];
+                for (UIView *v in chain.reverseObjectEnumerator) v.frame=TAYoutubeOwnedRootFrame(v,v.frame);
+                NSUInteger controllerBudget=24; TAYoutubeFitControllerRoots(w.rootViewController,0,&controllerBudget);
             }
             NSUInteger budget=100; TAInvalidateTree(root,0,&budget);
             [w setNeedsLayout]; [w layoutIfNeeded]; [root layoutIfNeeded];
-            TALog(@"YOUTUBE ROOT SYNC direct=%d attempt=%lu target=%@ before=%@ after=%@ parent=%@",
-                  direct,(unsigned long)(attempts+1),NSStringFromCGSize(target),NSStringFromCGRect(before),
+            TALog(@"YOUTUBE ROOT SYNC owned=%d attempt=%lu target=%@ before=%@ after=%@ parent=%@",
+                  owned,(unsigned long)(attempts+1),NSStringFromCGSize(target),NSStringFromCGRect(before),
                   NSStringFromCGRect(root.frame),NSStringFromClass(root.superview.class));
+            for (UIViewController *child in w.rootViewController.childViewControllers)
+                TALog(@"YOUTUBE CHILD class=%@ frame=%@ bounds=%@ parent=%@ mask=%d",NSStringFromClass(child.class),NSStringFromCGRect(child.viewIfLoaded.frame),NSStringFromCGRect(child.viewIfLoaded.bounds),NSStringFromClass(child.viewIfLoaded.superview.class),child.viewIfLoaded.translatesAutoresizingMaskIntoConstraints);
         } @finally { objc_setAssociatedObject(w,&TAYoutubeLayoutQueued,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     });
 }
@@ -1384,6 +1445,11 @@ static void TAVisibleTransition(UIViewController *vc) {
 %hook UIView
 - (void)setFrame:(CGRect)frame {
     %orig(TAYoutubeOwnedRootFrame(self,frame));
+}
+- (void)setBounds:(CGRect)bounds {
+    CGRect owned=TAYoutubeOwnedRootFrame(self,bounds);
+    bounds.size=owned.size;
+    %orig(bounds);
 }
 %end
 %end

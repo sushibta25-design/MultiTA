@@ -49,10 +49,68 @@ static UIView *TAKBFindInput(UIView *view, NSInteger *budget) {
 @property(nonatomic) uint32_t nonce;
 @property(nonatomic) uint16_t lastSequence;
 @property(nonatomic) BOOL dismissed;
+@property(nonatomic) NSTimeInterval missingSince;
+@property(nonatomic,copy) NSString *preview;
+@property(nonatomic) uint32_t previewVersion;
+@property(nonatomic) NSUInteger previewChunks;
 @end
 @implementation TAKBClientSession
 @end
 static NSMutableDictionary<NSString *,TAKBClientSession *> *TAKBClients;
+// Snapshot is a seqlock: odd revision means writing, even means complete.
+// Only a bounded tail is mirrored. Editing always stays in the real responder.
+static void TAKBPublishPreview(NSString *bundle, TAKBClientSession *s) {
+    UIView *input=s.input; if (!s.nonce || !input) return;
+    NSString *text=nil;
+    if ([input respondsToSelector:@selector(isSecureTextEntry)] && [(id<UITextInputTraits>)input isSecureTextEntry]) text=@"••••";
+    else if ([input isKindOfClass:UITextField.class]) text=((UITextField *)input).text ?: @"";
+    else if ([input isKindOfClass:UITextView.class]) text=((UITextView *)input).text ?: @"";
+    else if ([input conformsToProtocol:@protocol(UITextInput)]) {
+        id<UITextInput> field=(id<UITextInput>)input;
+        UITextRange *range=[field textRangeFromPosition:field.beginningOfDocument toPosition:field.endOfDocument];
+        if (range) text=[field textInRange:range];
+    }
+    if (!text) return;
+    BOOL truncated=text.length>128;
+    if (truncated) {
+        NSRange first=[text rangeOfComposedCharacterSequenceAtIndex:text.length-128];
+        // Skip an entire composed cluster if including it would exceed the budget.
+        NSUInteger start=first.location<text.length-128 ? NSMaxRange(first) : first.location;
+        text=[@"…" stringByAppendingString:[text substringFromIndex:start]];
+        if (text.length>128) text=[text substringFromIndex:1];
+    }
+    if ([s.preview isEqual:text]) return;
+    uint32_t revision=(s.previewVersion+2)&0x3ffffffe;
+    if (!revision) revision=2;
+    uint64_t prefix=((uint64_t)s.nonce<<40);
+    TAKBWrite(bundle,@"preview",prefix|((uint64_t)(revision-1)<<10));
+    NSUInteger chunks=(text.length+3)/4;
+    for (NSUInteger i=0;i<MAX(chunks,s.previewChunks);i++) {
+        uint64_t packed=0;
+        for (NSUInteger j=0;j<4 && i*4+j<text.length;j++) packed|=(uint64_t)[text characterAtIndex:i*4+j]<<(16*j);
+        int token=TAKBToken(bundle,[NSString stringWithFormat:@"text-%lu",(unsigned long)i]);
+        if (token<0 || notify_set_state(token,packed)!=NOTIFY_STATUS_OK) return;
+    }
+    s.previewVersion=revision; s.previewChunks=chunks; s.preview=text;
+    TAKBWrite(bundle,@"preview",prefix|((uint64_t)revision<<10)|(uint64_t)text.length);
+}
+static void TAKBClearPreview(NSString *bundle, TAKBClientSession *s) {
+    TAKBWrite(bundle,@"preview",0);
+    for (NSUInteger i=0;i<s.previewChunks;i++) TAKBWrite(bundle,[NSString stringWithFormat:@"text-%lu",(unsigned long)i],0);
+    s.preview=nil; s.previewChunks=0;
+}
+static NSString *TAKBReadPreview(NSString *bundle, uint32_t nonce) {
+    uint64_t before=TAKBRead(bundle,@"preview");
+    NSUInteger length=(NSUInteger)(before&0x1ff);
+    if ((uint32_t)(before>>40)!=nonce || ((before>>10)&1) || length>128) return nil;
+    unichar buffer[128]={0};
+    for (NSUInteger i=0;i<(length+3)/4;i++) {
+        uint64_t packed=TAKBRead(bundle,[NSString stringWithFormat:@"text-%lu",(unsigned long)i]);
+        for (NSUInteger j=0;j<4 && i*4+j<length;j++) buffer[i*4+j]=(unichar)(packed>>(16*j));
+    }
+    if (before!=TAKBRead(bundle,@"preview")) return nil;
+    return [NSString stringWithCharacters:buffer length:length];
+}
 static void TAKBScanClients(void) {
     NSMutableDictionary<NSString *,UIView *> *found=[NSMutableDictionary new];
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
@@ -66,11 +124,24 @@ static void TAKBScanClients(void) {
     }
     for (NSString *bundle in TAKBClients) {
         TAKBClientSession *s=TAKBClients[bundle]; UIView *input=found[bundle];
-        if (input==s.input && input.window==s.window) continue;
-        if (s.nonce) TAKBWrite(bundle,@"focus",0);
+        if (input && input==s.input && input.window==s.window) {
+            s.missingSince=0; TAKBPublishPreview(bundle,s); continue;
+        }
+        if (!input && s.nonce && !s.dismissed && [TAKBWindowBundle(s.window) isEqual:bundle]) {
+            NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+            if (!s.missingSince) s.missingSince=now;
+            if (now-s.missingSince<0.9) continue; // search templates can rebuild during typing
+        }
+        if (!input && !s.nonce) continue;
+        if (s.nonce) {
+            TAKBClearPreview(bundle,s);
+            if (!input) TAKBWrite(bundle,@"focus",0);
+        }
+        s.missingSince=0; s.preview=nil;
         s.input=input; s.window=input.window; s.lastSequence=0; s.dismissed=NO;
         s.nonce=input ? arc4random_uniform(0xfffffe)+1 : 0;
         if (s.nonce) {
+            TAKBPublishPreview(bundle,s);
             TAKBWrite(bundle,@"focus",s.nonce);
             TALog(@"KEYBOARD INPUT bundle=%@ class=%@ scene=%@",bundle,NSStringFromClass(input.class),s.window.windowScene.session.persistentIdentifier);
         }
@@ -103,7 +174,7 @@ static void TAKBReceive(NSString *bundle) {
         } else [(id<UIKeyInput>)input insertText:@"\n"];
     } else if (op==3) { s.dismissed=YES; [input resignFirstResponder]; }
     else accepted=NO;
-    if (accepted) { s.lastSequence=sequence; TAKBWrite(bundle,@"ack",command); }
+    if (accepted) { s.lastSequence=sequence; TAKBPublishPreview(bundle,s); TAKBWrite(bundle,@"ack",command); }
 }
 static void TAKBInstallClients(void) {
     TAKBClients=[NSMutableDictionary new];
@@ -132,23 +203,33 @@ static void TAKBInstallClients(void) {
 @property(nonatomic) NSUInteger retry;
 @property(nonatomic) BOOL shifted;
 @property(nonatomic) BOOL numbers;
+@property(nonatomic) BOOL stalled;
+@property(nonatomic,copy) NSString *shownText;
 @property(nonatomic,strong) UILabel *heading;
 @property(nonatomic,strong) UIView *panel;
 @property(nonatomic,strong) UIButton *closeButton;
 @property(nonatomic,strong) NSArray<NSArray<UIButton *> *> *rows;
 @property(nonatomic,strong) UIView *variants;
 - (void)tick;
+- (void)refreshPreview;
 @end
 static UIWindow *TAKBWindow;
 static TAKBController *TAKBHost;
-static BOOL TAKBHostValid(void) {
+static NSMutableDictionary<NSString *,NSNumber *> *TAKBConsumed;
+static BOOL TAKBHostOwnerValid(void) {
     return TAKBHost && running && generation==TAKBHost.ownerGeneration &&
         (slots[0]==TAKBHost.record || slots[1]==TAKBHost.record) &&
-        TAKBHost.record.scene==TAValue(TAKBHost.record.controller,@"scene") &&
+        TAKBHost.record.scene==TAValue(TAKBHost.record.controller,@"scene");
+}
+static BOOL TAKBHostValid(void) {
+    return TAKBHostOwnerValid() &&
         TAKBRead(TAKBHost.bundle,@"focus")==TAKBHost.nonce;
 }
 static void TAKBHostStop(void) {
-    if (TAKBHost.bundle) TAKBWrite(TAKBHost.bundle,@"command",0);
+    if (TAKBHost.bundle) {
+        TAKBConsumed[TAKBHost.bundle]=@(TAKBHost.nonce);
+        TAKBWrite(TAKBHost.bundle,@"command",0);
+    }
     TAKBWindow.hidden=YES; TAKBWindow=nil; TAKBHost=nil;
 }
 @implementation TAKBController
@@ -169,16 +250,26 @@ static void TAKBHostStop(void) {
     self.view=[UIView new]; self.view.backgroundColor=[UIColor colorWithRed:0.025 green:0.10 blue:0.22 alpha:1];
     self.heading=[UILabel new]; self.heading.textColor=UIColor.whiteColor;
     self.heading.font=[UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
-    self.heading.adjustsFontSizeToFitWidth=YES; self.heading.minimumScaleFactor=0.65;
+    self.heading.lineBreakMode=NSLineBreakByTruncatingHead;
     self.heading.layer.cornerRadius=16; self.heading.layer.borderWidth=1.5;
     BOOL left=slots[0]==self.record;
     self.heading.layer.borderColor=(left ? [UIColor colorWithRed:0 green:0.8 blue:1 alpha:1] : UIColor.orangeColor).CGColor;
-    self.heading.text=[NSString stringWithFormat:@"  ⌕  Nhập vào bên %@ · Giữ nguyên âm để gõ dấu",left ? @"trái" : @"phải"];
+    self.heading.text=@"  ⌕  Tìm kiếm";
+    self.heading.accessibilityLabel=left ? @"Nội dung nhập bên trái" : @"Nội dung nhập bên phải";
     [self.view addSubview:self.heading];
     self.closeButton=[self key:@"×"]; [self.view addSubview:self.closeButton];
     self.panel=[UIView new]; self.panel.backgroundColor=[UIColor colorWithWhite:0 alpha:0.3];
     self.panel.layer.cornerRadius=15; [self.view addSubview:self.panel];
     [self buildKeys];
+    [self refreshPreview];
+}
+- (void)refreshPreview {
+    if (self.stalled) return;
+    NSString *text=TAKBReadPreview(self.bundle,self.nonce);
+    if (text && ![self.shownText isEqual:text]) {
+        self.shownText=text;
+        self.heading.text=text.length ? [@"  ⌕  " stringByAppendingString:text] : @"  ⌕  Tìm kiếm";
+    }
 }
 - (void)buildKeys {
     for (UIView *v in self.panel.subviews) [v removeFromSuperview];
@@ -226,7 +317,7 @@ static void TAKBHostStop(void) {
     self.variants.frame=self.panel.frame;
 }
 - (void)enqueue:(unsigned)op scalar:(uint32_t)scalar {
-    if (!TAKBHostValid() || self.queue.count>=128 || self.sequence==UINT16_MAX) return;
+    if (self.stalled || !TAKBHostValid() || self.queue.count>=128 || self.sequence==UINT16_MAX) return;
     uint64_t word=((uint64_t)self.nonce<<40)|((uint64_t)++self.sequence<<24)|((uint64_t)op<<21)|scalar;
     [self.queue addObject:@(word)]; if (!self.pending) [self tick];
 }
@@ -234,7 +325,7 @@ static void TAKBHostStop(void) {
     NSString *label=sender.accessibilityIdentifier;
     if ([label isEqual:@"⇧"]) { self.shifted=!self.shifted; [self buildKeys]; return; }
     if ([label isEqual:@"123"] || [label isEqual:@"ABC"]) { self.numbers=!self.numbers; [self buildKeys]; return; }
-    if ([label isEqual:@"×"]) { [self enqueue:3 scalar:0]; return; }
+    if ([label isEqual:@"×"]) { if (self.stalled) TAKBHostStop(); else [self enqueue:3 scalar:0]; return; }
     if ([label isEqual:@"⌫"]) { [self enqueue:1 scalar:0]; return; }
     if ([label isEqual:@"Tìm"]) { [self enqueue:2 scalar:0]; return; }
     NSString *text=[label isEqual:@"Dấu cách"] ? @" " : (self.shifted ? label : label.lowercaseString);
@@ -261,6 +352,8 @@ static void TAKBHostStop(void) {
 - (void)closeAccents { [self.variants removeFromSuperview]; self.variants=nil; }
 - (void)tick {
     if (!TAKBHostValid()) { TAKBHostStop(); return; }
+    [self refreshPreview];
+    if (self.stalled) return;
     if (!self.pending && self.queue.count) {
         self.pending=self.queue[0].unsignedLongLongValue; self.retry=0;
         TAKBWrite(self.bundle,@"command",self.pending); return;
@@ -272,7 +365,13 @@ static void TAKBHostStop(void) {
         if (close) { TAKBHostStop(); return; }
         [self tick]; return;
     }
-    if (++self.retry>=10) { TALog(@"KEYBOARD ACK TIMEOUT bundle=%@",self.bundle); TAKBHostStop(); return; }
+    if (++self.retry>=15) {
+        TALog(@"KEYBOARD ACK TIMEOUT bundle=%@",self.bundle);
+        self.stalled=YES; [self.queue removeAllObjects]; self.pending=0;
+        TAKBWrite(self.bundle,@"command",0);
+        self.heading.text=@"  Ô nhập không phản hồi. Bấm × rồi mở lại.";
+        return;
+    }
     TAKBWrite(self.bundle,@"command",self.pending);
 }
 @end
@@ -282,6 +381,16 @@ static void TAKBShow(NSString *bundle) {
     TARecord *r=nil; for (NSInteger i=0;i<2;i++) if ([slots[i].bundle isEqual:bundle]) r=slots[i];
     if (!r || !r.presentation || splitWindow.rootViewController.presentedViewController) return;
     if (TAKBHost && TAKBHost.nonce==nonce && [TAKBHost.bundle isEqual:bundle]) return;
+    if ([TAKBConsumed[bundle] unsignedLongLongValue]==nonce) return;
+    if (TAKBHostOwnerValid() && TAKBHost.record==r && [TAKBHost.bundle isEqual:bundle]) {
+        // A replacement search field owns a NEW session. Drop unsent old keys,
+        // but keep the full-screen UI instead of flashing back into a pane.
+        TAKBHost.nonce=(uint32_t)nonce; TAKBHost.sequence=0; TAKBHost.pending=0;
+        TAKBHost.retry=0; TAKBHost.stalled=NO; TAKBHost.shownText=nil;
+        [TAKBHost.queue removeAllObjects]; TAKBWrite(bundle,@"command",0);
+        [TAKBHost refreshPreview];
+        TALog(@"KEYBOARD REBIND bundle=%@",bundle); return;
+    }
     TAKBHostStop();
     TAKBHost=[TAKBController new]; TAKBHost.bundle=bundle; TAKBHost.nonce=(uint32_t)nonce;
     TAKBHost.record=r; TAKBHost.ownerGeneration=generation; TAKBHost.queue=[NSMutableArray new];
@@ -294,15 +403,22 @@ static void TAKBShow(NSString *bundle) {
     TALog(@"KEYBOARD OPEN side=%ld bundle=%@",(long)(slots[0]==r ? 0 : 1),bundle);
 }
 static void TAKBInstallHost(void) {
+    TAKBConsumed=[NSMutableDictionary new];
     for (NSString *bundle in TAClientBundles()) {
         int token;
         notify_register_dispatch(TAKBName(bundle,@"focus").UTF8String,&token,dispatch_get_main_queue(),^(__unused int delivered) {
-            if (TAKBHost && !TAKBHostValid()) TAKBHostStop();
             TAKBShow(bundle);
+            if (TAKBHost && !TAKBHostValid()) TAKBHostStop();
         });
     }
     static dispatch_source_t timer;
     timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
     dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,0),150*NSEC_PER_MSEC,20*NSEC_PER_MSEC);
-    dispatch_source_set_event_handler(timer,^{ [TAKBHost tick]; }); dispatch_resume(timer);
+    dispatch_source_set_event_handler(timer,^{
+        if (running) {
+            if (TAKBHost) TAKBShow(TAKBHost.bundle);
+            else for (NSInteger i=0;i<2 && !TAKBHost;i++) if (slots[i].bundle) TAKBShow(slots[i].bundle);
+        }
+        [TAKBHost tick];
+    }); dispatch_resume(timer);
 }
