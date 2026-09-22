@@ -1,3 +1,7 @@
+# MultiTA 0.10.24
+
+First split automatically assigns the two most recently opened distinct apps in chronological order, left then right. Previous split pairs retain priority. Native entry becomes a collapsible edge tab: tap to reveal the logo, tap again to enter split; idle collapses after three seconds. Drag to reposition and snap to an edge. In split, logo auto-hides; divider tap recalls controls. Drag highlight is 2pt wide, inset equally at both ends by min(56pt, 18% of display height); this approximates the toolbar height and is not measured from each remote app. No new background timer. Device validation required.
+
 # MultiTA 0.10.23
 
 Logo xanh/cam nền trong suốt ở đỉnh khe chia. Chạm logo để mở tác vụ, kéo ngang để chỉnh tỷ lệ. Bỏ vạch trắng giữa khe; hiệu ứng mũi tên và màu khe chỉ hiện khi chạm/kéo. Gói Dopamine rootless: com.sushibta.multita; thay thế com.sushibta.taduo để tránh nạp hai tweak. Log mới: /var/mobile/MultiTA.log và /var/mobile/MultiTA-template.log. Cần respring và mở lại các app sau khi đổi tên gói.
