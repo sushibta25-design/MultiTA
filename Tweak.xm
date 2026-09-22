@@ -121,12 +121,6 @@ static BOOL TAHasUpdater(id scene, NSString *name) {
     NSMethodSignature *sig = [scene methodSignatureForSelector:NSSelectorFromString(name)];
     return sig && sig.numberOfArguments == 3 && !strcmp(sig.methodReturnType, @encode(void)) && !strcmp([sig getArgumentTypeAtIndex:2], "@?");
 }
-static void TAInvokeVoid(id object, NSString *name) {
-    SEL sel = NSSelectorFromString(name);
-    NSMethodSignature *sig = [object methodSignatureForSelector:sel];
-    if (sig && sig.numberOfArguments == 2 && !strcmp(sig.methodReturnType, @encode(void)))
-        ((void(*)(id,SEL))objc_msgSend)(object, sel);
-}
 static void TAObserve(TARecord *r, NSUInteger token, NSUInteger serial, NSString *phase) {
     if (!running || generation != token || r.resizeSerial != serial) return;
     CGRect actual = CGRectZero; BOOL readable = TAReadFrame(r.scene, &actual);
@@ -280,7 +274,7 @@ static NSArray<NSString *> *TAPickerBundles(void) {
     return selectable;
 }
 static BOOL TANativeLaunch(NSString *bundle) {
-    // A Dashboard launch is never allowed while two hosted panes are active.
+    // Only the explicitly selected pane may request a native launch.
     if (running && ![primeBundle isEqual:bundle]) { TALog(@"PREPARE rejected unscoped launch %@",bundle); return NO; }
     id info=catalog[bundle]; Class launchClass=NSClassFromString(@"DBApplicationLaunchInfo");
     SEL init=NSSelectorFromString(@"initWithApplication:activationSettings:"), launch=NSSelectorFromString(@"_launchAppWithInfo:forURL:");
@@ -439,7 +433,7 @@ static void TAStop(NSString *reason) {
     for (NSInteger i=0;i<2;i++) { [appPickers[i] removeFromSuperview]; appPickers[i]=nil; pickerItems[i]=nil; pickerPages[i]=0; retryTargets[i]=nil; }
     TALog(@"STOP %@", reason);
     BOOL previous = ownCall; ownCall = YES;
-    for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
+    for (NSInteger i = 0; i < 2; i++) { slots[i].attaching=NO; TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
     buttonWindow.hidden = order.count < 1;
