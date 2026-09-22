@@ -37,6 +37,6 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: TAduo-0.10.1-rootless
+          name: TAduo-0.10.2-rootless
           path: packages/*.deb
           if-no-files-found: error

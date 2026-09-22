@@ -74,3 +74,7 @@ Device 0.9 evidence: native song minimum height 68pt; split 2pt, with artwork ab
 
 ## 0.10.1
 Based on exact 0.10.0. Captured-app picker uses 32-point icons without visible names, six per page. Swap button sits above Log and exchanges the two existing presentations only after both attach. Log remains available. Attach, resize and scene lifecycle remain as in 0.10.0. Device validation required.
+
+
+## 0.10.2 – native launch retention
+Ports selected lifecycle handling from 0.16 onto 0.10.1: native launch/Home animation no longer stop the split, capture accepts navigation callbacks without launch-source, and attach requests foreground once then waits up to four seconds for scene geometry. Per-slot request tokens cancel stale work; failures clear only the affected pane. Old scene destruction cannot evict a newer attached scene. Background completion always goes to the original implementation. Chia now chooses the side to replace using the existing icon picker; swap and Log stay in their positions. No installed-app catalog or 0.21–0.26 activation changes. Native layout routines are retained from 0.10.1. Device test: open YouTube and Vietmap before entering, split each with another app, replace each via Chia, return from native app launch, repeat and inspect logs for stalls/black panes. Build success does not establish on-device stability.

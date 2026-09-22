@@ -1,4 +1,4 @@
-// TAduo 0.10.1: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.2: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.1] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.2] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -47,6 +47,7 @@ static NSString *TABundle(id controller) {
 @property(nonatomic) BOOL frameCaptured;
 @property(nonatomic) CGSize targetSize;
 @property(nonatomic) NSUInteger resizeSerial;
+@property(nonatomic) BOOL attaching;
 @property(nonatomic) BOOL backgrounded;
 @property(nonatomic) BOOL restoreBackground;
 @end
@@ -62,7 +63,11 @@ static UIView *floatingActions;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSUInteger generation;
+static NSUInteger slotRequests[2];
 static void TAStop(NSString *reason);
+static void TAClearSlot(NSInteger slot, NSString *reason);
+static NSArray<NSString *> *TAClientBundles(void);
+static BOOL TAAttachPending(void) { return slots[0].attaching || slots[1].attaching; }
 static void TASetLayoutTarget(NSString *bundle, CGSize size);
 static UIWindowScene *TADashboard(void) {
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
@@ -143,7 +148,7 @@ static void TAResize(TARecord *r, CGSize size) {
         if (!TAReadFrame(scene, &original)) { TALog(@"RESIZE NO FRAME %@", r.bundle); return; }
         r.scene = scene; r.originalFrame = original; r.frameCaptured = YES;
     }
-    if (r.scene != scene) { TAStop(@"resize scene changed"); return; }
+    if (r.scene != scene) { for (NSInteger i=0;i<2;i++) if (slots[i]==r) TAClearSlot(i,@"resize scene changed"); return; }
     r.targetSize = size;
     TASetLayoutTarget(r.bundle, size);
     NSUInteger token = generation, serial = ++r.resizeSerial;
@@ -173,6 +178,14 @@ static void TACleanup(TARecord *r) {
     } @catch (__unused NSException *e) {}
     r.backgrounded = r.restoreBackground;
     r.presentationID = nil; r.scene = nil; r.changed = NO; r.frameCaptured = NO; ++r.resizeSerial;
+}
+static void TAClearSlot(NSInteger slot, NSString *reason) {
+    ++slotRequests[slot];
+    TARecord *r=slots[slot]; r.attaching=NO; slots[slot]=nil;
+    BOOL previous=ownCall; ownCall=YES; TACleanup(r); ownCall=previous;
+    choose[slot].hidden=NO; choose[slot].enabled=YES;
+    [choose[slot] setTitle:slot==0 ? @"Chọn app trái" : @"Chọn app phải" forState:UIControlStateNormal];
+    TALog(@"SLOT CLEAR side=%ld reason=%@",(long)slot,reason);
 }
 static void TAStop(NSString *reason) {
     if (!running) return;
@@ -204,6 +217,9 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 @property(nonatomic) NSInteger iconSlot;
 @property(nonatomic) NSUInteger iconPage;
 @property(nonatomic) NSUInteger iconToken;
+- (void)offerNative:(NSString *)bundle;
+- (void)replace:(NSString *)bundle slot:(NSInteger)slot;
+- (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
 - (void)renderIcons;
 - (void)closeIcons;
 - (void)selectIcon:(UIButton *)sender;
@@ -233,9 +249,19 @@ static UIButton *TAButton(NSString *title, SEL action) {
     notify_post("com.sushibta.taduo.snapshot");
 }
 - (void)restartSplit {
-    if (!running || splitWindow.rootViewController.presentedViewController) return;
-    TAStop(@"choose apps again");
-    dispatch_async(dispatch_get_main_queue(), ^{ [self start]; });
+    if (!running || TAAttachPending() || splitWindow.rootViewController.presentedViewController) return;
+    floatingActions.hidden=YES;
+    UIAlertController *picker=[UIAlertController alertControllerWithTitle:@"Chọn bên cần đổi app" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    NSUInteger token=generation;
+    for (NSInteger side=0;side<2;side++) {
+        [picker addAction:[UIAlertAction actionWithTitle:side==0 ? @"Bên trái" : @"Bên phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (running && generation==token) [self pick:choose[side]];
+            });
+        }]];
+    }
+    [picker addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
 }
 - (void)start {
     if (running || !dashboard || TADashboard() != dashboard) return;
@@ -298,7 +324,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     UIViewController *picker = self.iconPicker;
     self.iconPicker = nil; self.iconBundles = nil;
     [picker dismissViewControllerAnimated:NO completion:^{
-        if (running && generation == token) [self attach:bundle slot:slot];
+        if (running && generation == token) [self replace:bundle slot:slot];
     }];
 }
 - (void)iconPage:(UIButton *)sender {
@@ -348,11 +374,11 @@ static UIButton *TAButton(NSString *title, SEL action) {
 }
 - (void)pick:(UIButton *)sender {
     NSInteger slot = sender.tag;
-    if (!running || slot < 0 || slot > 1 || slots[slot] || splitWindow.rootViewController.presentedViewController) return;
+    if (!running || slot < 0 || slot > 1 || TAAttachPending() || splitWindow.rootViewController.presentedViewController) return;
     NSMutableArray *bundles = [NSMutableArray new];
     for (NSString *bundle in [order copy]) {
         TARecord *r = records[bundle], *other = slots[1-slot];
-        if (!r || (other && (other == r || other.controller == r.controller))) continue;
+        if (!r || (other && (other == r || [other.bundle isEqual:r.bundle] || other.controller == r.controller))) continue;
         [bundles addObject:bundle];
     }
     self.iconBundles = bundles; self.iconSlot = slot; self.iconPage = 0; self.iconToken = generation;
@@ -362,48 +388,124 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [self renderIcons];
     [splitWindow.rootViewController presentViewController:picker animated:NO completion:nil];
 }
+- (void)offerNative:(NSString *)bundle {
+    if (!running || !records[bundle] || TAAttachPending() || [slots[0].bundle isEqual:bundle] || [slots[1].bundle isEqual:bundle]) return;
+    if (splitWindow.rootViewController.presentedViewController) { TALog(@"NATIVE OFFER deferred to picker bundle=%@",bundle); return; }
+    floatingActions.hidden=YES;
+    UIAlertController *picker=[UIAlertController alertControllerWithTitle:([bundle isEqual:@"vn.vietmap.live"] ? @"Vietmap Live" : ([bundle isEqual:@"com.google.ios.youtube"] ? @"YouTube" : @"Ứng dụng vừa mở")) message:@"Đưa app vào bên nào?" preferredStyle:UIAlertControllerStyleAlert];
+    NSUInteger token=generation;
+    for (NSInteger side=0;side<2;side++) {
+        [picker addAction:[UIAlertAction actionWithTitle:side==0 ? @"Bên trái" : @"Bên phải" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (running && generation==token) [self replace:bundle slot:side];
+            });
+        }]];
+    }
+    [picker addAction:[UIAlertAction actionWithTitle:@"Giữ nguyên" style:UIAlertActionStyleCancel handler:nil]];
+    TALog(@"NATIVE OFFER bundle=%@",bundle);
+    [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
+}
+- (void)replace:(NSString *)bundle slot:(NSInteger)slot {
+    if (!running || slot<0 || slot>1 || !records[bundle]) return;
+    if ([slots[slot].bundle isEqual:bundle]) return;
+    if ([slots[1-slot].bundle isEqual:bundle]) return;
+    TAClearSlot(slot,@"replace"); [self attach:bundle slot:slot];
+}
 - (void)attach:(NSString *)bundle slot:(NSInteger)slot {
     TARecord *r = records[bundle], *other = slots[1-slot];
-    if (!running || slots[slot] || !r || (other && (other == r || other.controller == r.controller))) return;
+    if (!running || slots[slot] || !r || (other && (other == r || [other.bundle isEqual:r.bundle] || other.controller == r.controller))) return;
     NSString *sid = TAValue(r.controller, @"sceneID"), *otherSID = TAValue(other.controller, @"sceneID");
     if (other && ![[sid componentsSeparatedByString:@":"].firstObject isEqual:[otherSID componentsSeparatedByString:@":"].firstObject]) return;
-    slots[slot] = r; r.restoreBackground = r.backgrounded;
-    NSUInteger token = generation;
+    slots[slot] = r; r.restoreBackground = r.backgrounded; r.attaching=YES;
+    NSUInteger token = generation, request=++slotRequests[slot];
+    TALog(@"ATTACH BEGIN side=%ld bundle=%@",(long)slot,bundle);
     BOOL previous = ownCall; ownCall = YES;
     @try {
         SEL fg = NSSelectorFromString(@"foregroundSceneWithSettings:completion:");
         if (![r.controller respondsToSelector:fg]) @throw [NSException exceptionWithName:@"MissingForegroundAPI" reason:bundle userInfo:nil];
         ((void(*)(id,SEL,id,id))objc_msgSend)(r.controller, fg, r.activation, nil);
         r.backgrounded = NO;
-    } @catch (NSException *e) { TALog(@"ATTACH ERROR %@", e.name); TAStop(@"foreground failed"); ownCall = previous; return; }
+    } @catch (NSException *e) { TALog(@"ATTACH ERROR %@", e.name); TAClearSlot(slot,@"foreground failed"); ownCall = previous; return; }
     ownCall = previous; choose[slot].enabled = NO; [choose[slot] setTitle:@"Đang mở…" forState:UIControlStateNormal];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        if (!running || token != generation || slots[slot] != r) return;
-        BOOL old = ownCall; ownCall = YES;
-        @try {
-            TAResize(r, panes[slot].bounds.size);
-            SEL create = NSSelectorFromString(@"presentationViewWithIdentifier:");
-            if (![r.controller respondsToSelector:create]) @throw [NSException exceptionWithName:@"MissingPresentationAPI" reason:bundle userInfo:nil];
-            r.presentationID = [NSString stringWithFormat:@"com.sushibta.taduo.%lu.%ld", (unsigned long)token, (long)slot];
-            id v = ((id(*)(id,SEL,id))objc_msgSend)(r.controller, create, r.presentationID);
-            if (![v isKindOfClass:UIView.class] || ((UIView *)v).superview) @throw [NSException exceptionWithName:@"NotIndependent" reason:bundle userInfo:nil];
-            r.presentation = v;
-            r.presentation.transform = CGAffineTransformIdentity;
-            r.presentation.frame = panes[slot].bounds;
-            [panes[slot] addSubview:r.presentation]; choose[slot].hidden = YES;
-            TALog(@"ATTACHED slot=%ld bundle=%@", (long)slot, bundle);
-        } @catch (NSException *e) { TALog(@"PRESENTATION ERROR %@", e.name); TAStop(@"presentation failed"); }
-        ownCall = old;
-    });
+    [self finishAttach:slot generation:token request:request attempt:0];
+}
+- (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt {
+    if (!running || generation!=token || slotRequests[slot]!=request || !slots[slot].attaching) return;
+    TARecord *r=slots[slot];
+    CGRect frame=CGRectZero;
+    BOOL ready=TAReadFrame(TAValue(r.controller,@"scene"),&frame);
+    // Give native activation time to settle; re-read the current controller
+    // every time. Foreground is requested once, never polled/replayed.
+    if (attempt<4 || !ready) {
+        if (attempt>=16) { TALog(@"ATTACH TIMEOUT side=%ld bundle=%@",(long)slot,r.bundle); TAClearSlot(slot,@"scene timeout"); return; }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(), ^{
+            [self finishAttach:slot generation:token request:request attempt:attempt+1];
+        });
+        return;
+    }
+    BOOL old=ownCall; ownCall=YES;
+    @try {
+        TAResize(r,panes[slot].bounds.size);
+        if (!running || slots[slot]!=r || !r.frameCaptured) @throw [NSException exceptionWithName:@"SceneNotReady" reason:r.bundle userInfo:nil];
+        SEL create=NSSelectorFromString(@"presentationViewWithIdentifier:");
+        if (![r.controller respondsToSelector:create]) @throw [NSException exceptionWithName:@"MissingPresentationAPI" reason:r.bundle userInfo:nil];
+        r.presentationID=[NSString stringWithFormat:@"com.sushibta.taduo.%lu.%ld.%lu",(unsigned long)token,(long)slot,(unsigned long)request];
+        id v=((id(*)(id,SEL,id))objc_msgSend)(r.controller,create,r.presentationID);
+        if (![v isKindOfClass:UIView.class] || ((UIView *)v).superview) @throw [NSException exceptionWithName:@"NotIndependent" reason:r.bundle userInfo:nil];
+        r.presentation=v; r.presentation.transform=CGAffineTransformIdentity; r.presentation.frame=panes[slot].bounds;
+        [panes[slot] addSubview:r.presentation]; choose[slot].hidden=YES; r.attaching=NO;
+        TALog(@"ATTACHED slot=%ld bundle=%@ attempt=%lu",(long)slot,r.bundle,(unsigned long)attempt);
+    } @catch (NSException *e) {
+        TALog(@"PRESENTATION ERROR %@ bundle=%@",e.name,r.bundle);
+        if (running && slots[slot]==r) TAClearSlot(slot,@"presentation failed");
+    } @finally { ownCall=old; }
+
 }
 @end
 static void TACapture(id controller, id settings) {
-    if (ownCall || ![NSThread isMainThread] || !dashboard || TADashboard() != dashboard || ![settings isKindOfClass:NSDictionary.class] || !settings[@"DBActivationSettingLaunchSource"]) return;
-    NSString *bundle = TABundle(controller); if (!bundle) return;
-    TARecord *r = [TARecord new]; r.controller = controller; r.bundle = bundle; r.activation = [settings copy]; records[bundle] = r;
+    if (ownCall || !NSThread.isMainThread || !dashboard || TADashboard()!=dashboard) return;
+    NSString *bundle=TABundle(controller);
+    if (!bundle || ![settings isKindOfClass:NSDictionary.class]) return;
+    NSString *sid=TAValue(controller,@"sceneID");
+    NSString *display=[sid componentsSeparatedByString:@":"].firstObject;
+    if (![dashboard.session.persistentIdentifier hasSuffix:display]) return;
+    BOOL launch=settings[@"DBActivationSettingLaunchSource"]!=nil;
+    // Some navigation foreground callbacks omit launch-source. Preserve their
+    // actual activation dictionary rather than inventing one.
+    if (!launch && ![TAClientBundles() containsObject:bundle]) return;
+    TARecord *r=records[bundle];
+    for (NSInteger i=0;i<2;i++) {
+        TARecord *pending=slots[i];
+        if (running && pending.attaching && [pending.bundle isEqual:bundle]) {
+            if (pending.controller!=controller) {
+                TALog(@"ATTACH REBIND side=%ld bundle=%@",(long)i,bundle);
+                pending.controller=controller;
+            }
+            if (launch || !pending.activation) pending.activation=[settings copy];
+            records[bundle]=pending; return;
+        }
+    }
+    if (running && (slots[0].controller==controller || slots[1].controller==controller)) {
+        if (launch && r.controller==controller) r.activation=[settings copy];
+        return;
+    }
+    if (!r || r.controller!=controller) {
+        r=[TARecord new]; r.controller=controller; r.bundle=bundle;
+    }
+    if (launch || !r.activation) r.activation=[settings copy]; records[bundle]=r;
     [order removeObject:bundle]; [order addObject:bundle];
-    while (order.count > 6) { [records removeObjectForKey:order.firstObject]; [order removeObjectAtIndex:0]; }
-    TALog(@"CAPTURE %@ sid=%@", bundle, TAValue(controller, @"sceneID"));
+    // Keep resumable/active apps pinned when trimming recently seen apps.
+    while (order.count>24) {
+        NSString *victim=nil;
+        for (NSString *entry in order) {
+            if ([slots[0].bundle isEqual:entry] || [slots[1].bundle isEqual:entry] || [entry isEqual:bundle]) continue;
+            victim=entry; break;
+        }
+        if (!victim) break;
+        [records removeObjectForKey:victim]; [order removeObject:victim];
+    }
+    TALog(@"CAPTURE %@ sid=%@ launchSource=%d",bundle,sid,launch);
+    if (!running) buttonWindow.hidden=NO;
 }
 static void TATick(void) {
     UIWindowScene *s = TADashboard();
@@ -417,7 +519,7 @@ static void TATick(void) {
         buttonWindow = [[UIWindow alloc] initWithWindowScene:s]; buttonWindow.windowLevel = UIWindowLevelAlert + 80;
         buttonWindow.frame = CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-88, 0, 88, 30);
         buttonWindow.rootViewController = [UIViewController new];
-        UIButton *b = TAButton(@"TAduo 0.10", @selector(start)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
+        UIButton *b = TAButton(@"TAduo 0.10.2", @selector(start)); b.frame = buttonWindow.bounds; [buttonWindow.rootViewController.view addSubview:b];
     }
     buttonWindow.hidden = running || order.count < 2;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
@@ -713,8 +815,42 @@ static void TAListenSnapshots(void) {
 %group TAHost
 %hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
-    if (!ownCall && running) TAStop(@"native app launch");
-    TACapture(self, settings); %orig;
+    BOOL external=!ownCall;
+    TALog(@"FOREGROUND controller=%p sid=%@ running=%d own=%d pending=%d",self,TAValue(self,@"sceneID"),running,ownCall,TAAttachPending());
+    NSString *bundle=TABundle(self);
+    BOOL current=slots[0].controller==self || slots[1].controller==self || [slots[0].bundle isEqual:bundle] || [slots[1].bundle isEqual:bundle];
+    BOOL launch=[settings isKindOfClass:NSDictionary.class] && settings[@"DBActivationSettingLaunchSource"]!=nil;
+    if (external && running && !TAAttachPending() && !current && bundle && [settings isKindOfClass:NSDictionary.class] && (launch || [TAClientBundles() containsObject:bundle])) TALog(@"NATIVE LAUNCH retain split bundle=%@",bundle);
+    if (external) TACapture(self,settings);
+    %orig;
+    // Retry once after native foreground has established its scene ID. No
+    // fabricated callback or repeated foreground requests.
+    if (external && [settings isKindOfClass:NSDictionary.class]) {
+        __weak id controller=self;
+        NSDictionary *activation=[settings copy];
+        NSUInteger token=generation;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id strongController=controller;
+            if (!strongController || generation!=token) return;
+            NSString *lateBundle=TABundle(strongController);
+            BOOL occupied=slots[0].controller==strongController || slots[1].controller==strongController || [slots[0].bundle isEqual:lateBundle] || [slots[1].bundle isEqual:lateBundle];
+            if (running && !TAAttachPending() && !occupied && lateBundle && (activation[@"DBActivationSettingLaunchSource"] || [TAClientBundles() containsObject:lateBundle])) TALog(@"NATIVE LAUNCH settled retain split bundle=%@",lateBundle);
+            TACapture(strongController,activation);
+            if (running && lateBundle) {
+                // A new controller for the same selected app replaces only its old slot.
+                for (NSInteger i=0;i<2;i++) {
+                    TARecord *oldRecord=slots[i];
+                    if (oldRecord && !oldRecord.attaching && [oldRecord.bundle isEqual:lateBundle] && records[lateBundle]!=oldRecord) {
+                        oldRecord.restoreBackground=NO;
+                        TAClearSlot(i,@"native controller replaced");
+                        [controls attach:lateBundle slot:i];
+                        return;
+                    }
+                }
+                if (activation[@"DBActivationSettingLaunchSource"] || [lateBundle isEqual:@"vn.vietmap.live"]) [controls offerNative:lateBundle];
+            }
+        });
+    }
 }
 - (void)backgroundSceneWithCompletion:(id)completion {
     TARecord *r = records[TABundle(self) ?: @""];
@@ -722,14 +858,27 @@ static void TAListenSnapshots(void) {
     %orig;
 }
 - (id)presentationViewWithIdentifier:(id)identifier {
-    if (!ownCall && running && [identifier isEqual:@"kCARAppToHomeAnimationIdentifier"]) TAStop(@"native home");
+    if (!ownCall && running && [identifier isEqual:@"kCARAppToHomeAnimationIdentifier"]) {
+        if (TAAttachPending()) TALog(@"HOME TRANSITION during attach (session retained)");
+        else TALog(@"HOME TRANSITION retain split bundle=%@",TABundle(self));
+    }
     return %orig;
 }
 - (void)sceneManager:(id)manager didDestroyScene:(id)scene {
     NSString *bundle = TABundle(self); TARecord *r = records[bundle ?: @""];
-    if (r && r.controller == self) {
-        if (r == slots[0] || r == slots[1]) TAStop(@"scene destroyed");
-        [records removeObjectForKey:bundle]; [order removeObject:bundle];
+    id currentScene=TAValue(self,@"scene");
+    TALog(@"SCENE DESTROY bundle=%@ controller=%p destroyed=%p current=%p attached=%p running=%d own=%d",bundle,self,scene,currentScene,r.scene,running,ownCall);
+    if (r && r.controller == self && scene) {
+        // A late destruction notification for an old scene must not evict a
+        // newer scene on the same controller. Keep activation data for retry.
+        BOOL attachedDestroyed=r.scene==scene;
+        BOOL pendingDestroyed=NO; // pending attachment owns its bounded readiness timeout
+        if (attachedDestroyed || pendingDestroyed) {
+            r.changed=NO; r.restoreBackground=NO;
+            if (r == slots[0]) TAClearSlot(0,@"current scene destroyed");
+            if (r == slots[1]) TAClearSlot(1,@"current scene destroyed");
+        }
+        TALog(@"SCENE RECORD retained bundle=%@ affected=%d",bundle,attachedDestroyed || pendingDestroyed);
     }
     %orig;
 }
