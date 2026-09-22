@@ -1,4 +1,4 @@
-// TAduo 0.10.4: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.5: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.4] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.5] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -62,6 +62,9 @@ static UIWindow *splitWindow, *buttonWindow;
 static UIView *floatingActions;
 static UIButton *menuButton;
 static BOOL chromeVisible=YES;
+static UIView *dividerView;
+static CGFloat splitRatio=0.5, dragStartRatio=0.5;
+static BOOL dividerDragging=NO;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSUInteger generation;
@@ -196,7 +199,7 @@ static void TAStop(NSString *reason) {
     BOOL previous = ownCall; ownCall = YES;
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
-    splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil; menuButton=nil;
+    splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil; menuButton=nil; dividerView=nil; dividerDragging=NO;
     buttonWindow.hidden = order.count < 2;
 }
 static BOOL TAHasHostedSurface(CALayer *layer, NSUInteger depth, NSInteger *budget) {
@@ -230,7 +233,7 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
     }
     return image ?: [UIImage systemImageNamed:@"app"];
 }
-@interface TAControls : NSObject
+@interface TAControls : NSObject <UIGestureRecognizerDelegate>
 @property(nonatomic, strong) UIViewController *iconPicker;
 @property(nonatomic, copy) NSArray<NSString *> *iconBundles;
 @property(nonatomic) NSInteger iconSlot;
@@ -240,6 +243,8 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 - (void)replace:(NSString *)bundle slot:(NSInteger)slot;
 - (void)finishAttach:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
 - (void)checkPresentation:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
+- (void)dragDivider:(UIPanGestureRecognizer *)gesture;
+- (void)layoutSplit:(BOOL)commit;
 - (void)showChrome;
 - (void)hideChrome;
 - (void)touchActivity:(UIEvent *)event;
@@ -278,6 +283,61 @@ static UIImage *TASplitIcon(void) {
     return icon;
 }
 @implementation TAControls
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    if (!running || TAAttachPending() || splitWindow.rootViewController.presentedViewController) return NO;
+    if ([gesture isKindOfClass:UIPanGestureRecognizer.class]) {
+        CGPoint v=[(UIPanGestureRecognizer *)gesture velocityInView:splitWindow.rootViewController.view];
+        return fabs(v.x)>fabs(v.y);
+    }
+    return YES;
+}
+- (void)layoutSplit:(BOOL)commit {
+    if (!running) return;
+    CGFloat available=splitWindow.bounds.size.width-4, height=splitWindow.bounds.size.height;
+    CGFloat left=available*splitRatio, center=left+2;
+    panes[0].frame=CGRectMake(0,0,left,height);
+    panes[1].frame=CGRectMake(left+4,0,available-left,height);
+    dividerView.frame=CGRectMake(center-10,0,20,height);
+    menuButton.center=CGPointMake(center,height/2);
+    CGFloat actionsX=MAX(0,MIN(center-78,splitWindow.bounds.size.width-156));
+    floatingActions.frame=CGRectMake(actionsX,height/2-49,156,30);
+    for (NSInteger i=0;i<2;i++) {
+        choose[i].frame=panes[i].bounds;
+        TARecord *r=slots[i];
+        r.presentation.frame=panes[i].bounds;
+        if (commit && r.presentation && !r.attaching) {
+            TAResize(r,panes[i].bounds.size);
+        }
+    }
+    if (commit) {
+        TALog(@"DIVIDER COMMIT ratio=%.3f left=%@ right=%@",splitRatio,NSStringFromCGRect(panes[0].bounds),NSStringFromCGRect(panes[1].bounds));
+        NSUInteger token=generation;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,600*NSEC_PER_MSEC),dispatch_get_main_queue(), ^{
+            if (running && token==generation) notify_post("com.sushibta.taduo.snapshot");
+        });
+    }
+}
+- (void)dragDivider:(UIPanGestureRecognizer *)gesture {
+    if (!running || TAAttachPending()) return;
+    if (gesture.state==UIGestureRecognizerStateBegan) {
+        dividerDragging=YES; dragStartRatio=splitRatio; [self showChrome];
+        floatingActions.hidden=YES;
+    }
+    CGFloat available=splitWindow.bounds.size.width-4;
+    if (available<=0) return;
+    if (gesture.state==UIGestureRecognizerStateBegan || gesture.state==UIGestureRecognizerStateChanged || gesture.state==UIGestureRecognizerStateEnded) {
+        CGFloat minimum=MIN(140,available/2);
+        CGFloat requested=available*dragStartRatio+[gesture translationInView:splitWindow.rootViewController.view].x;
+        splitRatio=MAX(minimum,MIN(available-minimum,requested))/available;
+        [self layoutSplit:gesture.state==UIGestureRecognizerStateEnded];
+    }
+    if (gesture.state==UIGestureRecognizerStateCancelled || gesture.state==UIGestureRecognizerStateFailed) {
+        splitRatio=dragStartRatio; [self layoutSplit:NO];
+    }
+    if (gesture.state==UIGestureRecognizerStateEnded || gesture.state==UIGestureRecognizerStateCancelled || gesture.state==UIGestureRecognizerStateFailed) {
+        dividerDragging=NO; [self showChrome];
+    }
+}
 - (void)enter {
     [self showChrome];
     if (running) [self restartSplit]; else [self start];
@@ -290,6 +350,7 @@ static UIImage *TASplitIcon(void) {
     [self performSelector:@selector(hideChrome) withObject:nil afterDelay:3.0 inModes:@[NSRunLoopCommonModes]];
 }
 - (void)hideChrome {
+    if (dividerDragging) return;
     if (splitWindow.rootViewController.presentedViewController) {
         [self showChrome]; return;
     }
@@ -334,7 +395,7 @@ static UIImage *TASplitIcon(void) {
     if (running || !dashboard || TADashboard() != dashboard) return;
     CGRect bounds = dashboard.coordinateSpace.bounds;
     if (bounds.size.width < 150 || bounds.size.height < 100) return;
-    running = YES; ++generation;
+    running = YES; ++generation; splitRatio=0.5;
     splitWindow = [[UIWindow alloc] initWithWindowScene:dashboard];
     splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
     splitWindow.rootViewController = [UIViewController new];
@@ -350,9 +411,11 @@ static UIImage *TASplitIcon(void) {
         choose[i] = TAButton(i == 0 ? @"Chọn app trái" : @"Chọn app phải", @selector(pick:));
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
-    UIView *divider=[[UIView alloc] initWithFrame:CGRectMake(paneWidth,0,gap,bounds.size.height)];
-    divider.backgroundColor=UIColor.clearColor; divider.userInteractionEnabled=NO;
-    [root addSubview:divider];
+    dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-10,0,20,bounds.size.height)];
+    dividerView.backgroundColor=UIColor.clearColor;
+    UIPanGestureRecognizer *drag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
+    drag.maximumNumberOfTouches=1; drag.delegate=self; [dividerView addGestureRecognizer:drag];
+    [root addSubview:dividerView];
     floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half - 78, bounds.size.height / 2 - 49, 156, 30)];
     floatingActions.backgroundColor = UIColor.clearColor;
     NSArray *titles = @[@"", @"", @"Thoát"];
@@ -371,6 +434,8 @@ static UIImage *TASplitIcon(void) {
     menuButton = TAButton(@"•••", @selector(toggleActions));
     menuButton.frame = CGRectMake(half - 16, bounds.size.height / 2 - 15, 32, 30);
     menuButton.layer.cornerRadius = 10; menuButton.accessibilityLabel = @"Tác vụ TAduo";
+    UIPanGestureRecognizer *menuDrag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
+    menuDrag.maximumNumberOfTouches=1; menuDrag.delegate=self; [menuButton addGestureRecognizer:menuDrag];
     [root addSubview:menuButton];
     splitWindow.hidden = NO; [self showChrome];
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
@@ -382,6 +447,7 @@ static UIImage *TASplitIcon(void) {
         [panes[i] addSubview:slots[i].presentation];
         slots[i].presentation.frame = panes[i].bounds;
     }
+    [self layoutSplit:YES];
     TALog(@"SWAP left=%@ right=%@", slots[0].bundle, slots[1].bundle);
 }
 - (void)closeIcons {
