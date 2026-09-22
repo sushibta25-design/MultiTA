@@ -1,4 +1,4 @@
-// TAduo 0.10.11: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.12: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.11] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.12] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -61,7 +61,8 @@ static UIButton *choose[2];
 static UIWindow *splitWindow, *buttonWindow;
 static UIView *floatingActions;
 static UIView *dividerView;
-static const CGFloat TADividerGap=12;
+static const CGFloat TADividerGap=4;
+static const CGFloat TADividerHitWidth=12;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static BOOL dividerDragging=NO;
 static CGPoint entryDragStart;
@@ -281,6 +282,40 @@ static UIImage *TASplitIcon(void) {
     }
     return icon;
 }
+static UIImage *TAActionIcon(BOOL exitAction) {
+    static UIImage *swapIcon, *exitIcon;
+    UIImage *cached=exitAction ? exitIcon : swapIcon;
+    if (cached) return cached;
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(30,24),NO,0);
+    UIColor *cyan=[UIColor colorWithRed:0 green:0.88 blue:1 alpha:1];
+    UIColor *orange=[UIColor colorWithRed:1 green:0.43 blue:0.10 alpha:1];
+    for (NSUInteger i=0;i<2;i++) {
+        [(i==0 ? cyan : orange) setStroke];
+        UIBezierPath *path=[UIBezierPath bezierPath];
+        path.lineWidth=3.5; path.lineCapStyle=kCGLineCapRound; path.lineJoinStyle=kCGLineJoinRound;
+        if (exitAction) {
+            [path moveToPoint:CGPointMake(7,i==0 ? 4 : 20)];
+            [path addLineToPoint:CGPointMake(23,i==0 ? 20 : 4)];
+        } else if (i==0) {
+            [path moveToPoint:CGPointMake(26,6)];
+            [path addLineToPoint:CGPointMake(4,6)];
+            [path moveToPoint:CGPointMake(9,2)];
+            [path addLineToPoint:CGPointMake(4,6)];
+            [path addLineToPoint:CGPointMake(9,10)];
+        } else {
+            [path moveToPoint:CGPointMake(4,18)];
+            [path addLineToPoint:CGPointMake(26,18)];
+            [path moveToPoint:CGPointMake(21,14)];
+            [path addLineToPoint:CGPointMake(26,18)];
+            [path addLineToPoint:CGPointMake(21,22)];
+        }
+        [path stroke];
+    }
+    UIImage *result=[UIGraphicsGetImageFromCurrentImageContext() imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    UIGraphicsEndImageContext();
+    if (exitAction) exitIcon=result; else swapIcon=result;
+    return result;
+}
 @implementation TAControls
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
     if (!running || TAAttachPending() || splitWindow.rootViewController.presentedViewController) return NO;
@@ -296,7 +331,7 @@ static UIImage *TASplitIcon(void) {
     CGFloat left=available*splitRatio, center=left+TADividerGap/2;
     panes[0].frame=CGRectMake(0,0,left,height);
     panes[1].frame=CGRectMake(left+TADividerGap,0,available-left,height);
-    dividerView.frame=CGRectMake(left,(height-56)/2,TADividerGap,56);
+    dividerView.frame=CGRectMake(center-TADividerHitWidth/2,(height-56)/2,TADividerHitWidth,56);
     floatingActions.frame=CGRectMake(MAX(0,MIN(center-78,splitWindow.bounds.size.width-156)),height/2-15,156,30);
     for (NSInteger i=0;i<2;i++) {
         choose[i].frame=panes[i].bounds;
@@ -392,7 +427,7 @@ static UIImage *TASplitIcon(void) {
     splitWindow.opaque=NO; splitWindow.backgroundColor=UIColor.clearColor;
     splitWindow.rootViewController = [UIViewController new];
     UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.clearColor; root.opaque=NO;
-    // Full-height panes with a dedicated gap. Divider hit area never overlaps either app.
+    // Thin visual gap, independent centered hit area; 4pt overlap per pane only in the 56pt center region.
     CGFloat half = bounds.size.width / 2;
     CGFloat gap=TADividerGap, paneWidth=(bounds.size.width-gap)/2;
     for (NSInteger i = 0; i < 2; i++) {
@@ -403,9 +438,9 @@ static UIImage *TASplitIcon(void) {
         choose[i] = TAButton(i == 0 ? @"Chọn app trái" : @"Chọn app phải", @selector(pick:));
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
-    dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-TADividerGap/2,(bounds.size.height-56)/2,TADividerGap,56)];
+    dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-TADividerHitWidth/2,(bounds.size.height-56)/2,TADividerHitWidth,56)];
     dividerView.backgroundColor=UIColor.clearColor;
-    UIView *grip=[[UIView alloc] initWithFrame:CGRectMake((TADividerGap-3)/2,18,3,20)];
+    UIView *grip=[[UIView alloc] initWithFrame:CGRectMake((TADividerHitWidth-3)/2,18,3,20)];
     grip.backgroundColor=[UIColor colorWithWhite:1 alpha:0.65]; grip.layer.cornerRadius=1.5;
     grip.userInteractionEnabled=NO; [dividerView addSubview:grip];
     UIPanGestureRecognizer *drag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
@@ -416,16 +451,17 @@ static UIImage *TASplitIcon(void) {
     [root addSubview:dividerView];
     floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-78,bounds.size.height/2-15,156,30)];
     floatingActions.backgroundColor = UIColor.clearColor;
-    NSArray *titles = @[@"", @"", @"Thoát"];
+    NSArray *titles = @[@"", @"", @""];
     NSArray *actions = @[@"restartSplit", @"swapSides", @"stop"];
     for (NSUInteger i=0; i<titles.count; i++) {
         UIButton *b = TAButton(titles[i], NSSelectorFromString(actions[i]));
         b.frame = CGRectMake(i*52, 0, 50, 30); b.layer.cornerRadius = 8;
         if (i==0) { [b setImage:TASplitIcon() forState:UIControlStateNormal]; b.accessibilityLabel=@"Chia màn hình"; }
         if (i==1) {
-            [b setImage:[UIImage systemImageNamed:@"arrow.left.arrow.right"] forState:UIControlStateNormal];
+            [b setImage:TAActionIcon(NO) forState:UIControlStateNormal];
             b.accessibilityLabel=@"Đổi vị trí hai ứng dụng";
         }
+        if (i==2) { [b setImage:TAActionIcon(YES) forState:UIControlStateNormal]; b.accessibilityLabel=@"Thoát chia màn hình"; }
         [floatingActions addSubview:b];
     }
     floatingActions.hidden = YES; [root addSubview:floatingActions];

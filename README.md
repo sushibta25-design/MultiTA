@@ -118,3 +118,7 @@ Remove automatic offerNative modal entirely; native callbacks still capture appl
 
 ## 0.10.11 transparent divider and recent-app eligibility
 Replace ivory 20pt gap with clear 12pt gap and small translucent grip. Make split window/root nonopaque; panes keep opaque black backing. Transparency reveals existing underlying CarPlay content, not a guaranteed wallpaper. Center hit region stays within gap. Picker gets opaque backing to avoid underlying pane text showing through. Unknown passive foreground callbacks lacking DBActivationSettingLaunchSource no longer create recent-app records. Existing and pending app records still update; explicit launch-source callbacks seed/reorder recents. This is an observable proxy for a user launch; callbacks without source cannot conclusively distinguish user actions from background activity. Keep inset fix and Music helpers. No phone-app launch API added.
+
+
+## 0.10.12 compact gap and two-color actions
+Visual transparent gap reduced to 4pt; centered divider hit region remains 12x56pt, extending 4pt into each pane only at mid-height. Grip stays centered. Swap uses bold cyan upper-left arrow and orange lower-right arrow; exit uses cyan and orange diagonal strokes. Native cached drawing, no new image assets/dependencies. Preserve capture eligibility, resize helpers and attachment lifecycle. Device gesture feel and icon appearance require verification.
