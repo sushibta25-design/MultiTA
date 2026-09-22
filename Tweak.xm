@@ -1,4 +1,4 @@
-// TAduo 0.10.5: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.6: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.5] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.6] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -65,6 +65,10 @@ static BOOL chromeVisible=YES;
 static UIView *dividerView;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static BOOL dividerDragging=NO;
+static __weak UIView *mountedDock;
+static UIButton *dockButton;
+static NSMapTable *dockGeometry;
+static BOOL dockAdjusting=NO;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSUInteger generation;
@@ -298,7 +302,7 @@ static UIImage *TASplitIcon(void) {
     panes[0].frame=CGRectMake(0,0,left,height);
     panes[1].frame=CGRectMake(left+4,0,available-left,height);
     dividerView.frame=CGRectMake(center-10,0,20,height);
-    floatingActions.frame=CGRectMake(MAX(0,splitWindow.bounds.size.width-160),40,156,30);
+    floatingActions.frame=CGRectMake(MAX(0,MIN(center-78,splitWindow.bounds.size.width-156)),height/2-15,156,30);
     for (NSInteger i=0;i<2;i++) {
         choose[i].frame=panes[i].bounds;
         TARecord *r=slots[i];
@@ -343,7 +347,7 @@ static UIImage *TASplitIcon(void) {
 - (void)showChrome {
     chromeVisible=YES;
     menuButton.hidden=NO;
-    buttonWindow.hidden=!dashboard || order.count<1 || splitWindow.rootViewController.presentedViewController!=nil;
+    buttonWindow.hidden=YES;
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideChrome) object:nil];
     [self performSelector:@selector(hideChrome) withObject:nil afterDelay:3.0 inModes:@[NSRunLoopCommonModes]];
 }
@@ -363,11 +367,15 @@ static UIImage *TASplitIcon(void) {
         if (touch.phase==UITouchPhaseBegan || touch.phase==UITouchPhaseMoved || touch.phase==UITouchPhaseStationary) active=YES;
     }
     if (!touched) return;
+    for (UITouch *touch in event.allTouches) {
+        if (touch.phase==UITouchPhaseBegan && touch.window==splitWindow && ![touch.view isDescendantOfView:floatingActions] && ![touch.view isDescendantOfView:dividerView])
+            floatingActions.hidden=YES;
+    }
     [self showChrome];
     if (active) [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideChrome) object:nil];
 }
 - (void)stop { [self closeIcons]; TAStop(@"user"); [self showChrome]; }
-- (void)toggleActions { [self showChrome]; floatingActions.hidden = !floatingActions.hidden; }
+- (void)toggleActions { if (splitWindow.rootViewController.presentedViewController) return; [self showChrome]; floatingActions.hidden = !floatingActions.hidden; }
 - (void)snapshot {
     floatingActions.hidden = YES;
     TALog(@"MANUAL SNAPSHOT REQUEST");
@@ -413,8 +421,11 @@ static UIImage *TASplitIcon(void) {
     dividerView.backgroundColor=UIColor.clearColor;
     UIPanGestureRecognizer *drag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
     drag.maximumNumberOfTouches=1; drag.delegate=self; [dividerView addGestureRecognizer:drag];
+    UITapGestureRecognizer *tap=[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleActions)];
+    [tap requireGestureRecognizerToFail:drag]; [dividerView addGestureRecognizer:tap];
+    dividerView.accessibilityLabel=@"Chạm mở tác vụ, kéo để chia màn";
     [root addSubview:dividerView];
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(MAX(0,bounds.size.width-160),40,156,30)];
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-78,bounds.size.height/2-15,156,30)];
     floatingActions.backgroundColor = UIColor.clearColor;
     NSArray *titles = @[@"", @"", @"Thoát"];
     NSArray *actions = @[@"restartSplit", @"swapSides", @"stop"];
@@ -429,7 +440,7 @@ static UIImage *TASplitIcon(void) {
         [floatingActions addSubview:b];
     }
     floatingActions.hidden = YES; [root addSubview:floatingActions];
-    splitWindow.hidden = NO; [self showChrome];
+    splitWindow.hidden = NO; dockButton.hidden=YES; [self showChrome];
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
 }
 - (void)swapSides {
@@ -697,26 +708,63 @@ static void TACapture(id controller, id settings) {
     TALog(@"CAPTURE %@ sid=%@ launchSource=%d",bundle,sid,launch);
     if (!running) [controls showChrome];
 }
+static void TARestoreDock(void) {
+    for (UIView *view in dockGeometry.keyEnumerator) {
+        NSDictionary *entry=[dockGeometry objectForKey:view];
+        if (CGAffineTransformEqualToTransform(view.transform,[entry[@"applied"] CGAffineTransformValue])) view.transform=[entry[@"original"] CGAffineTransformValue];
+        if (CGPointEqualToPoint(view.center,[entry[@"moved"] CGPointValue])) view.center=[entry[@"center"] CGPointValue];
+    }
+    [dockGeometry removeAllObjects];
+}
+static UIView *TAFindDock(UIView *view, NSUInteger depth) {
+    if (!view || depth>14 || view.hidden || view.alpha<0.01) return nil;
+    NSString *name=NSStringFromClass(view.class);
+    if ([name hasPrefix:@"DB"] && [name containsString:@"Dock"] && view.bounds.size.width>=32 && view.bounds.size.width<=100 && view.bounds.size.height>=140) return view;
+    for (UIView *child in view.subviews) { UIView *found=TAFindDock(child,depth+1); if (found) return found; }
+    return nil;
+}
+static void TAInstallDock(UIView *dock) {
+    if (dockAdjusting || !dock || running) return;
+    dockAdjusting=YES;
+    @try {
+        if (!dockGeometry) dockGeometry=[NSMapTable weakToStrongObjectsMapTable];
+        TARestoreDock();
+        if (mountedDock!=dock) { [dockButton removeFromSuperview]; mountedDock=dock; TALog(@"DOCK MOUNT %@",NSStringFromClass(dock.class)); }
+        if (!dockButton) {
+            dockButton=TAButton(@"",@selector(enter)); [dockButton setImage:TASplitIcon() forState:UIControlStateNormal];
+            dockButton.accessibilityLabel=@"Chia màn hình";
+        }
+        CGFloat height=dock.bounds.size.height,width=dock.bounds.size.width,factor=(height-36)/height;
+        for (UIView *child in dock.subviews) {
+            if (child==dockButton || child.hidden || !child.userInteractionEnabled) continue;
+            CGAffineTransform original=child.transform,applied=CGAffineTransformScale(original,factor,factor);
+            CGPoint center=child.center,moved=CGPointMake(width/2+(center.x-width/2)*factor,center.y*factor);
+            [dockGeometry setObject:@{@"original":[NSValue valueWithCGAffineTransform:original],@"applied":[NSValue valueWithCGAffineTransform:applied],@"center":[NSValue valueWithCGPoint:center],@"moved":[NSValue valueWithCGPoint:moved]} forKey:child];
+            child.transform=applied; child.center=moved;
+        }
+        dockButton.frame=CGRectMake((width-34)/2,height-35,34,34);
+        [dock addSubview:dockButton]; dockButton.hidden=NO;
+    } @finally { dockAdjusting=NO; }
+}
 static void TATick(void) {
     UIWindowScene *s = TADashboard();
     if (s != dashboard) {
-        TAStop(@"display changed"); buttonWindow.hidden = YES; buttonWindow = nil;
+        TAStop(@"display changed"); TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil; buttonWindow.hidden = YES; buttonWindow = nil;
         [records removeAllObjects]; [order removeAllObjects]; dashboard = s;
         TALog(@"DISPLAY %@", s.session.persistentIdentifier);
     }
     if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
-    if (s && !buttonWindow) {
-        buttonWindow = [[UIWindow alloc] initWithWindowScene:s]; buttonWindow.windowLevel = UIWindowLevelAlert + 80;
-        buttonWindow.frame = CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-46, 4, 42, 32);
-        buttonWindow.rootViewController = [UIViewController new];
-        UIButton *b = TAButton(@"", @selector(enter));
-        [b setImage:TASplitIcon() forState:UIControlStateNormal];
-        b.accessibilityLabel=@"Chia màn hình"; b.layer.cornerRadius=8; b.frame=buttonWindow.bounds;
-        buttonWindow.rootViewController.view.backgroundColor=UIColor.clearColor;
-        [buttonWindow.rootViewController.view addSubview:b];
-        [controls showChrome];
+    buttonWindow.hidden=YES;
+    if (running) dockButton.hidden=YES;
+    else if (s) {
+        UIView *dock=nil;
+        for (UIWindow *w in s.windows) {
+            if (w==splitWindow || w==buttonWindow || w.hidden) continue;
+            dock=TAFindDock(w,0); if (dock) break;
+        }
+        if (dock) TAInstallDock(dock);
+        else { TARestoreDock(); dockButton.hidden=YES; }
     }
-    buttonWindow.hidden = !chromeVisible || !s || order.count<1 || splitWindow.rootViewController.presentedViewController!=nil;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
 }
 // Darwin state channels carry only dimensions, never application content.
@@ -755,8 +803,139 @@ static BOOL TATemplateTarget(UIWindow *w, NSString **bundleOut) {
     CGSize actual = w.windowScene.coordinateSpace.bounds.size;
     return fabs(target.width-actual.width)<0.5 && fabs(target.height-actual.height)<0.5;
 }
+// Change only native tab item titles. UIKit still owns all button geometry.
+static NSHashTable<UITabBar *> *TACompactTabBars;
+static char TATabTitleKey, TATabBusyKey;
+static NSString *TAFitTabTitle(NSString *title, CGFloat width) {
+    NSDictionary *attributes=@{NSFontAttributeName:[UIFont systemFontOfSize:11 weight:UIFontWeightSemibold]};
+    if ([title sizeWithAttributes:attributes].width<=width) return title;
+    NSString *prefix=title;
+    while (prefix.length) {
+        NSRange last=[prefix rangeOfComposedCharacterSequenceAtIndex:prefix.length-1];
+        prefix=[prefix substringToIndex:last.location];
+        NSString *candidate=[prefix stringByAppendingString:@"…"];
+        if ([candidate sizeWithAttributes:attributes].width<=width) return candidate;
+    }
+    return @"…";
+}
+static void TACompactTabs(UITabBar *bar) {
+    if ([objc_getAssociatedObject(bar,&TATabBusyKey) boolValue]) return;
+    NSString *bundle=nil;
+    BOOL active=TATemplateTarget(bar.window,&bundle) && [bundle isEqual:@"com.google.ios.youtubemusic"] && bar.bounds.size.width>0 && bar.bounds.size.width<300;
+    if (!active && ![TACompactTabBars containsObject:bar]) return;
+    objc_setAssociatedObject(bar,&TATabBusyKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @try {
+        if (!TACompactTabBars) TACompactTabBars=[NSHashTable weakObjectsHashTable];
+        if (active) [TACompactTabBars addObject:bar];
+        CGFloat width=MAX(12,bar.bounds.size.width/MAX((NSUInteger)1,bar.items.count)-10);
+        NSUInteger changed=0;
+        for (UITabBarItem *item in bar.items) {
+            NSDictionary *saved=objc_getAssociatedObject(item,&TATabTitleKey);
+            // An application title update supersedes our saved value.
+            if (saved && ![item.title isEqual:saved[@"applied"]]) {
+                if ([item.accessibilityLabel isEqual:saved[@"original"]]) item.accessibilityLabel=saved[@"accessibility"]==NSNull.null ? nil : saved[@"accessibility"];
+                saved=nil; objc_setAssociatedObject(item,&TATabTitleKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            NSString *original=saved ? saved[@"original"] : item.title;
+            if (!original) continue;
+            NSString *desired=active ? TAFitTabTitle(original,width) : original;
+            if (![desired isEqual:original]) {
+                id accessibility=saved ? saved[@"accessibility"] : (item.accessibilityLabel ?: (id)NSNull.null);
+                objc_setAssociatedObject(item,&TATabTitleKey,@{@"original":original,@"applied":desired,@"accessibility":accessibility},OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                if (!item.accessibilityLabel) item.accessibilityLabel=original;
+            } else if (saved) {
+                if ([item.accessibilityLabel isEqual:original]) item.accessibilityLabel=saved[@"accessibility"]==NSNull.null ? nil : saved[@"accessibility"];
+                objc_setAssociatedObject(item,&TATabTitleKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            if (![item.title isEqual:desired]) { item.title=desired; ++changed; }
+        }
+        if (!active) [TACompactTabBars removeObject:bar];
+        if (changed) TALog(@"TAB TITLES active=%d count=%lu changed=%lu width=%.2f",active,(unsigned long)bar.items.count,(unsigned long)changed,width);
+    } @finally {
+        objc_setAssociatedObject(bar,&TATabBusyKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+// Device evidence: four fixed 61pt square buttons in a 135pt image row.
+// Adjust only the verified matching width/height constants; keep native layout.
+static NSHashTable<UIView *> *TAImageRows;
+static char TARowConstantsKey, TARowBusyKey, TARowStampKey;
+static void TARestoreImageRow(UIView *cell) {
+    NSMapTable *saved=objc_getAssociatedObject(cell,&TARowConstantsKey);
+    for (NSLayoutConstraint *c in saved.keyEnumerator) {
+        NSDictionary *entry=[saved objectForKey:c];
+        if (fabs(c.constant-[entry[@"applied"] doubleValue])<0.01) c.constant=[entry[@"original"] doubleValue];
+    }
+    if (saved.count) TALog(@"IMAGE ROW restore count=%lu",(unsigned long)saved.count);
+    objc_setAssociatedObject(cell,&TARowConstantsKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(cell,&TARowStampKey,nil,OBJC_ASSOCIATION_COPY_NONATOMIC);
+    [TAImageRows removeObject:cell];
+}
+static void TACompactImageRow(UIView *cell) {
+    if ([objc_getAssociatedObject(cell,&TARowBusyKey) boolValue]) return;
+    NSString *bundle=nil;
+    BOOL active=TATemplateTarget(cell.window,&bundle) && [bundle isEqual:@"com.google.ios.youtubemusic"] && cell.bounds.size.width>48 && cell.bounds.size.width<300;
+    if (!active) { TARestoreImageRow(cell); return; }
+    objc_setAssociatedObject(cell,&TARowBusyKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @try {
+        NSMapTable *saved=objc_getAssociatedObject(cell,&TARowConstantsKey);
+        for (UIView *child in cell.subviews) {
+            if (![child isKindOfClass:UIStackView.class]) continue;
+            UIStackView *stack=(UIStackView *)child;
+            NSArray<UIView *> *buttons=stack.arrangedSubviews;
+            if (stack.axis!=UILayoutConstraintAxisHorizontal || stack.distribution!=UIStackViewDistributionEqualSpacing || buttons.count<2 || buttons.count>8) continue;
+            // The observed native row has 12pt margins. Wait until its own
+            // width constraint has caught up with the resized cell.
+            CGFloat available=cell.bounds.size.width-24;
+            BOOL rowWidthReady=NO;
+            for (NSLayoutConstraint *c in stack.constraints) {
+                if (c.active && c.firstItem==stack && !c.secondItem && c.firstAttribute==NSLayoutAttributeWidth && c.relation==NSLayoutRelationEqual && fabs(c.constant-available)<1) rowWidthReady=YES;
+            }
+            if (!rowWidthReady) continue;
+            NSMutableArray<NSLayoutConstraint *> *dimensions=[NSMutableArray new];
+            BOOL valid=YES;
+            for (UIView *button in buttons) {
+                if (![NSStringFromClass(button.class) isEqual:@"CPUIHighlightButton"]) { valid=NO; break; }
+                NSLayoutConstraint *width=nil,*height=nil;
+                for (NSLayoutConstraint *c in button.constraints) {
+                    NSDictionary *entry=[saved objectForKey:c];
+                    CGFloat original=entry ? [entry[@"original"] doubleValue] : c.constant;
+                    if (!c.active || c.firstItem!=button || c.secondItem || c.relation!=NSLayoutRelationEqual || fabs(original-61)>0.01 || c.priority!=UILayoutPriorityRequired) continue;
+                    if (c.firstAttribute==NSLayoutAttributeWidth) width=c;
+                    if (c.firstAttribute==NSLayoutAttributeHeight) height=c;
+                }
+                if (!width || !height) { valid=NO; break; }
+                [dimensions addObject:width]; [dimensions addObject:height];
+            }
+            if (!valid) continue;
+            CGFloat side=MIN(61,floor((available-6*(buttons.count-1))/buttons.count));
+            if (side<20) continue;
+            NSString *stamp=[NSString stringWithFormat:@"%.2f/%lu/%.2f/%p/%p",available,(unsigned long)buttons.count,side,(__bridge void *)dimensions.firstObject,(__bridge void *)dimensions.lastObject];
+            // At most one attempt per geometry/constraint set. If native code
+            // resets a constant, do not fight it on every layout pass.
+            if ([objc_getAssociatedObject(cell,&TARowStampKey) isEqual:stamp]) continue;
+            if (!saved) {
+                saved=[NSMapTable weakToStrongObjectsMapTable];
+                objc_setAssociatedObject(cell,&TARowConstantsKey,saved,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            for (NSLayoutConstraint *c in dimensions) {
+                NSDictionary *entry=[saved objectForKey:c];
+                // Preserve a new value supplied by the system between passes.
+                CGFloat original=entry && fabs(c.constant-[entry[@"applied"] doubleValue])<0.01 ? [entry[@"original"] doubleValue] : c.constant;
+                [saved setObject:@{@"original":@(original),@"applied":@(side)} forKey:c];
+                if (fabs(c.constant-side)>0.01) c.constant=side;
+            }
+            if (!TAImageRows) TAImageRows=[NSHashTable weakObjectsHashTable];
+            [TAImageRows addObject:cell];
+            if (![objc_getAssociatedObject(cell,&TARowStampKey) isEqual:stamp]) {
+                objc_setAssociatedObject(cell,&TARowStampKey,stamp,OBJC_ASSOCIATION_COPY_NONATOMIC);
+                TALog(@"IMAGE ROW apply available=%.2f count=%lu side=%.2f constants=%lu",available,(unsigned long)buttons.count,side,(unsigned long)dimensions.count);
+            }
+        }
+    } @finally { objc_setAssociatedObject(cell,&TARowBusyKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+}
 static void TAInvalidateTree(UIView *view, NSUInteger depth, NSUInteger *budget) {
     if (!view || !*budget || depth > 8) return; --*budget;
+    [view invalidateIntrinsicContentSize];
     [view setNeedsUpdateConstraints]; [view setNeedsLayout];
     if ([view isKindOfClass:UICollectionView.class]) [((UICollectionView *)view).collectionViewLayout invalidateLayout];
     for (UIView *child in view.subviews) TAInvalidateTree(child, depth+1, budget);
@@ -830,6 +1009,8 @@ static void TAListenTemplateTargets(void) {
     for (NSString *bundle in TAClientBundles()) {
         int token;
         notify_register_dispatch(TAChannel(bundle, @"layout-target").UTF8String, &token, dispatch_get_main_queue(), ^(__unused int delivered) {
+            for (UITabBar *bar in TACompactTabBars.allObjects) TACompactTabs(bar);
+            for (UIView *cell in TAImageRows.allObjects) TACompactImageRow(cell);
             for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
                 if (![scene isKindOfClass:UIWindowScene.class]) continue;
                 for (UIWindow *w in ((UIWindowScene *)scene).windows) {
@@ -992,6 +1173,46 @@ static void TAListenSnapshots(void) {
 %end
 %end
 
+%group TAImageRowExperiment
+%hook CPSImageRowCell
+- (void)layoutSubviews {
+    %orig;
+    TACompactImageRow((UIView *)self);
+}
+- (void)prepareForReuse {
+    TARestoreImageRow((UIView *)self);
+    %orig;
+}
+%end
+%end
+
+%group TACompactHome
+%hook UITabBar
+- (void)layoutSubviews {
+    TACompactTabs(self);
+    %orig;
+}
+- (void)didMoveToWindow {
+    %orig;
+    TACompactTabs(self);
+}
+%end
+%end
+
+%group TAMapToolbar
+%hook _CarTitleView
+- (CGSize)intrinsicContentSize {
+    NSString *bundle=nil;
+    if (TATemplateTarget(((UIView *)self).window,&bundle) && [bundle isEqual:@"com.google.Maps"] && ((UIView *)self).window.bounds.size.width<300) return CGSizeZero;
+    return %orig;
+}
+- (CGSize)sizeThatFits:(CGSize)size {
+    NSString *bundle=nil;
+    if (TATemplateTarget(((UIView *)self).window,&bundle) && [bundle isEqual:@"com.google.Maps"] && ((UIView *)self).window.bounds.size.width<300) return CGSizeZero;
+    return %orig;
+}
+%end
+%end
 %group TAClient
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
@@ -1093,6 +1314,9 @@ static void TAListenSnapshots(void) {
         if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
             if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+                %init(TACompactHome);
+                if (NSClassFromString(@"CPSImageRowCell")) { %init(TAImageRowExperiment); }
+                if (NSClassFromString(@"_CarTitleView")) { %init(TAMapToolbar); }
                 Class cls=NSClassFromString(@"CPUINowPlayingView");
                 SEL selector=NSSelectorFromString(@"recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:");
                 Method method=class_getInstanceMethod(cls,selector);
