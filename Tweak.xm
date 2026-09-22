@@ -1,4 +1,4 @@
-// TAduo 0.10.0: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.1: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -184,7 +184,31 @@ static void TAStop(NSString *reason) {
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
     buttonWindow.hidden = order.count < 2;
 }
+static UIImage *TAChoiceIcon(NSString *bundle) {
+    static NSMutableDictionary *cache;
+    if (!cache) cache = [NSMutableDictionary new];
+    UIImage *image = cache[bundle];
+    if (!image) {
+        @try {
+            SEL selector = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
+            if ([UIImage respondsToSelector:selector])
+                image = ((id(*)(id,SEL,id,NSInteger,CGFloat))objc_msgSend)(UIImage.class, selector, bundle, 2, UIScreen.mainScreen.scale);
+        } @catch (__unused NSException *e) {}
+        if (image) cache[bundle] = image;
+    }
+    return image ?: [UIImage systemImageNamed:@"app"];
+}
 @interface TAControls : NSObject
+@property(nonatomic, strong) UIViewController *iconPicker;
+@property(nonatomic, copy) NSArray<NSString *> *iconBundles;
+@property(nonatomic) NSInteger iconSlot;
+@property(nonatomic) NSUInteger iconPage;
+@property(nonatomic) NSUInteger iconToken;
+- (void)renderIcons;
+- (void)closeIcons;
+- (void)selectIcon:(UIButton *)sender;
+- (void)iconPage:(UIButton *)sender;
+- (void)swapSides;
 - (void)start;
 - (void)stop;
 - (void)restartSplit;
@@ -201,7 +225,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [b addTarget:controls action:action forControlEvents:UIControlEventTouchUpInside]; return b;
 }
 @implementation TAControls
-- (void)stop { TAStop(@"user"); }
+- (void)stop { [self closeIcons]; TAStop(@"user"); }
 - (void)toggleActions { floatingActions.hidden = !floatingActions.hidden; }
 - (void)snapshot {
     floatingActions.hidden = YES;
@@ -231,15 +255,20 @@ static UIButton *TAButton(NSString *title, SEL action) {
         choose[i] = TAButton(i == 0 ? @"Chọn app trái" : @"Chọn app phải", @selector(pick:));
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half - 78, bounds.size.height / 2 - 49, 156, 30)];
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half - 78, bounds.size.height / 2 - 83, 156, 64)];
     floatingActions.backgroundColor = UIColor.clearColor;
     NSArray *titles = @[@"Chia", @"Log", @"Thoát"];
     NSArray *actions = @[@"restartSplit", @"snapshot", @"stop"];
     for (NSUInteger i=0; i<titles.count; i++) {
         UIButton *b = TAButton(titles[i], NSSelectorFromString(actions[i]));
-        b.frame = CGRectMake(i*52, 0, 50, 30); b.layer.cornerRadius = 8;
+        b.frame = CGRectMake(i*52, 34, 50, 30); b.layer.cornerRadius = 8;
         [floatingActions addSubview:b];
     }
+    UIButton *swap = TAButton(@"", @selector(swapSides));
+    [swap setImage:[UIImage systemImageNamed:@"arrow.left.arrow.right"] forState:UIControlStateNormal];
+    swap.frame = CGRectMake(52, 0, 50, 30); swap.layer.cornerRadius = 8;
+    swap.accessibilityLabel = @"Đổi vị trí hai ứng dụng";
+    [floatingActions addSubview:swap];
     floatingActions.hidden = YES; [root addSubview:floatingActions];
     UIButton *menu = TAButton(@"•••", @selector(toggleActions));
     menu.frame = CGRectMake(half - 16, bounds.size.height / 2 - 15, 32, 30);
@@ -248,20 +277,90 @@ static UIButton *TAButton(NSString *title, SEL action) {
     buttonWindow.hidden = YES; splitWindow.hidden = NO;
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
 }
+- (void)swapSides {
+    if (!running || !slots[0].presentation || !slots[1].presentation || splitWindow.rootViewController.presentedViewController) return;
+    TARecord *left = slots[0]; slots[0] = slots[1]; slots[1] = left;
+    for (NSInteger i = 0; i < 2; i++) {
+        [panes[i] addSubview:slots[i].presentation];
+        slots[i].presentation.frame = panes[i].bounds;
+    }
+    TALog(@"SWAP left=%@ right=%@", slots[0].bundle, slots[1].bundle);
+}
+- (void)closeIcons {
+    UIViewController *picker = self.iconPicker;
+    self.iconPicker = nil; self.iconBundles = nil;
+    [picker dismissViewControllerAnimated:NO completion:nil];
+}
+- (void)selectIcon:(UIButton *)sender {
+    if (!running || generation != self.iconToken || sender.tag < 0 || (NSUInteger)sender.tag >= self.iconBundles.count) return;
+    NSString *bundle = self.iconBundles[sender.tag];
+    NSInteger slot = self.iconSlot; NSUInteger token = self.iconToken;
+    UIViewController *picker = self.iconPicker;
+    self.iconPicker = nil; self.iconBundles = nil;
+    [picker dismissViewControllerAnimated:NO completion:^{
+        if (running && generation == token) [self attach:bundle slot:slot];
+    }];
+}
+- (void)iconPage:(UIButton *)sender {
+    NSInteger page = (NSInteger)self.iconPage + sender.tag;
+    if (page < 0 || (NSUInteger)page >= (self.iconBundles.count + 5) / 6) return;
+    self.iconPage = page; [self renderIcons];
+}
+- (void)renderIcons {
+    UIView *root = self.iconPicker.view;
+    for (UIView *v in [root.subviews copy]) [v removeFromSuperview];
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectInset(splitWindow.bounds, 12, 12)];
+    panel.backgroundColor = [UIColor colorWithWhite:0.16 alpha:0.98];
+    panel.layer.cornerRadius = 14; [root addSubview:panel];
+    CGFloat w = panel.bounds.size.width, h = panel.bounds.size.height;
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 5, w-24, 25)];
+    title.text = @"Chọn app đã mở"; title.font = [UIFont boldSystemFontOfSize:14];
+    title.textColor = UIColor.whiteColor; title.textAlignment = NSTextAlignmentCenter; [panel addSubview:title];
+    CGFloat cellW = (w-24)/3, cellH = (h-68)/2;
+    NSUInteger first = self.iconPage * 6, end = MIN(first+6, self.iconBundles.count);
+    for (NSUInteger i = first; i < end; i++) {
+        NSUInteger position = i-first;
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+        button.frame = CGRectMake(12+(position%3)*cellW, 32+(position/3)*cellH, cellW, cellH);
+        button.tag = i; button.accessibilityLabel = self.iconBundles[i];
+        CGFloat size = MIN(32, cellH-8);
+        UIImageView *icon = [[UIImageView alloc] initWithImage:TAChoiceIcon(self.iconBundles[i])];
+        icon.frame = CGRectMake((cellW-size)/2, (cellH-size)/2, size, size);
+        icon.contentMode = UIViewContentModeScaleAspectFit; icon.tintColor = UIColor.whiteColor;
+        icon.layer.cornerRadius = 7; icon.clipsToBounds = YES;
+        [button addSubview:icon]; [button addTarget:self action:@selector(selectIcon:) forControlEvents:UIControlEventTouchUpInside];
+        [panel addSubview:button];
+    }
+    UIButton *cancel = TAButton(@"Hủy", @selector(closeIcons));
+    cancel.frame = CGRectMake(w/2-35, h-33, 70, 30); [panel addSubview:cancel];
+    if (self.iconBundles.count > 6) {
+        UIButton *previous = TAButton(@"‹", @selector(iconPage:)); previous.tag = -1;
+        previous.frame = CGRectMake(12, h-33, 44, 30); previous.enabled = self.iconPage > 0; [panel addSubview:previous];
+        UIButton *next = TAButton(@"›", @selector(iconPage:)); next.tag = 1;
+        next.frame = CGRectMake(w-56, h-33, 44, 30); next.enabled = end < self.iconBundles.count; [panel addSubview:next];
+    }
+    if (!self.iconBundles.count) {
+        UILabel *empty = [[UILabel alloc] initWithFrame:CGRectMake(12, 40, w-24, h-80)];
+        empty.text = @"Mở app từ CarPlay trước để đưa vào danh sách.";
+        empty.numberOfLines = 0; empty.textAlignment = NSTextAlignmentCenter; empty.textColor = UIColor.whiteColor;
+        [panel addSubview:empty];
+    }
+}
 - (void)pick:(UIButton *)sender {
     NSInteger slot = sender.tag;
-    if (!running || slots[slot] || splitWindow.rootViewController.presentedViewController) return;
-    UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"Chọn app đã mở" message:@"Mở app từ CarPlay trước để đưa vào danh sách." preferredStyle:UIAlertControllerStyleAlert];
-    NSUInteger token = generation;
+    if (!running || slot < 0 || slot > 1 || slots[slot] || splitWindow.rootViewController.presentedViewController) return;
+    NSMutableArray *bundles = [NSMutableArray new];
     for (NSString *bundle in [order copy]) {
-        TARecord *r = records[bundle]; TARecord *other = slots[1-slot];
+        TARecord *r = records[bundle], *other = slots[1-slot];
         if (!r || (other && (other == r || other.controller == r.controller))) continue;
-        [picker addAction:[UIAlertAction actionWithTitle:bundle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-            dispatch_async(dispatch_get_main_queue(), ^{ if (running && token == generation) [self attach:bundle slot:slot]; });
-        }]];
+        [bundles addObject:bundle];
     }
-    [picker addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
-    [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
+    self.iconBundles = bundles; self.iconSlot = slot; self.iconPage = 0; self.iconToken = generation;
+    UIViewController *picker = [UIViewController new]; self.iconPicker = picker;
+    picker.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    picker.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
+    [self renderIcons];
+    [splitWindow.rootViewController presentViewController:picker animated:NO completion:nil];
 }
 - (void)attach:(NSString *)bundle slot:(NSInteger)slot {
     TARecord *r = records[bundle], *other = slots[1-slot];

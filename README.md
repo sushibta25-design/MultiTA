@@ -70,3 +70,7 @@ Uses 0.8 layout behavior. Captures native Now Playing on appearance and settled 
 
 ## 0.10 — native Now Playing without artwork in narrow active panes
 Device 0.9 evidence: native song minimum height 68pt; split 2pt, with artwork above the song details. Runtime exposes recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:. Guard its exact observed ABI and pass allowsAlbumArt=NO only in an active TAduo scene with viewArea width under 300pt. All other inputs and native/full-screen calls remain unchanged. No child frame changes, constraint deactivation, or recursive layout calls. This tests the system's no-art layout; it does not fix tabs or image rows. Compare same song native/split/native, touch and exit, and collect NATIVE LAYOUT plus geometry logs.
+
+
+## 0.10.1
+Based on exact 0.10.0. Captured-app picker uses 32-point icons without visible names, six per page. Swap button sits above Log and exchanges the two existing presentations only after both attach. Log remains available. Attach, resize and scene lifecycle remain as in 0.10.0. Device validation required.
