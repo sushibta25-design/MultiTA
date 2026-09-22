@@ -1,4 +1,4 @@
-// TAduo 0.10.7: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.8: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.7] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.8] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -65,11 +65,6 @@ static BOOL chromeVisible=YES;
 static UIView *dividerView;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static BOOL dividerDragging=NO;
-static __weak UIView *mountedDock;
-static UIButton *dockButton;
-static NSMapTable *dockGeometry;
-static BOOL dockAdjusting=NO;
-static BOOL dockEntryVisible=NO;
 static CGPoint entryDragStart;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
@@ -206,7 +201,7 @@ static void TAStop(NSString *reason) {
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil; menuButton=nil; dividerView=nil; dividerDragging=NO;
-    buttonWindow.hidden = order.count < 2;
+    buttonWindow.hidden = !dashboard;
 }
 static BOOL TAHasHostedSurface(CALayer *layer, NSUInteger depth, NSInteger *budget) {
     if (!layer || depth>14 || --*budget<0) return NO;
@@ -359,7 +354,7 @@ static UIImage *TASplitIcon(void) {
 - (void)showChrome {
     chromeVisible=YES;
     menuButton.hidden=NO;
-    buttonWindow.hidden=running || !dashboard || dockEntryVisible;
+    buttonWindow.hidden=running || !dashboard;
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideChrome) object:nil];
     [self performSelector:@selector(hideChrome) withObject:nil afterDelay:3.0 inModes:@[NSRunLoopCommonModes]];
 }
@@ -368,7 +363,7 @@ static UIImage *TASplitIcon(void) {
     if (splitWindow.rootViewController.presentedViewController) {
         [self showChrome]; return;
     }
-    chromeVisible=NO; menuButton.hidden=YES; floatingActions.hidden=YES; buttonWindow.hidden=running || !dashboard || dockEntryVisible;
+    chromeVisible=NO; menuButton.hidden=YES; floatingActions.hidden=YES; buttonWindow.hidden=running || !dashboard;
 }
 - (void)touchActivity:(UIEvent *)event {
     BOOL active=NO, touched=NO;
@@ -452,7 +447,7 @@ static UIImage *TASplitIcon(void) {
         [floatingActions addSubview:b];
     }
     floatingActions.hidden = YES; [root addSubview:floatingActions];
-    splitWindow.hidden = NO; buttonWindow.hidden=YES; dockButton.hidden=YES; [self showChrome];
+    splitWindow.hidden = NO; buttonWindow.hidden=YES; [self showChrome];
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
 }
 - (void)swapSides {
@@ -720,65 +715,18 @@ static void TACapture(id controller, id settings) {
     TALog(@"CAPTURE %@ sid=%@ launchSource=%d",bundle,sid,launch);
     if (!running) [controls showChrome];
 }
-static void TARestoreDock(void) {
-    for (UIView *view in dockGeometry.keyEnumerator) {
-        NSDictionary *entry=[dockGeometry objectForKey:view];
-        if (CGAffineTransformEqualToTransform(view.transform,[entry[@"applied"] CGAffineTransformValue])) view.transform=[entry[@"original"] CGAffineTransformValue];
-        if (CGPointEqualToPoint(view.center,[entry[@"moved"] CGPointValue])) view.center=[entry[@"center"] CGPointValue];
-    }
-    [dockGeometry removeAllObjects];
-}
-static UIView *TAFindDock(UIView *view, NSUInteger depth) {
-    if (!view || depth>14 || view.hidden || view.alpha<0.01) return nil;
-    NSString *name=NSStringFromClass(view.class);
-    if ([name hasPrefix:@"DB"] && [name containsString:@"Dock"] && view.bounds.size.width>=32 && view.bounds.size.width<=100 && view.bounds.size.height>=140) return view;
-    for (UIView *child in view.subviews) { UIView *found=TAFindDock(child,depth+1); if (found) return found; }
-    return nil;
-}
-static void TAInstallDock(UIView *dock) {
-    if (dockAdjusting || !dock || running) return;
-    dockAdjusting=YES;
-    @try {
-        if (!dockGeometry) dockGeometry=[NSMapTable weakToStrongObjectsMapTable];
-        TARestoreDock();
-        if (mountedDock!=dock) { [dockButton removeFromSuperview]; mountedDock=dock; TALog(@"DOCK MOUNT %@",NSStringFromClass(dock.class)); }
-        if (!dockButton) {
-            dockButton=TAButton(@"",@selector(enter)); [dockButton setImage:TASplitIcon() forState:UIControlStateNormal];
-            dockButton.accessibilityLabel=@"Chia màn hình";
-        }
-        CGFloat height=dock.bounds.size.height,width=dock.bounds.size.width,factor=(height-36)/height;
-        for (UIView *child in dock.subviews) {
-            if (child==dockButton || child.hidden || !child.userInteractionEnabled) continue;
-            CGAffineTransform original=child.transform,applied=CGAffineTransformScale(original,factor,factor);
-            CGPoint center=child.center,moved=CGPointMake(width/2+(center.x-width/2)*factor,center.y*factor);
-            [dockGeometry setObject:@{@"original":[NSValue valueWithCGAffineTransform:original],@"applied":[NSValue valueWithCGAffineTransform:applied],@"center":[NSValue valueWithCGPoint:center],@"moved":[NSValue valueWithCGPoint:moved]} forKey:child];
-            child.transform=applied; child.center=moved;
-        }
-        dockButton.frame=CGRectMake((width-34)/2,height-35,34,34);
-        [dock addSubview:dockButton]; dockButton.hidden=NO;
-    } @finally { dockAdjusting=NO; }
-}
-static BOOL TADockEntryVisible(void) {
-    if (!dockButton || !dockButton.window || dockButton.hidden || dockButton.window.hidden) return NO;
-    CGPoint local=CGPointMake(CGRectGetMidX(dockButton.bounds),CGRectGetMidY(dockButton.bounds));
-    for (UIView *view=dockButton;view;view=view.superview) {
-        if (view.hidden || view.alpha<0.05) return NO;
-        CGPoint point=[dockButton convertPoint:local toView:view];
-        if (view.clipsToBounds && !CGRectContainsPoint(view.bounds,point)) return NO;
-    }
-    CGPoint point=[dockButton convertPoint:local toView:dockButton.window];
-    if (!CGRectContainsPoint(dockButton.window.bounds,point)) return NO;
-    UIView *hit=[dockButton.window hitTest:point withEvent:nil];
-    return hit==dockButton || [hit isDescendantOfView:dockButton];
-}
 static void TATick(void) {
-    UIWindowScene *s = TADashboard();
-    if (s != dashboard) {
-        TAStop(@"display changed"); TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil; dockEntryVisible=NO; buttonWindow.hidden = YES; buttonWindow = nil;
-        [records removeAllObjects]; [order removeAllObjects]; dashboard = s;
-        TALog(@"DISPLAY %@", s.session.persistentIdentifier);
+    static NSTimeInterval previousTick=0;
+    NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
+    if (previousTick && now-previousTick>4) TALog(@"MAIN LOOP GAP seconds=%.2f",now-previousTick);
+    previousTick=now;
+    UIWindowScene *s=TADashboard();
+    if (s!=dashboard) {
+        TAStop(@"display changed"); buttonWindow.hidden=YES; buttonWindow=nil;
+        [records removeAllObjects]; [order removeAllObjects]; dashboard=s;
+        TALog(@"DISPLAY %@",s.session.persistentIdentifier);
     }
-    if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
+    if (running && !CGRectEqualToRect(splitWindow.frame,s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
     if (s && !buttonWindow) {
         buttonWindow=[[UIWindow alloc] initWithWindowScene:s];
         buttonWindow.windowLevel=UIWindowLevelAlert+80;
@@ -792,22 +740,10 @@ static void TATick(void) {
         UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragEntry:)];
         pan.maximumNumberOfTouches=1; [entry addGestureRecognizer:pan];
         [buttonWindow.rootViewController.view addSubview:entry];
+        TALog(@"ENTRY floating created");
     }
-    if (running) dockButton.hidden=YES;
-    else if (s) {
-        UIView *dock=nil;
-        for (UIWindow *w in s.windows) {
-            if (w==splitWindow || w==buttonWindow || w.hidden) continue;
-            dock=TAFindDock(w,0); if (dock) break;
-        }
-        if (dock) TAInstallDock(dock);
-        else { TARestoreDock(); dockButton.hidden=YES; }
-    }
-    BOOL visible=!running && TADockEntryVisible();
-    if (visible!=dockEntryVisible) TALog(@"ENTRY dockUsable=%d fallback=%d",visible,!visible);
-    dockEntryVisible=visible;
-    buttonWindow.hidden=running || !s || dockEntryVisible;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
+    buttonWindow.hidden=running || !s;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{ TATick(); });
 }
 // Darwin state channels carry only dimensions, never application content.
 // The host logs receipt as an observation, not proof of correct app layout.
@@ -977,7 +913,6 @@ static void TACompactImageRow(UIView *cell) {
 }
 static void TAInvalidateTree(UIView *view, NSUInteger depth, NSUInteger *budget) {
     if (!view || !*budget || depth > 8) return; --*budget;
-    [view invalidateIntrinsicContentSize];
     [view setNeedsUpdateConstraints]; [view setNeedsLayout];
     if ([view isKindOfClass:UICollectionView.class]) [((UICollectionView *)view).collectionViewLayout invalidateLayout];
     for (UIView *child in view.subviews) TAInvalidateTree(child, depth+1, budget);
@@ -1241,20 +1176,6 @@ static void TAListenSnapshots(void) {
 %end
 %end
 
-%group TAMapToolbar
-%hook _CarTitleView
-- (CGSize)intrinsicContentSize {
-    NSString *bundle=nil;
-    if (TATemplateTarget(((UIView *)self).window,&bundle) && [bundle isEqual:@"com.google.Maps"] && ((UIView *)self).window.bounds.size.width<300) return CGSizeZero;
-    return %orig;
-}
-- (CGSize)sizeThatFits:(CGSize)size {
-    NSString *bundle=nil;
-    if (TATemplateTarget(((UIView *)self).window,&bundle) && [bundle isEqual:@"com.google.Maps"] && ((UIView *)self).window.bounds.size.width<300) return CGSizeZero;
-    return %orig;
-}
-%end
-%end
 %group TAClient
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
@@ -1289,6 +1210,7 @@ static void TAListenSnapshots(void) {
     if (external && running && !TAAttachPending() && !current && bundle && [settings isKindOfClass:NSDictionary.class] && (launch || [TAClientBundles() containsObject:bundle])) TALog(@"NATIVE LAUNCH retain split bundle=%@",bundle);
     if (external) TACapture(self,settings);
     %orig;
+    TALog(@"FOREGROUND RETURN bundle=%@ running=%d own=%d",bundle,running,ownCall);
     // Retry once after native foreground has established its scene ID. No
     // fabricated callback or repeated foreground requests.
     if (external && [settings isKindOfClass:NSDictionary.class]) {
@@ -1358,7 +1280,6 @@ static void TAListenSnapshots(void) {
             if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
                 %init(TACompactHome);
                 if (NSClassFromString(@"CPSImageRowCell")) { %init(TAImageRowExperiment); }
-                if (NSClassFromString(@"_CarTitleView")) { %init(TAMapToolbar); }
                 Class cls=NSClassFromString(@"CPUINowPlayingView");
                 SEL selector=NSSelectorFromString(@"recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:");
                 Method method=class_getInstanceMethod(cls,selector);

@@ -100,3 +100,7 @@ Restore exact 0.16 YouTube Music tab-title and equal-size image-row helpers/hook
 
 ## 0.10.7 entry recovery
 Keep a draggable 36x32 entry window whenever native Dock entry is absent, clipped, hidden, or fails its window hit test. Fallback stays visible outside split so users cannot lose access through an unobserved remote touch; moving it avoids app controls. During split the corner fallback is hidden and divider tap opens actions. Dock presence alone is no longer success. Music/Maps layout and scene lifecycle unchanged.
+
+
+## 0.10.8 recovery
+0.10.6 supplied logs have no START or DOCK MOUNT and just one template initialization line; freeze cause is not established. Remove Dock search/transforms and new Maps title-size override, restore pre-0.10.6 invalidation behavior. Keep 0.16-derived Music compact helpers. Floating draggable entry remains visible in native mode; divider opens actions in split. Add native foreground-return and main-loop gap evidence. 0.10.7 superseded before delivery.
