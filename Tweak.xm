@@ -1,4 +1,4 @@
-// TAduo 0.10.19: resume the previous split and Vietnamese Telex input.
+// TAduo 0.10.20: resume the previous split and Vietnamese Telex input.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.19] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.20] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -63,7 +63,8 @@ static UIView *floatingActions;
 static UIView *dividerView;
 static UIControl *gapTouchShield;
 static const CGFloat TADividerGap=4;
-static const CGFloat TADividerHitWidth=12;
+static const CGFloat TADividerHitWidth=18;
+static const CGFloat TADividerHitHeight=84;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static NSString *resumeBundles[2];
 static CGFloat resumeRatio=0.5;
@@ -362,7 +363,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     panes[0].frame=CGRectMake(0,0,left,height);
     panes[1].frame=CGRectMake(left+TADividerGap,0,available-left,height);
     gapTouchShield.frame=CGRectMake(left,0,TADividerGap,height);
-    dividerView.frame=CGRectMake(center-TADividerHitWidth/2,(height-56)/2,TADividerHitWidth,56);
+    dividerView.frame=CGRectMake(center-TADividerHitWidth/2,(height-TADividerHitHeight)/2,TADividerHitWidth,TADividerHitHeight);
     floatingActions.frame=CGRectMake(MAX(0,MIN(center-78,splitWindow.bounds.size.width-156)),height/2-15,156,30);
     for (NSInteger i=0;i<2;i++) {
         choose[i].frame=panes[i].bounds;
@@ -458,7 +459,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     splitWindow.opaque=YES; splitWindow.backgroundColor=UIColor.blackColor;
     splitWindow.rootViewController = [UIViewController new];
     UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.blackColor; root.opaque=YES;
-    // Thin visual gap, independent centered hit area; 4pt overlap per pane only in the 56pt center region.
+    // Thin visual gap; enlarged hit area overlaps each pane by 7pt at the center.
     CGFloat half = bounds.size.width / 2;
     CGFloat gap=TADividerGap, paneWidth=(bounds.size.width-gap)/2;
     for (NSInteger i = 0; i < 2; i++) {
@@ -479,9 +480,9 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     gapTouchShield=[[UIControl alloc] initWithFrame:CGRectMake(paneWidth,0,TADividerGap,bounds.size.height)];
     gapTouchShield.backgroundColor=UIColor.blackColor; gapTouchShield.opaque=YES;
     gapTouchShield.userInteractionEnabled=YES; [root addSubview:gapTouchShield];
-    dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-TADividerHitWidth/2,(bounds.size.height-56)/2,TADividerHitWidth,56)];
+    dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-TADividerHitWidth/2,(bounds.size.height-TADividerHitHeight)/2,TADividerHitWidth,TADividerHitHeight)];
     dividerView.backgroundColor=UIColor.clearColor;
-    UIView *grip=[[UIView alloc] initWithFrame:CGRectMake((TADividerHitWidth-3)/2,18,3,20)];
+    UIView *grip=[[UIView alloc] initWithFrame:CGRectMake((TADividerHitWidth-3)/2,(TADividerHitHeight-20)/2,3,20)];
     grip.backgroundColor=[UIColor colorWithWhite:1 alpha:0.65]; grip.layer.cornerRadius=1.5;
     grip.userInteractionEnabled=NO; [dividerView addSubview:grip];
     UIPanGestureRecognizer *drag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
