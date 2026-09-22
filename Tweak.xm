@@ -1,26 +1,34 @@
-// TAduo 0.23.0: preserve hosted foreground scenes and distinguish picker taps from drags.
+// TAduo 0.24.0: stable picker pages, precise scene lifetime and off-main diagnostics.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
 #import <string.h>
 #import <notify.h>
 #import <objc/runtime.h>
+#import <fcntl.h>
+#import <unistd.h>
 
 static void TALog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *s = [[NSString alloc] initWithFormat:format arguments:args]; va_end(args);
-    @synchronized (NSFileManager.defaultManager) {
-        NSString *path = [NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/TAduo-template.log" : @"/var/mobile/TAduo.log";
-        NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
-        if ([attrs fileSize] > 1024 * 1024) {
-            [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
-            [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
+    // Never perform file IO on CarPlay's UI/event thread. O_APPEND also avoids
+    // seek/write races between the host and native-app processes sharing a log.
+    static dispatch_queue_t queue; static dispatch_once_t once;
+    dispatch_once(&once, ^{ queue=dispatch_queue_create("com.sushibta.taduo.log",DISPATCH_QUEUE_SERIAL); });
+    NSDate *time=NSDate.date;
+    dispatch_async(queue, ^{
+        @autoreleasepool {
+            NSString *path=[NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/TAduo-template.log" : @"/var/mobile/TAduo.log";
+            static NSUInteger writes;
+            if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
+                [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
+                [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
+            }
+            NSData *data=[[NSString stringWithFormat:@"%@ [TAduo 0.24] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
+            if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.23] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
-        NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!f) { [data writeToFile:path atomically:YES]; return; }
-        @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
-    }
+    });
 }
 static id TAValue(id o, NSString *key) {
     @try { return [o valueForKey:key]; } @catch (__unused NSException *e) { return nil; }
@@ -346,40 +354,15 @@ static void TARevealActions(void) {
     if (event.type==UIEventTypeTouches && event.allTouches.count) TARevealActions();
 }
 @end
-@interface TAPickerScrollView : UIScrollView
-@end
-@implementation TAPickerScrollView
-- (BOOL)touchesShouldCancelInContentView:(UIView *)view { return YES; }
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (event.type==UIEventTypeTouches && self.decelerating) [self setContentOffset:self.contentOffset animated:NO];
-    return [super hitTest:point withEvent:event];
-}
-@end
 @interface TAAppTile : UIButton
 @property(nonatomic,copy) NSString *bundle;
 @property(nonatomic) NSInteger slot;
 @property(nonatomic) NSUInteger token;
-@property(nonatomic) CGPoint touchStart;
-@property(nonatomic) BOOL dragged;
 @end
 @implementation TAAppTile
-- (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    self.touchStart=[touch locationInView:self.window]; self.dragged=NO;
-    return [super beginTrackingWithTouch:touch withEvent:event];
-}
-- (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    CGPoint p=[touch locationInView:self.window];
-    if (hypot(p.x-self.touchStart.x,p.y-self.touchStart.y)>10) self.dragged=YES;
-    if (self.dragged) { self.highlighted=NO; return NO; }
-    return [super continueTrackingWithTouch:touch withEvent:event];
-}
-- (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    CGPoint p=[touch locationInView:self.window];
-    if (hypot(p.x-self.touchStart.x,p.y-self.touchStart.y)>10) self.dragged=YES;
-    if (self.dragged) { [self cancelTrackingWithEvent:event]; return; }
-    [super endTrackingWithTouch:touch withEvent:event];
-}
 @end
+static NSArray<NSString *> *pickerItems[2];
+static NSInteger pickerPages[2];
 static UIView *appPickers[2];
 static NSString *retryTargets[2];
 static UIButton *dockButton;
@@ -454,7 +437,7 @@ static void TAStop(NSString *reason) {
     resumeBundles=nil; resumeCandidate=nil;
     if (!running) return;
     running = NO; ++generation;
-    for (NSInteger i=0;i<2;i++) { [appPickers[i] removeFromSuperview]; appPickers[i]=nil; retryTargets[i]=nil; }
+    for (NSInteger i=0;i<2;i++) { [appPickers[i] removeFromSuperview]; appPickers[i]=nil; pickerItems[i]=nil; pickerPages[i]=0; retryTargets[i]=nil; }
     TALog(@"STOP %@", reason);
     BOOL previous = ownCall; ownCall = YES;
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
@@ -477,6 +460,8 @@ static void TASuspend(NSString *reason) {
 - (void)enter;
 - (void)selectTile:(TAAppTile *)tile;
 - (void)closePicker:(UIButton *)sender;
+- (void)pickerPage:(UIButton *)sender;
+- (void)renderPicker:(NSInteger)slot;
 - (void)showActions;
 - (void)holdDock:(UILongPressGestureRecognizer *)gesture;
 - (void)offerNative:(NSString *)bundle;
@@ -694,7 +679,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [appPickers[slot] removeFromSuperview]; appPickers[slot]=nil;
 }
 - (void)selectTile:(TAAppTile *)tile {
-    if (tile.dragged || !TASelectableBundle(tile.bundle) || !running || tile.token!=generation || tile.slot<0 || tile.slot>1 || [slots[1-tile.slot].bundle isEqual:tile.bundle]) return;
+    if (!TASelectableBundle(tile.bundle) || !running || tile.token!=generation || tile.slot<0 || tile.slot>1 || [slots[1-tile.slot].bundle isEqual:tile.bundle]) return;
     NSInteger slot=tile.slot; NSString *bundle=tile.bundle;
     [appPickers[slot] removeFromSuperview]; appPickers[slot]=nil;
     TALog(@"PICK SELECT side=%ld bundle=%@",(long)slot,bundle);
@@ -705,24 +690,40 @@ static UIButton *TAButton(NSString *title, SEL action) {
 - (void)pick:(UIButton *)sender {
     NSInteger slot=sender.tag;
     if (!running || slot<0 || slot>1 || splitWindow.rootViewController.presentedViewController) return;
-    NSArray *available=TAPickerBundles();
-    TALog(@"ICON PICKER side=%ld count=%lu",(long)slot,(unsigned long)available.count);
+    pickerItems[slot]=TAPickerBundles(); pickerPages[slot]=0;
+    [self renderPicker:slot];
+}
+- (void)pickerPage:(UIButton *)sender {
+    NSInteger slot=sender.tag/2;
+    if (!running || slot<0 || slot>1 || !appPickers[slot] || sender.superview!=appPickers[slot]) return;
+    pickerPages[slot]+=sender.tag%2 ? 1 : -1;
+    [self renderPicker:slot];
+}
+- (void)renderPicker:(NSInteger)slot {
+    if (!running || slot<0 || slot>1 || !panes[slot]) return;
+    NSArray *available=pickerItems[slot] ?: @[];
     [appPickers[slot] removeFromSuperview];
     UIView *panel=[[UIView alloc] initWithFrame:panes[slot].frame]; panel.backgroundColor=[UIColor colorWithWhite:0.055 alpha:1];
     appPickers[slot]=panel; [splitWindow.rootViewController.view insertSubview:panel belowSubview:floatingActions];
     UILabel *title=[[UILabel alloc] initWithFrame:CGRectMake(10,6,panel.bounds.size.width-46,28)];
     title.text=slot==0 ? @"Ứng dụng bên trái" : @"Ứng dụng bên phải"; title.font=[UIFont systemFontOfSize:12 weight:UIFontWeightSemibold]; title.textColor=UIColor.whiteColor; [panel addSubview:title];
     UIButton *close=TAButton(@"×",@selector(closePicker:)); close.tag=slot; close.frame=CGRectMake(panel.bounds.size.width-34,4,30,30); close.accessibilityLabel=@"Đóng chọn ứng dụng"; [panel addSubview:close];
-    TAPickerScrollView *grid=[[TAPickerScrollView alloc] initWithFrame:CGRectMake(6,38,panel.bounds.size.width-12,panel.bounds.size.height-42)];
-    grid.delaysContentTouches=NO; grid.canCancelContentTouches=YES;
-    grid.bounces=NO; grid.directionalLockEnabled=YES; grid.decelerationRate=UIScrollViewDecelerationRateFast;
-    [panel addSubview:grid];
-    CGFloat width=grid.bounds.size.width/2; NSUInteger index=0;
-    for (NSString *bundle in available) {
+    UIView *grid=[[UIView alloc] initWithFrame:CGRectMake(6,38,panel.bounds.size.width-12,MAX(0,panel.bounds.size.height-82))];
+    grid.clipsToBounds=YES; [panel addSubview:grid];
+    NSUInteger columns=grid.bounds.size.width>=180 ? 3 : 2;
+    NSUInteger rows=MAX(1,(NSInteger)floor(grid.bounds.size.height/64));
+    NSUInteger perPage=columns*rows, pages=MAX((NSUInteger)1,(available.count+perPage-1)/perPage);
+    pickerPages[slot]=MAX(0,MIN(pickerPages[slot],(NSInteger)pages-1));
+    CGFloat width=grid.bounds.size.width/columns;
+    CGFloat rowHeight=MIN(64,grid.bounds.size.height/rows);
+    NSUInteger first=pickerPages[slot]*perPage, last=MIN(available.count,first+perPage), index=0;
+    TALog(@"PICKER PAGE side=%ld page=%ld/%lu apps=%lu",(long)slot,(long)pickerPages[slot]+1,(unsigned long)pages,(unsigned long)available.count);
+    for (NSUInteger item=first;item<last;item++) {
+        NSString *bundle=available[item];
         TARecord *r=records[bundle];
         BOOL used=[slots[1-slot].bundle isEqual:bundle] || (r.controller && slots[1-slot] && slots[1-slot].controller==r.controller);
         TAAppTile *tile=[TAAppTile buttonWithType:UIButtonTypeCustom]; tile.bundle=bundle; tile.slot=slot; tile.token=generation;
-        tile.frame=CGRectMake((index%2)*width,(index/2)*64,width,60); tile.enabled=!used; tile.alpha=used ? 0.25 : 1;
+        tile.frame=CGRectMake((index%columns)*width,(index/columns)*rowHeight,width,rowHeight); tile.enabled=!used; tile.alpha=used ? 0.25 : 1;
         tile.accessibilityLabel=[TAAppName(bundle) stringByAppendingString:used ? @", đang dùng ở ô kia" : @""];
         UIImageView *icon=[[UIImageView alloc] initWithFrame:CGRectMake((width-48)/2,6,48,48)]; icon.image=TAAppIcon(bundle); icon.contentMode=UIViewContentModeScaleAspectFit; icon.layer.cornerRadius=10; icon.clipsToBounds=YES; [tile addSubview:icon];
         if (!icon.image) {
@@ -734,7 +735,18 @@ static UIButton *TAButton(NSString *title, SEL action) {
 
         [tile addTarget:self action:@selector(selectTile:) forControlEvents:UIControlEventTouchUpInside]; [grid addSubview:tile]; index++;
     }
-    grid.contentSize=CGSizeMake(grid.bounds.size.width,((index+1)/2)*64);
+    CGFloat footer=panel.bounds.size.height-42;
+    for (NSInteger direction=0;direction<2;direction++) {
+        UIButton *button=TAButton(direction ? @"›" : @"‹",@selector(pickerPage:));
+        button.tag=slot*2+direction; button.frame=CGRectMake(direction ? panel.bounds.size.width-50 : 6,footer,44,40);
+        button.titleLabel.font=[UIFont boldSystemFontOfSize:28];
+        button.enabled=direction ? pickerPages[slot]+1<(NSInteger)pages : pickerPages[slot]>0;
+        button.alpha=button.enabled ? 1 : 0.3;
+        button.accessibilityLabel=direction ? @"Trang sau" : @"Trang trước"; [panel addSubview:button];
+    }
+    UILabel *pageLabel=[[UILabel alloc] initWithFrame:CGRectMake(52,footer,panel.bounds.size.width-104,40)];
+    pageLabel.text=[NSString stringWithFormat:@"%ld / %lu",(long)pickerPages[slot]+1,(unsigned long)pages];
+    pageLabel.font=[UIFont systemFontOfSize:13]; pageLabel.textColor=UIColor.lightGrayColor; pageLabel.textAlignment=NSTextAlignmentCenter; [panel addSubview:pageLabel];
     if (!index) {
         UILabel *empty=[[UILabel alloc] initWithFrame:grid.bounds]; empty.text=@"Chưa đọc được danh sách ứng dụng CarPlay. Hãy kết nối lại rồi thử chọn."; empty.textColor=UIColor.lightGrayColor; empty.font=[UIFont systemFontOfSize:13]; empty.numberOfLines=0; empty.textAlignment=NSTextAlignmentCenter; [grid addSubview:empty];
     }
@@ -907,6 +919,31 @@ static void TACapture(id controller, id settings) {
     TALog(@"CAPTURE %@ sid=%@ launchSource=%d",bundle,sid,launch);
     if (!running) buttonWindow.hidden=NO;
 }
+static void TAStartResponsivenessProbe(void) {
+    static dispatch_source_t timer;
+    if (timer) return;
+    dispatch_queue_t queue=dispatch_queue_create("com.sushibta.taduo.heartbeat",DISPATCH_QUEUE_SERIAL);
+    __block BOOL pending=NO;
+    __block NSTimeInterval sent=0, lastReport=0;
+    timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,queue);
+    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),2*NSEC_PER_SEC,NSEC_PER_SEC/4);
+    dispatch_source_set_event_handler(timer, ^{
+        NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+        if (pending) {
+            if (now-sent>=4 && now-lastReport>=10) { lastReport=now; TALog(@"MAIN STALL pid=%d waiting=%.1fs",getpid(),now-sent); }
+            return;
+        }
+        pending=YES; sent=now;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            dispatch_async(queue, ^{
+                NSTimeInterval delay=NSProcessInfo.processInfo.systemUptime-sent;
+                if (delay>=4) TALog(@"MAIN RECOVERED pid=%d delay=%.1fs",getpid(),delay);
+                pending=NO;
+            });
+        });
+    });
+    dispatch_resume(timer);
+}
 static void TATick(void) {
     UIWindowScene *s = TADashboard();
     if (s != dashboard) {
@@ -917,7 +954,7 @@ static void TATick(void) {
     }
     if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
     UIView *dock=nil;
-    for (UIWindow *window in s.windows) {
+    if (!running) for (UIWindow *window in s.windows) {
         if (window==splitWindow || window==buttonWindow) continue;
         dock=TAFindDock(window,0); if (dock) break;
     }
@@ -945,7 +982,7 @@ static void TATick(void) {
         if (lastScene!=s) { lastScene=s; attempts=0; }
         if (lastFallback!=fallback || attempts==0) TALog(@"LAUNCHER fallback=%d dockVisible=%d running=%d",fallback,TADockButtonVisible(),running);
         lastFallback=fallback;
-        if (!running && (attempts==0 || attempts==3)) TADumpDock();
+        // Full Dock trees are captured only by the explicit log action.
         if (attempts<4) attempts++;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
@@ -985,6 +1022,51 @@ static BOOL TATemplateTarget(UIWindow *w, NSString **bundleOut) {
     CGSize target = CGSizeMake((packed >> 32)/4.0, (packed & 0xffffffff)/4.0);
     CGSize actual = w.windowScene.coordinateSpace.bounds.size;
     return fabs(target.width-actual.width)<0.5 && fabs(target.height-actual.height)<0.5;
+}
+static BOOL TAInputTarget(UIWindow *window, NSString **bundleOut) {
+    NSArray *parts=[window.windowScene.session.persistentIdentifier componentsSeparatedByString:@":"];
+    if (parts.count<2 || ![parts.firstObject hasPrefix:@"Car["]) return NO;
+    NSString *bundle=parts.lastObject;
+    if (![TAClientBundles() containsObject:bundle]) return NO;
+    int token=TATargetToken(bundle); uint64_t packed=0;
+    if (token<0 || notify_get_state(token,&packed)!=NOTIFY_STATUS_OK || !packed) return NO;
+    if (bundleOut) *bundleOut=bundle;
+    return YES;
+}
+// Device hierarchy identifies this exact class as the 44pt up/down rail.
+// Hide and disable the rail only while its CarPlay app has a split target;
+// leave the owning scroll view and its native pan recognizer untouched.
+static NSHashTable<UIView *> *TAHiddenScrollBars;
+static char TAScrollBarStateKey, TAScrollBarBusyKey;
+static void TAUpdateScrollBar(UIView *bar) {
+    if (!NSThread.isMainThread || [objc_getAssociatedObject(bar,&TAScrollBarBusyKey) boolValue]) return;
+    if (!TAHiddenScrollBars) TAHiddenScrollBars=[NSHashTable weakObjectsHashTable];
+    if (bar.window) [TAHiddenScrollBars addObject:bar]; else [TAHiddenScrollBars removeObject:bar];
+    BOOL active=TAInputTarget(bar.window,NULL);
+    NSMutableDictionary *state=objc_getAssociatedObject(bar,&TAScrollBarStateKey);
+    if (!active && !state) return;
+    objc_setAssociatedObject(bar,&TAScrollBarBusyKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @try {
+        if (active) {
+            if (!state) {
+                state=[@{@"hidden":@(bar.hidden),@"interactive":@(bar.userInteractionEnabled)} mutableCopy];
+                objc_setAssociatedObject(bar,&TAScrollBarStateKey,state,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                TALog(@"SCROLL RAIL hidden class=%@",NSStringFromClass(bar.class));
+            }
+            bar.hidden=YES; bar.userInteractionEnabled=NO;
+        } else {
+            bar.hidden=[state[@"hidden"] boolValue]; bar.userInteractionEnabled=[state[@"interactive"] boolValue];
+            objc_setAssociatedObject(bar,&TAScrollBarStateKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    } @finally { objc_setAssociatedObject(bar,&TAScrollBarBusyKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+}
+static void TAListenScrollBars(void) {
+    for (NSString *bundle in TAClientBundles()) {
+        int token;
+        notify_register_dispatch(TAChannel(bundle,@"layout-target").UTF8String,&token,dispatch_get_main_queue(), ^(__unused int delivered) {
+            for (UIView *bar in TAHiddenScrollBars.allObjects) TAUpdateScrollBar(bar);
+        });
+    }
 }
 // Change only native tab item titles. UIKit still owns all button geometry.
 static NSHashTable<UITabBar *> *TACompactTabBars;
@@ -1385,7 +1467,7 @@ static void TAListenSnapshots(void) {
 // No gesture delegates, event replacement or coordinate remapping.
 static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
     if (event.type!=UIEventTypeTouches || !NSThread.isMainThread) return;
-    NSString *bundle=nil; if (!TATemplateTarget(window,&bundle)) return;
+    NSString *bundle=nil; if (!TAInputTarget(window,&bundle)) return;
     static char touchKey, countKey;
     NSUInteger count=[objc_getAssociatedObject(window,&countKey) unsignedIntegerValue];
     if (count>=40) return;
@@ -1461,6 +1543,28 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 %end
 %end
 
+%group TAScrollRail
+%hook _UIStaticScrollBar
+- (void)didMoveToWindow { %orig; TAUpdateScrollBar((UIView *)self); }
+- (void)layoutSubviews { %orig; TAUpdateScrollBar((UIView *)self); }
+- (void)setHidden:(BOOL)hidden {
+    if (![objc_getAssociatedObject(self,&TAScrollBarBusyKey) boolValue]) {
+        NSMutableDictionary *state=objc_getAssociatedObject(self,&TAScrollBarStateKey);
+        if (state) state[@"hidden"]=@(hidden);
+        if (state && TAInputTarget(((UIView *)self).window,NULL)) hidden=YES;
+    }
+    %orig(hidden);
+}
+- (void)setUserInteractionEnabled:(BOOL)enabled {
+    if (![objc_getAssociatedObject(self,&TAScrollBarBusyKey) boolValue]) {
+        NSMutableDictionary *state=objc_getAssociatedObject(self,&TAScrollBarStateKey);
+        if (state) state[@"interactive"]=@(enabled);
+        if (state && TAInputTarget(((UIView *)self).window,NULL)) enabled=NO;
+    }
+    %orig(enabled);
+}
+%end
+%end
 %group TAClient
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
@@ -1495,7 +1599,7 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 %hook UIView
 - (void)layoutSubviews {
     %orig;
-    if (self==mountedDock && !dockAdjusting) TAInstallDock(self);
+    if (!running && self==mountedDock && !dockAdjusting) TAInstallDock(self);
 }
 %end
 %hook DBApplicationSceneViewController
@@ -1536,7 +1640,10 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
         // Cleanup/explicit Fold/Exit still execute the real native background.
         r.backgrounded=NO; r.restoreBackground=YES; ++r.heldBackgrounds;
         TALog(@"BACKGROUND HELD bundle=%@ count=%lu scene=%p",r.bundle,(unsigned long)r.heldBackgrounds,r.scene);
-        if (completion) ((void (^)(void))completion)();
+        if (completion) {
+            void (^done)(void)=[completion copy];
+            dispatch_async(dispatch_get_main_queue(), done);
+        }
         NSUInteger token=generation, serial=r.resizeSerial;
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!running || generation!=token || r.resizeSerial!=serial || (r!=slots[0] && r!=slots[1])) return;
@@ -1561,22 +1668,22 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
     return %orig;
 }
 - (void)sceneManager:(id)manager didDestroyScene:(id)scene {
-    NSString *bundle = TABundle(self); TARecord *r = records[bundle ?: @""];
+    NSString *bundle=TABundle(self); TARecord *r=records[bundle ?: @""];
     id currentScene=TAValue(self,@"scene");
-    TALog(@"SCENE DESTROY bundle=%@ controller=%p destroyed=%p current=%p attached=%p running=%d own=%d",bundle,self,scene,currentScene,r.scene,running,ownCall);
-    if (r && r.controller == self && scene) {
-        // A late destruction notification for an old scene must not evict a
-        // newer scene on the same controller. Keep activation data for retry.
-        BOOL attachedDestroyed=r.scene==scene;
-        BOOL pendingDestroyed=r.attaching && (!currentScene || currentScene==scene);
-        if (attachedDestroyed || pendingDestroyed) {
-            r.changed=NO; r.restoreBackground=NO;
-            if (r == slots[0]) TAClearSlot(0,@"current scene destroyed");
-            if (r == slots[1]) TAClearSlot(1,@"current scene destroyed");
-        }
-        TALog(@"SCENE RECORD retained bundle=%@ affected=%d",bundle,attachedDestroyed || pendingDestroyed);
-    }
+    BOOL affected=r && r.controller==self && scene && r.scene==scene;
+    TALog(@"SCENE DESTROY bundle=%@ destroyed=%p current=%p owned=%p affected=%d pending=%d",bundle,scene,currentScene,r.scene,affected,r.attaching);
+    NSUInteger token=generation;
     %orig;
+    if (!affected) return;
+    // Native destruction finishes before we release our presentation. Requests
+    // with no owned scene remain pending and use the bounded attach timeout.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!running || generation!=token || r.scene!=scene) return;
+        for (NSInteger slot=0;slot<2;slot++) if (slots[slot]==r) {
+            r.changed=NO; r.restoreBackground=NO;
+            [controls failAttach:slot bundle:r.bundle reason:@"owned scene destroyed"];
+        }
+    });
 }
 %end
 %end
@@ -1585,6 +1692,10 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
         if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
+            if (NSClassFromString(@"_UIStaticScrollBar")) {
+                %init(TAScrollRail);
+                dispatch_async(dispatch_get_main_queue(), ^{ TAListenScrollBars(); });
+            }
             if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
                 %init(TACompactHome);
                 if (NSClassFromString(@"CPSImageRowCell")) {
@@ -1605,6 +1716,6 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
-        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED"); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }

@@ -159,3 +159,17 @@ Device evidence from 0.22: at 06:09:44 UTC, YouTube Music attached successfully,
 Picker buttons now respond without the scroll-view touch delay; real drags cancel selection, deceleration stops on contact, and bounce is disabled. This targets the TAduo app chooser, not arbitrary native-app gestures. Add up to 40 passive input summaries per targeted client window to diagnose reported taps turning into scrolls inside hosted apps. No global input remapping.
 
 Device gates: Maps first then YouTube Music, reverse order, switch each side, retry, swap, Fold/restore and Exit. Confirm BACKGROUND HELD and both panes remain visible and interactive. If hosted-app taps still scroll, reproduce several taps and one deliberate swipe then collect both logs for INPUT records. Build success alone does not establish either device fix.
+
+## 0.24 — stable picker pages and scene-lifetime correction
+
+0.23 device logs show Google Maps pending with no bound scene, then an unrelated destruction notification cancels that request. Only destruction of the exact owned scene now triggers deferred pane cleanup; an unbound request waits for its existing timeout.
+
+Replace the scrolling app chooser and custom touch tracking with fixed icon pages and Previous/Next buttons. At the observed 207x234 pane size, each page holds six icons. Catalog order is retained across pages. Native app gestures remain native.
+
+Move file writes/rotation to a serial background queue with append writes, pause Dock discovery/compaction during split, and remove automatic Dock tree dumps. A held background completion is delivered asynchronously to avoid reentering the native transition. Passive touch summaries now also cover two-component native/CarBridge scene IDs such as YouTube.
+
+After YouTube attaches at 06:19:18, 0.23 stops producing scheduled observations and the host logs LOADED at 06:20:17 without STOP. This supports a host restart, not a proven exception or watchdog cause. Add a low-frequency off-main responsiveness probe (at most one pending main-queue ping). A matching CarPlayApp .ips report is needed to identify the termination cause.
+
+Device gates: page navigation/selection, cold Google Maps attach, Maps + YouTube interaction for at least one minute, replacement/retry, Fold and Exit. Neither compilation nor these mitigations prove the crash resolved.
+
+User follow-up: remove the up/down arrow rail. The prior device hierarchy identifies `_UIStaticScrollBar` and `_UIStaticScrollbarButton` on YouTube Music's right edge. Hide and disable that exact rail in targeted split app windows; restore native visibility/interaction when the target clears or the rail leaves the window. Native scrolling remains enabled. This removes the rail's hit targets; it does not prove the rail caused all reported gesture errors.
