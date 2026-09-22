@@ -96,3 +96,7 @@ User refinement: remove center ellipsis entirely. Top-right split icon opens the
 
 ## 0.10.6
 Restore exact 0.16 YouTube Music tab-title and equal-size image-row helpers/hooks and restore callbacks. Google Maps narrow split title intrinsic size trial reserves toolbar space without changing icon transforms; device validation needed. Native split entry moves into detected DB Dock with reversible space reservation, no corner overlay fallback. During split tap transparent divider for menu and drag to resize; menu auto-hides and dismisses on outside touches. If native Dock detection fails no overlay is placed over app controls; report missing entry. No changes to attachment/recovery.
+
+
+## 0.10.7 entry recovery
+Keep a draggable 36x32 entry window whenever native Dock entry is absent, clipped, hidden, or fails its window hit test. Fallback stays visible outside split so users cannot lose access through an unobserved remote touch; moving it avoids app controls. During split the corner fallback is hidden and divider tap opens actions. Dock presence alone is no longer success. Music/Maps layout and scene lifecycle unchanged.

@@ -1,4 +1,4 @@
-// TAduo 0.10.6: native scene-settings transaction and client geometry observations.
+// TAduo 0.10.7: native scene-settings transaction and client geometry observations.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.6] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [TAduo 0.10.7] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -69,6 +69,8 @@ static __weak UIView *mountedDock;
 static UIButton *dockButton;
 static NSMapTable *dockGeometry;
 static BOOL dockAdjusting=NO;
+static BOOL dockEntryVisible=NO;
+static CGPoint entryDragStart;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSUInteger generation;
@@ -249,6 +251,7 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 - (void)checkPresentation:(NSInteger)slot generation:(NSUInteger)token request:(NSUInteger)request attempt:(NSUInteger)attempt;
 - (void)dragDivider:(UIPanGestureRecognizer *)gesture;
 - (void)layoutSplit:(BOOL)commit;
+- (void)dragEntry:(UIPanGestureRecognizer *)gesture;
 - (void)showChrome;
 - (void)hideChrome;
 - (void)touchActivity:(UIEvent *)event;
@@ -340,6 +343,15 @@ static UIImage *TASplitIcon(void) {
         dividerDragging=NO; [self showChrome];
     }
 }
+- (void)dragEntry:(UIPanGestureRecognizer *)gesture {
+    if (!buttonWindow || running) return;
+    if (gesture.state==UIGestureRecognizerStateBegan) entryDragStart=buttonWindow.frame.origin;
+    CGPoint delta=[gesture translationInView:nil];
+    CGRect bounds=dashboard.coordinateSpace.bounds, frame=buttonWindow.frame;
+    frame.origin.x=MAX(CGRectGetMinX(bounds),MIN(CGRectGetMaxX(bounds)-frame.size.width,entryDragStart.x+delta.x));
+    frame.origin.y=MAX(CGRectGetMinY(bounds),MIN(CGRectGetMaxY(bounds)-frame.size.height,entryDragStart.y+delta.y));
+    buttonWindow.frame=frame;
+}
 - (void)enter {
     [self showChrome];
     if (running) [self toggleActions]; else [self start];
@@ -347,7 +359,7 @@ static UIImage *TASplitIcon(void) {
 - (void)showChrome {
     chromeVisible=YES;
     menuButton.hidden=NO;
-    buttonWindow.hidden=YES;
+    buttonWindow.hidden=running || !dashboard || dockEntryVisible;
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideChrome) object:nil];
     [self performSelector:@selector(hideChrome) withObject:nil afterDelay:3.0 inModes:@[NSRunLoopCommonModes]];
 }
@@ -356,7 +368,7 @@ static UIImage *TASplitIcon(void) {
     if (splitWindow.rootViewController.presentedViewController) {
         [self showChrome]; return;
     }
-    chromeVisible=NO; menuButton.hidden=YES; floatingActions.hidden=YES; buttonWindow.hidden=YES;
+    chromeVisible=NO; menuButton.hidden=YES; floatingActions.hidden=YES; buttonWindow.hidden=running || !dashboard || dockEntryVisible;
 }
 - (void)touchActivity:(UIEvent *)event {
     BOOL active=NO, touched=NO;
@@ -440,7 +452,7 @@ static UIImage *TASplitIcon(void) {
         [floatingActions addSubview:b];
     }
     floatingActions.hidden = YES; [root addSubview:floatingActions];
-    splitWindow.hidden = NO; dockButton.hidden=YES; [self showChrome];
+    splitWindow.hidden = NO; buttonWindow.hidden=YES; dockButton.hidden=YES; [self showChrome];
     TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
 }
 - (void)swapSides {
@@ -746,15 +758,41 @@ static void TAInstallDock(UIView *dock) {
         [dock addSubview:dockButton]; dockButton.hidden=NO;
     } @finally { dockAdjusting=NO; }
 }
+static BOOL TADockEntryVisible(void) {
+    if (!dockButton || !dockButton.window || dockButton.hidden || dockButton.window.hidden) return NO;
+    CGPoint local=CGPointMake(CGRectGetMidX(dockButton.bounds),CGRectGetMidY(dockButton.bounds));
+    for (UIView *view=dockButton;view;view=view.superview) {
+        if (view.hidden || view.alpha<0.05) return NO;
+        CGPoint point=[dockButton convertPoint:local toView:view];
+        if (view.clipsToBounds && !CGRectContainsPoint(view.bounds,point)) return NO;
+    }
+    CGPoint point=[dockButton convertPoint:local toView:dockButton.window];
+    if (!CGRectContainsPoint(dockButton.window.bounds,point)) return NO;
+    UIView *hit=[dockButton.window hitTest:point withEvent:nil];
+    return hit==dockButton || [hit isDescendantOfView:dockButton];
+}
 static void TATick(void) {
     UIWindowScene *s = TADashboard();
     if (s != dashboard) {
-        TAStop(@"display changed"); TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil; buttonWindow.hidden = YES; buttonWindow = nil;
+        TAStop(@"display changed"); TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil; dockEntryVisible=NO; buttonWindow.hidden = YES; buttonWindow = nil;
         [records removeAllObjects]; [order removeAllObjects]; dashboard = s;
         TALog(@"DISPLAY %@", s.session.persistentIdentifier);
     }
     if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
-    buttonWindow.hidden=YES;
+    if (s && !buttonWindow) {
+        buttonWindow=[[UIWindow alloc] initWithWindowScene:s];
+        buttonWindow.windowLevel=UIWindowLevelAlert+80;
+        buttonWindow.frame=CGRectMake(CGRectGetMaxX(s.coordinateSpace.bounds)-40,4,36,32);
+        buttonWindow.rootViewController=[UIViewController new];
+        buttonWindow.rootViewController.view.backgroundColor=UIColor.clearColor;
+        UIButton *entry=TAButton(@"",@selector(enter));
+        [entry setImage:TASplitIcon() forState:UIControlStateNormal];
+        entry.frame=buttonWindow.bounds; entry.layer.cornerRadius=8;
+        entry.accessibilityLabel=@"Chia màn hình; kéo để di chuyển";
+        UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragEntry:)];
+        pan.maximumNumberOfTouches=1; [entry addGestureRecognizer:pan];
+        [buttonWindow.rootViewController.view addSubview:entry];
+    }
     if (running) dockButton.hidden=YES;
     else if (s) {
         UIView *dock=nil;
@@ -765,6 +803,10 @@ static void TATick(void) {
         if (dock) TAInstallDock(dock);
         else { TARestoreDock(); dockButton.hidden=YES; }
     }
+    BOOL visible=!running && TADockEntryVisible();
+    if (visible!=dockEntryVisible) TALog(@"ENTRY dockUsable=%d fallback=%d",visible,!visible);
+    dockEntryVisible=visible;
+    buttonWindow.hidden=running || !s || dockEntryVisible;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
 }
 // Darwin state channels carry only dimensions, never application content.
