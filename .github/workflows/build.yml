@@ -39,6 +39,6 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: MultiTA-0.10.24.1-rootless-number-row
+          name: MultiTA-0.10.24.2-rootless-keyboard-response
           path: packages/*.deb
           if-no-files-found: error
