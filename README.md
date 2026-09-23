@@ -1,4 +1,10 @@
-# MultiTA 0.10.24
+# MultiTA 0.10.25
+
+## iOS 27-style control surface
+
+- Dark translucent controls with continuous rounded corners and restrained borders.
+- Compact edge entry, divider handle, action capsule and app chooser share one visual language.
+- No live blur or continuous visual-effect processing; app rendering, resizing and keyboard behavior stay unchanged from 0.10.24.
 
 First split automatically assigns the two most recently opened distinct apps in chronological order, left then right. Previous split pairs retain priority. Native entry becomes a collapsible edge tab: tap to reveal the logo, tap again to enter split; idle collapses after three seconds. Drag to reposition and snap to an edge. In split, logo auto-hides; divider tap recalls controls. Drag highlight is 2pt wide, inset equally at both ends by min(56pt, 18% of display height); this approximates the toolbar height and is not measured from each remote app. No new background timer. Device validation required.
 
@@ -164,4 +170,3 @@ Visual transparent gap reduced to 4pt; centered divider hit region remains 12x56
 
 ## 0.10.13 colored empty panes and gap input ownership
 Empty pane buttons use custom rendering with cyan left/orange right and dark bold text. Shared picker heading for either slot is uppercase UNICODE Vietnamese 'ỨNG DỤNG ĐÃ MỞ', bold 28pt (previous 14pt), side-colored; reserve extra header height. Transparent full-height 4pt gap shield plus explicit TASplitWindow hit-testing routes gap touches to the shield and center touches to the existing 12x56 grip; modal/menu priority retained. Gap shield is resized/released with split. This addresses UIKit event ownership; actual cross-process CarPlay touch behavior still requires device validation. No resize/activation logic changes.
-
