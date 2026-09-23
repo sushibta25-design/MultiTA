@@ -1,3 +1,9 @@
+# MultiTA 0.10.26 — shared keyboard number row
+
+Adds 1–0 above QWERTY in VI and EN modes, including Shift. Compact header and gaps, with a slightly shorter digit row, fit five rows to the display. The bottom action row follows the actual row count. The 123 symbol page keeps its existing four-row layout. Digits use the existing session-bound input and preview pipeline; Vietnamese Telex, cancel and pane ownership logic are unchanged. No new timers or hooks.
+
+Based on multita/ios27-ui 0.10.25, not the unrelated TAduo experiment currently on main. Build and existing Telex tests run in CI; device checks still required: enter “quận 10”, switch VI/EN and 123/ABC, Shift, delete, Find and Cancel in each pane.
+
 # MultiTA 0.10.25
 
 ## iOS 27-style control surface
