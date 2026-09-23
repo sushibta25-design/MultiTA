@@ -293,6 +293,7 @@ static void TAKBInstallClients(void) {
 @property(nonatomic,strong) NSMutableArray<NSNumber *> *queue;
 @property(nonatomic) uint64_t pending;
 @property(nonatomic) NSUInteger retry;
+@property(nonatomic) NSTimeInterval nextRetryAt;
 @property(nonatomic) BOOL shifted;
 @property(nonatomic) BOOL numbers;
 @property(nonatomic) BOOL english;
@@ -325,9 +326,19 @@ static void TAKBHostStop(void) {
     }
     TAKBWindow.hidden=YES; TAKBWindow=nil; TAKBHost=nil;
 }
+// Immediate pressed feedback without animation, timers or changing hit regions.
+@interface TAKBKeyButton : UIButton
+@end
+@implementation TAKBKeyButton
+- (void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    self.alpha=highlighted ? 0.65 : 1.0;
+}
+@end
+
 @implementation TAKBController
 - (UIButton *)key:(NSString *)label {
-    UIButton *b=[UIButton buttonWithType:UIButtonTypeCustom];
+    UIButton *b=[TAKBKeyButton buttonWithType:UIButtonTypeCustom];
     [b setTitle:label forState:UIControlStateNormal];
     b.accessibilityLabel=label; b.accessibilityIdentifier=label;
     [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
@@ -335,8 +346,12 @@ static void TAKBHostStop(void) {
     b.layer.cornerRadius=7; b.titleLabel.font=[UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
     b.titleLabel.adjustsFontSizeToFitWidth=YES;
     [b addTarget:self action:@selector(press:) forControlEvents:UIControlEventTouchUpInside];
-    if ([@[@"A",@"E",@"I",@"O",@"U",@"Y",@"D"] containsObject:label])
-        [b addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(accents:)]];
+    if ([@[@"A",@"E",@"I",@"O",@"U",@"Y",@"D"] containsObject:label]) {
+        UILongPressGestureRecognizer *hold=[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(accents:)];
+        hold.delaysTouchesBegan=NO;
+        hold.delaysTouchesEnded=NO;
+        [b addGestureRecognizer:hold];
+    }
     return b;
 }
 - (void)loadView {
@@ -367,13 +382,13 @@ static void TAKBHostStop(void) {
 - (void)buildKeys {
     for (UIView *v in self.panel.subviews) [v removeFromSuperview];
     NSArray<NSArray<NSString *> *> *labels=self.numbers ?
-        @[@[@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"0"],
-          @[@"-",@"/",@":",@";",@"(",@")",@"₫",@"&",@"@"],
+        @[@[@"@",@"#",@"$",@"%",@"&",@"*",@"+",@"=",@"_",@"€"],
+          @[@"-",@"/",@":",@";",@"(",@")",@"₫",@"[",@"]"],
           @[@".",@",",@"?",@"!",@"'",@"\"",@"⌫"],@[@"ABC",self.english ? @"EN" : @"VI",@"Dấu cách",@"Tìm"]] :
         @[@[@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"0"],
           @[@"Q",@"W",@"E",@"R",@"T",@"Y",@"U",@"I",@"O",@"P"],
           @[@"A",@"S",@"D",@"F",@"G",@"H",@"J",@"K",@"L"],
-          @[@"⇧",@"Z",@"X",@"C",@"V",@"B",@"N",@"M",@"⌫"],@[@"123",self.english ? @"EN" : @"VI",@"Dấu cách",@"Tìm"]];
+          @[@"⇧",@"Z",@"X",@"C",@"V",@"B",@"N",@"M",@"⌫"],@[@"#+=",self.english ? @"EN" : @"VI",@"Dấu cách",@"Tìm"]];
     NSMutableArray *rows=[NSMutableArray new];
     for (NSArray *row in labels) {
         NSMutableArray *keys=[NSMutableArray new];
@@ -430,7 +445,7 @@ static void TAKBHostStop(void) {
     NSString *label=sender.accessibilityIdentifier;
     if ([label isEqual:@"VI"] || [label isEqual:@"EN"]) { self.english=!self.english; [self buildKeys]; return; }
     if ([label isEqual:@"⇧"]) { self.shifted=!self.shifted; [self buildKeys]; return; }
-    if ([label isEqual:@"123"] || [label isEqual:@"ABC"]) { self.numbers=!self.numbers; [self buildKeys]; return; }
+    if ([label isEqual:@"#+="] || [label isEqual:@"ABC"]) { self.numbers=!self.numbers; [self buildKeys]; return; }
     if ([label isEqual:@"×"]) { if (self.stalled) TAKBHostStop(); else [self enqueue:3 scalar:0]; return; }
     if ([label isEqual:@"⌫"]) { [self enqueue:1 scalar:0]; return; }
     if ([label isEqual:@"Tìm"]) { [self enqueue:2 scalar:0]; return; }
@@ -462,6 +477,7 @@ static void TAKBHostStop(void) {
     if (self.stalled) return;
     if (!self.pending && self.queue.count) {
         self.pending=self.queue[0].unsignedLongLongValue; self.retry=0;
+        self.nextRetryAt=NSProcessInfo.processInfo.systemUptime+0.15;
         TAKBWrite(self.bundle,@"command",self.pending); return;
     }
     if (!self.pending) return;
@@ -477,6 +493,10 @@ static void TAKBHostStop(void) {
         }
         [self tick]; return;
     }
+    // Notification callbacks must not accelerate retry/timeout accounting.
+    NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+    if (now<self.nextRetryAt) return;
+    self.nextRetryAt=now+0.15;
     if (++self.retry>=15) {
         TALog(@"KEYBOARD ACK TIMEOUT bundle=%@",self.bundle);
         self.stalled=YES; [self.queue removeAllObjects]; self.pending=0;
@@ -519,6 +539,17 @@ static void TAKBInstallHost(void) {
     TAKBConsumed=[NSMutableDictionary new];
     for (NSString *bundle in TAClientBundles()) {
         int token;
+        // Drain the next queued key as soon as the client acknowledges it.
+        // Ignore old/duplicate events; tick still validates session ownership.
+        int ackToken,previewToken;
+        notify_register_dispatch(TAKBName(bundle,@"ack").UTF8String,&ackToken,dispatch_get_main_queue(),^(__unused int delivered) {
+            TAKBController *host=TAKBHost;
+            if (!host || ![host.bundle isEqual:bundle] || !host.pending) return;
+            if (TAKBRead(bundle,@"ack")==host.pending) [host tick];
+        });
+        notify_register_dispatch(TAKBName(bundle,@"preview").UTF8String,&previewToken,dispatch_get_main_queue(),^(__unused int delivered) {
+            if ([TAKBHost.bundle isEqual:bundle] && TAKBHostValid()) [TAKBHost refreshPreview];
+        });
         notify_register_dispatch(TAKBName(bundle,@"focus").UTF8String,&token,dispatch_get_main_queue(),^(__unused int delivered) {
             TAKBShow(bundle);
             if (TAKBHost && !TAKBHostValid()) TAKBHostStop();
