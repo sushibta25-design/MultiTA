@@ -1,4 +1,4 @@
-// MultiTA 0.10.24: resume the previous split and Vietnamese Telex input.
+// MultiTA 0.10.25: iOS 27-style lightweight control surface.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [MultiTA 0.10.24] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [MultiTA 0.10.25] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -80,11 +80,24 @@ static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static NSString *resumeBundles[2];
 static CGFloat resumeRatio=0.5;
 static BOOL dividerDragging=NO;
+static UIColor *TAGlassColor(CGFloat alpha) { return [UIColor colorWithRed:0.035 green:0.055 blue:0.085 alpha:alpha]; }
+static UIColor *TACyan(void) { return [UIColor colorWithRed:0.12 green:0.83 blue:1 alpha:1]; }
+static UIColor *TAOrange(void) { return [UIColor colorWithRed:1 green:0.48 blue:0.14 alpha:1]; }
+static void TAStyleGlass(UIView *view, CGFloat radius, UIColor *accent) {
+    view.backgroundColor=TAGlassColor(0.72);
+    view.layer.cornerRadius=radius;
+    if (@available(iOS 13.0,*)) view.layer.cornerCurve=kCACornerCurveContinuous;
+    view.layer.borderWidth=0.75;
+    view.layer.borderColor=(accent ?: [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
+    view.clipsToBounds=YES;
+}
 static void TADividerFeedback(BOOL active) {
     [UIView animateWithDuration:0.12 delay:0 options:UIViewAnimationOptionBeginFromCurrentState|UIViewAnimationOptionAllowUserInteraction animations:^{
         dividerFeedback.alpha=active ? 1 : 0;
+        dividerFeedback.transform=active ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.88,0.88);
         dividerHighlight.alpha=active ? 1 : 0;
         splitShortcut.alpha=active ? 0.7 : 1;
+        splitShortcut.transform=active ? CGAffineTransformMakeScale(0.92,0.92) : CGAffineTransformIdentity;
     } completion:nil];
 }
 static CGPoint entryDragStart;
@@ -326,7 +339,7 @@ static TAControls *controls;
 static UIButton *TAButton(NSString *title, SEL action) {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     [b setTitle:title forState:UIControlStateNormal]; b.tintColor = UIColor.whiteColor;
-    b.backgroundColor = [UIColor colorWithWhite:0.16 alpha:0.95];
+    TAStyleGlass(b,12,nil);
     [b addTarget:controls action:action forControlEvents:UIControlEventTouchUpInside]; return b;
 }
 static UIImage *TASplitIcon(void) {
@@ -345,13 +358,13 @@ static UIImage *TASplitIcon(void) {
 static void TALayoutEntry(void) {
     if (!buttonWindow || !dashboard || entryDragging) return;
     CGRect screen=dashboard.coordinateSpace.bounds;
-    CGFloat width=entryExpanded ? 44 : 16, height=40;
+    CGFloat width=entryExpanded ? 52 : 18, height=44;
     CGFloat x=entryLeft ? CGRectGetMinX(screen) : CGRectGetMaxX(screen)-width;
     CGFloat y=CGRectGetMinY(screen)+MAX(0,screen.size.height-height)*entryYRatio;
     buttonWindow.frame=CGRectMake(x,y,width,height);
     entryControl.frame=buttonWindow.bounds;
-    entryControl.backgroundColor=[UIColor colorWithWhite:0.05 alpha:entryExpanded ? 0.8 : 0.45];
-    entryControl.layer.cornerRadius=8; entryControl.clipsToBounds=YES;
+    TAStyleGlass(entryControl,entryExpanded ? 15 : 8,entryExpanded ? [UIColor colorWithWhite:1 alpha:0.24] : [UIColor colorWithWhite:1 alpha:0.14]);
+    entryControl.backgroundColor=TAGlassColor(entryExpanded ? 0.78 : 0.46);
     [entryControl setImage:entryExpanded ? TASplitIcon() : nil forState:UIControlStateNormal];
     [entryControl setTitle:entryExpanded ? @"" : (entryLeft ? @"›" : @"‹") forState:UIControlStateNormal];
     entryControl.accessibilityLabel=entryExpanded ? @"MultiTA: mở chia màn" : @"Mở phím tắt MultiTA";
@@ -416,9 +429,9 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     CGFloat endInset=MIN(56,height*0.18);
     dividerView.frame=CGRectMake(center-TADividerHitWidth/2,endInset,TADividerHitWidth,height-2*endInset);
     dividerHighlight.frame=CGRectMake(1,endInset,MAX(1,TADividerGap-2),height-2*endInset);
-    splitShortcut.frame=CGRectMake(center-22,4,44,40);
-    dividerFeedback.frame=CGRectMake(center-30,height/2-16,60,32);
-    floatingActions.frame=CGRectMake(MAX(0,MIN(center-78,splitWindow.bounds.size.width-156)),48,156,30);
+    splitShortcut.frame=CGRectMake(center-25,4,50,42);
+    dividerFeedback.frame=CGRectMake(center-36,height/2-19,72,38);
+    floatingActions.frame=CGRectMake(MAX(0,MIN(center-84,splitWindow.bounds.size.width-168)),52,168,44);
     for (NSInteger i=0;i<2;i++) {
         choose[i].frame=panes[i].bounds;
         sideActions[i].frame=CGRectMake(CGRectGetMidX(panes[i].frame)-22,CGRectGetMidY(panes[i].frame)-22,44,44);
@@ -546,21 +559,28 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     running = YES; ++generation; splitRatio=MAX(0.2,MIN(0.8,resumeRatio));
     splitWindow = [[TASplitWindow alloc] initWithWindowScene:dashboard];
     splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
-    splitWindow.opaque=YES; splitWindow.backgroundColor=UIColor.blackColor;
+    splitWindow.opaque=YES; splitWindow.backgroundColor=[UIColor colorWithRed:0.012 green:0.020 blue:0.035 alpha:1];
     splitWindow.rootViewController = [UIViewController new];
-    UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.blackColor; root.opaque=YES;
+    UIView *root = splitWindow.rootViewController.view; root.backgroundColor=splitWindow.backgroundColor; root.opaque=YES;
     // Thin visual gap; enlarged hit area overlaps each pane by 7pt at the center.
     CGFloat half = bounds.size.width / 2;
     CGFloat gap=TADividerGap, paneWidth=(bounds.size.width-gap)/2;
     for (NSInteger i = 0; i < 2; i++) {
         panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * (paneWidth+gap), 0, paneWidth, bounds.size.height)];
         panes[i].backgroundColor=UIColor.blackColor;
-        panes[i].layer.cornerRadius=6;
+        panes[i].layer.cornerRadius=12;
+        if (@available(iOS 13.0,*)) panes[i].layer.cornerCurve=kCACornerCurveContinuous;
         panes[i].clipsToBounds = YES; [root addSubview:panes[i]];
         choose[i] = [UIButton buttonWithType:UIButtonTypeCustom];
-        [choose[i] setTitle:i==0 ? @"Chọn app trái" : @"Chọn app phải" forState:UIControlStateNormal];
-        choose[i].backgroundColor=i==0 ? [UIColor colorWithRed:0 green:0.88 blue:1 alpha:1] : [UIColor colorWithRed:1 green:0.43 blue:0.10 alpha:1];
-        [choose[i] setTitleColor:[UIColor colorWithWhite:0.10 alpha:1] forState:UIControlStateNormal];
+        UIColor *accent=i==0 ? TACyan() : TAOrange();
+        [choose[i] setTitle:i==0 ? @"Chọn ứng dụng trái" : @"Chọn ứng dụng phải" forState:UIControlStateNormal];
+        choose[i].backgroundColor=TAGlassColor(0.88);
+        [choose[i] setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        choose[i].tintColor=accent;
+        UIImageSymbolConfiguration *chooseConfig=[UIImageSymbolConfiguration configurationWithPointSize:24 weight:UIImageSymbolWeightMedium];
+        [choose[i] setImage:[UIImage systemImageNamed:@"rectangle.stack.badge.plus" withConfiguration:chooseConfig] forState:UIControlStateNormal];
+        choose[i].imageEdgeInsets=UIEdgeInsetsMake(0,-8,0,8);
+        choose[i].layer.borderWidth=1; choose[i].layer.borderColor=[accent colorWithAlphaComponent:0.52].CGColor;
         choose[i].titleLabel.font=[UIFont boldSystemFontOfSize:18];
         choose[i].titleLabel.numberOfLines=2; choose[i].titleLabel.textAlignment=NSTextAlignmentCenter;
         choose[i].contentEdgeInsets=UIEdgeInsetsMake(8,8,8,8);
@@ -570,7 +590,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     gapTouchShield=[[UIControl alloc] initWithFrame:CGRectMake(paneWidth,0,TADividerGap,bounds.size.height)];
     gapTouchShield.backgroundColor=UIColor.blackColor; gapTouchShield.opaque=YES;
     gapTouchShield.userInteractionEnabled=YES; [root addSubview:gapTouchShield];
-    dividerHighlight=[UIView new]; dividerHighlight.backgroundColor=[UIColor colorWithRed:0 green:0.75 blue:0.95 alpha:1];
+    dividerHighlight=[UIView new]; dividerHighlight.backgroundColor=TACyan();
     dividerHighlight.layer.cornerRadius=1; dividerHighlight.alpha=0; dividerHighlight.userInteractionEnabled=NO;
     [gapTouchShield addSubview:dividerHighlight];
     dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-TADividerHitWidth/2,(bounds.size.height-TADividerHitHeight)/2,TADividerHitWidth,TADividerHitHeight)];
@@ -581,9 +601,9 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     [tap requireGestureRecognizerToFail:drag]; [dividerView addGestureRecognizer:tap];
     dividerView.accessibilityLabel=@"Chạm mở tác vụ, kéo để chia màn";
     [root addSubview:dividerView];
-    splitShortcut=[UIView new]; splitShortcut.backgroundColor=UIColor.clearColor;
+    splitShortcut=[UIView new]; TAStyleGlass(splitShortcut,15,[UIColor colorWithWhite:1 alpha:0.22]);
     UIImageView *logo=[[UIImageView alloc] initWithImage:TASplitIcon()];
-    logo.frame=CGRectMake(7,8,30,24); logo.userInteractionEnabled=NO; [splitShortcut addSubview:logo];
+    logo.frame=CGRectMake(10,9,30,24); logo.userInteractionEnabled=NO; [splitShortcut addSubview:logo];
     splitShortcut.accessibilityLabel=@"MultiTA: chạm mở tác vụ, kéo để chia màn";
     splitShortcut.isAccessibilityElement=YES;
     [root addSubview:splitShortcut];
@@ -597,16 +617,17 @@ static UIImage *TAActionIcon(BOOL exitAction) {
         [handle addGestureRecognizer:press];
     }
     dividerFeedback=[UILabel new]; dividerFeedback.text=@"‹   ›"; dividerFeedback.textAlignment=NSTextAlignmentCenter;
-    dividerFeedback.font=[UIFont boldSystemFontOfSize:20]; dividerFeedback.textColor=UIColor.whiteColor;
-    dividerFeedback.backgroundColor=[UIColor colorWithWhite:0 alpha:0.55]; dividerFeedback.layer.cornerRadius=8;
-    dividerFeedback.clipsToBounds=YES; dividerFeedback.alpha=0; dividerFeedback.userInteractionEnabled=NO; [root addSubview:dividerFeedback];
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-78,bounds.size.height/2-15,156,30)];
-    floatingActions.backgroundColor = UIColor.clearColor;
+    dividerFeedback.font=[UIFont systemFontOfSize:20 weight:UIFontWeightSemibold]; dividerFeedback.textColor=UIColor.whiteColor;
+    TAStyleGlass(dividerFeedback,19,[TACyan() colorWithAlphaComponent:0.35]);
+    dividerFeedback.alpha=0; dividerFeedback.transform=CGAffineTransformMakeScale(0.88,0.88); dividerFeedback.userInteractionEnabled=NO; [root addSubview:dividerFeedback];
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-84,bounds.size.height/2-22,168,44)];
+    TAStyleGlass(floatingActions,16,[UIColor colorWithWhite:1 alpha:0.22]);
     NSArray *titles = @[@"", @"", @""];
     NSArray *actions = @[@"restartSplit", @"swapSides", @"stop"];
     for (NSUInteger i=0; i<titles.count; i++) {
         UIButton *b = TAButton(titles[i], NSSelectorFromString(actions[i]));
-        b.frame = CGRectMake(i*52, 0, 50, 30); b.layer.cornerRadius = 8;
+        b.frame = CGRectMake(5+i*54,5,50,34); b.backgroundColor=UIColor.clearColor;
+        b.layer.cornerRadius=11; b.layer.borderWidth=0;
         if (i==0) { [b setImage:TASplitIcon() forState:UIControlStateNormal]; b.accessibilityLabel=@"Chia màn hình"; }
         if (i==1) {
             [b setImage:TAActionIcon(NO) forState:UIControlStateNormal];
@@ -618,8 +639,9 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     floatingActions.hidden = YES; [root addSubview:floatingActions];
     for (NSInteger side=0;side<2;side++) {
         UIButton *b=TAButton(@"",@selector(changeSide:));
-        b.tag=side; b.layer.cornerRadius=22; b.layer.borderWidth=2;
-        b.tintColor=side==0 ? [UIColor colorWithRed:0 green:0.88 blue:1 alpha:1] : [UIColor colorWithRed:1 green:0.43 blue:0.10 alpha:1];
+        b.tag=side; b.layer.cornerRadius=22; b.layer.borderWidth=1;
+        b.tintColor=side==0 ? TACyan() : TAOrange();
+        b.backgroundColor=TAGlassColor(0.78);
         b.layer.borderColor=b.tintColor.CGColor;
         UIImageSymbolConfiguration *config=[UIImageSymbolConfiguration configurationWithPointSize:24 weight:UIImageSymbolWeightSemibold];
         [b setImage:[UIImage systemImageNamed:@"arrow.triangle.2.circlepath" withConfiguration:config] forState:UIControlStateNormal];
