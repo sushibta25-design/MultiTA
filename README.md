@@ -1,3 +1,11 @@
+# MultiTA 0.10.24.1 — hàng số trên bàn phím chung
+
+Nền chính xác: bản 0.10.24, commit c021563f0496750152089c174046ddb4819b511f, theo yêu cầu người dùng. Không lấy giao diện 0.10.25.
+
+Thêm hàng 1–0 phía trên QWERTY trong chế độ VI/EN và Shift. Thu gọn phần đầu và khoảng cách; hàng số cao bằng 80% hàng chữ để bố trí vừa màn hình. Hàng chức năng lấy vị trí theo số hàng thực tế. Trang 123 giữ bố cục bốn hàng. Dùng nguyên đường nhập, Telex, preview và huỷ tìm kiếm của 0.10.24, không thêm timer/hook.
+
+CI chạy bộ kiểm tra Telex sẵn có và build arm64/arm64e rootless. Cần thử trên thiết bị: nhập “quận 10”, VI/EN, Shift, 123/ABC, xoá, Tìm và Huỷ ở cả hai bên.
+
 # MultiTA 0.10.24
 
 First split automatically assigns the two most recently opened distinct apps in chronological order, left then right. Previous split pairs retain priority. Native entry becomes a collapsible edge tab: tap to reveal the logo, tap again to enter split; idle collapses after three seconds. Drag to reposition and snap to an edge. In split, logo auto-hides; divider tap recalls controls. Drag highlight is 2pt wide, inset equally at both ends by min(56pt, 18% of display height); this approximates the toolbar height and is not measured from each remote app. No new background timer. Device validation required.
