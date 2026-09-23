@@ -1,8 +1,8 @@
 Package: com.sushibta.multita
 Name: MultiTA
-Version: 0.10.24
+Version: 0.10.25
 Architecture: iphoneos-arm64
-Description: MultiTA CarPlay split screen with shared Vietnamese keyboard.
+Description: MultiTA CarPlay split screen with iOS 27-style controls and shared Vietnamese keyboard.
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
