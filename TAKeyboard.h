@@ -370,7 +370,8 @@ static void TAKBHostStop(void) {
         @[@[@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"0"],
           @[@"-",@"/",@":",@";",@"(",@")",@"₫",@"&",@"@"],
           @[@".",@",",@"?",@"!",@"'",@"\"",@"⌫"],@[@"ABC",self.english ? @"EN" : @"VI",@"Dấu cách",@"Tìm"]] :
-        @[@[@"Q",@"W",@"E",@"R",@"T",@"Y",@"U",@"I",@"O",@"P"],
+        @[@[@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"0"],
+          @[@"Q",@"W",@"E",@"R",@"T",@"Y",@"U",@"I",@"O",@"P"],
           @[@"A",@"S",@"D",@"F",@"G",@"H",@"J",@"K",@"L"],
           @[@"⇧",@"Z",@"X",@"C",@"V",@"B",@"N",@"M",@"⌫"],@[@"123",self.english ? @"EN" : @"VI",@"Dấu cách",@"Tìm"]];
     NSMutableArray *rows=[NSMutableArray new];
@@ -389,24 +390,34 @@ static void TAKBHostStop(void) {
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGFloat w=self.view.bounds.size.width,h=self.view.bounds.size.height;
-    CGFloat margin=8,top=MIN(42,h*0.2),gap=MAX(3,MIN(7,w/100));
+    // Compact the header/gaps in alphabet mode to make room for the digit row.
+    CGFloat margin=self.numbers ? 8 : 6;
+    CGFloat top=MIN(self.numbers ? 42 : 36,h*0.2);
+    CGFloat gap=MAX(3,MIN(self.numbers ? 7 : 5,w/100));
     self.heading.frame=CGRectMake(margin,margin,MAX(1,w-top-3*margin),top);
     self.closeButton.frame=CGRectMake(w-margin-top,margin,top,top);
     self.panel.frame=CGRectMake(margin,top+2*margin,w-2*margin,MAX(1,h-top-3*margin));
     CGFloat pw=self.panel.bounds.size.width,ph=self.panel.bounds.size.height;
-    CGFloat kh=(ph-5*gap)/4,kw=(pw-11*gap)/10;
-    for (NSUInteger r=0;r<self.rows.count;r++) {
-        NSArray<UIButton *> *keys=self.rows[r]; CGFloat y=gap+r*(kh+gap);
-        if (r==3) {
+    NSUInteger rowCount=self.rows.count;
+    BOOL hasDigitRow=!self.numbers;
+    CGFloat digitWeight=0.8;
+    CGFloat units=hasDigitRow ? (CGFloat)rowCount-1+digitWeight : (CGFloat)rowCount;
+    CGFloat kh=MAX(1,(ph-(rowCount+1)*gap)/MAX(1,units));
+    CGFloat kw=MAX(1,(pw-11*gap)/10), y=gap;
+    for (NSUInteger r=0;r<rowCount;r++) {
+        NSArray<UIButton *> *keys=self.rows[r];
+        CGFloat rowHeight=(hasDigitRow && r==0) ? kh*digitWeight : kh;
+        if (r==rowCount-1) {
             CGFloat small=(pw-5*gap)*0.15,space=pw-5*gap-3*small;
-            keys[0].frame=CGRectMake(gap,y,small,kh);
-            keys[1].frame=CGRectMake(2*gap+small,y,small,kh);
-            keys[2].frame=CGRectMake(3*gap+2*small,y,space,kh);
-            keys[3].frame=CGRectMake(4*gap+2*small+space,y,small,kh);
+            keys[0].frame=CGRectMake(gap,y,small,rowHeight);
+            keys[1].frame=CGRectMake(2*gap+small,y,small,rowHeight);
+            keys[2].frame=CGRectMake(3*gap+2*small,y,space,rowHeight);
+            keys[3].frame=CGRectMake(4*gap+2*small+space,y,small,rowHeight);
         } else {
             CGFloat start=(pw-(keys.count*kw+(keys.count-1)*gap))/2;
-            for (NSUInteger i=0;i<keys.count;i++) keys[i].frame=CGRectMake(start+i*(kw+gap),y,kw,kh);
+            for (NSUInteger i=0;i<keys.count;i++) keys[i].frame=CGRectMake(start+i*(kw+gap),y,kw,rowHeight);
         }
+        y+=rowHeight+gap;
     }
     self.variants.frame=self.panel.frame;
 }
