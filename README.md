@@ -1,3 +1,16 @@
+# MultiTA 0.10.24.2 — keyboard response
+
+Continues the user-selected 0.10.24 baseline through 0.10.24.1.
+
+- Host receives ACK notifications and drains the next queued key immediately, instead of waiting for the 150 ms watchdog.
+- Preview notifications refresh confirmed text immediately. Existing polling remains as fallback; no polling frequency increase or new timer.
+- Retry accounting uses a monotonic 150 ms gate so notification callbacks cannot burn the retry budget.
+- Existing nonce, sequence, pane ownership and duplicate rejection stay intact.
+- Keys dim immediately when highlighted. Accent long presses do not delay ordinary touch delivery; typing still commits on touch-up, preserving cancellation.
+- Replace 123 with #+= and show a symbol page; ABC returns to letters and the permanent digit row.
+
+CI compiles both architectures and runs the existing Telex suite. Hardware latency has not been measured. Device checks: type "127 lê văn phượng" rapidly, delete, VI/EN, Shift, long-press accents, #+=/ABC, Find/Cancel, and input into either pane.
+
 # MultiTA 0.10.24.1 — hàng số trên bàn phím chung
 
 Nền chính xác: bản 0.10.24, commit c021563f0496750152089c174046ddb4819b511f, theo yêu cầu người dùng. Không lấy giao diện 0.10.25.
