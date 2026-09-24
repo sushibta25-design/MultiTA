@@ -39,6 +39,6 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: MultiTA-0.10.24.2-swipe-split
+          name: MultiTA-0.10.24.3-visible-divider
           path: packages/*.deb
           if-no-files-found: error

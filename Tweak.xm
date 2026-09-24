@@ -1,4 +1,4 @@
-// MultiTA 0.10.24.2: resume the previous split and Vietnamese Telex input.
+// MultiTA 0.10.24.3: resume the previous split and Vietnamese Telex input.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [MultiTA 0.10.24.2] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [MultiTA 0.10.24.3] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -505,7 +505,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
                 CGPoint p=[touch locationInView:nil];
                 CGRect screen=dashboard.coordinateSpace.bounds;
                 self.homeSwipeStart=p; self.homeSwipeStartTime=NSDate.timeIntervalSinceReferenceDate;
-                self.homeSwipeTracking=(event.allTouches.count==1 && p.x<=CGRectGetMinX(screen)+MAX(60,screen.size.width*0.08));
+                self.homeSwipeTracking=(event.allTouches.count==1 && p.x<=CGRectGetMinX(screen)+MAX(60,screen.size.width*0.25));
             } else if (self.homeSwipeTracking && (touch.phase==UITouchPhaseMoved || touch.phase==UITouchPhaseEnded ||
                                                    touch.phase==UITouchPhaseCancelled)) {
                 CGPoint p=[touch locationInView:nil];
@@ -516,7 +516,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
                     self.homeSwipeTracking=NO;
                     NSMutableArray<NSString *> *recent=[NSMutableArray new];
                     for (NSString *bundle in order) if (records[bundle]) [recent addObject:bundle];
-                    BOOL deliberate=dx>=MAX(120,screen.size.width*0.16) &&
+                    BOOL deliberate=dx>=MAX(120,screen.size.width*0.20) &&
                         fabs(dy)<=MAX(60,screen.size.height*0.16) && elapsed<=1.5;
                     if (deliberate && recent.count>=2) {
                         resumeBundles[0]=recent[recent.count-2]; resumeBundles[1]=recent.lastObject;
@@ -610,7 +610,18 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     [gapTouchShield addSubview:dividerHighlight];
     CGFloat dividerCenter=leftWidth+TADividerGap/2;
     dividerView=[[UIView alloc] initWithFrame:CGRectMake(dividerCenter-TADividerHitWidth/2,(bounds.size.height-TADividerHitHeight)/2,TADividerHitWidth,TADividerHitHeight)];
-    dividerView.backgroundColor=UIColor.clearColor;
+    dividerView.backgroundColor=[UIColor colorWithWhite:0.08 alpha:0.88];
+    dividerView.layer.cornerRadius=TADividerHitWidth/2;
+    dividerView.layer.borderWidth=1.0;
+    dividerView.layer.borderColor=[UIColor colorWithWhite:1 alpha:0.55].CGColor;
+    dividerView.clipsToBounds=YES;
+    for (NSInteger gripIndex=0;gripIndex<3;gripIndex++) {
+        UIView *grip=[UIView new];
+        grip.frame=CGRectMake(MAX(2,(TADividerHitWidth-8)/2),TADividerHitHeight/2-4+gripIndex*4,8,1.5);
+        grip.backgroundColor=[UIColor colorWithWhite:1 alpha:0.75];
+        grip.layer.cornerRadius=1; grip.userInteractionEnabled=NO;
+        [dividerView addSubview:grip];
+    }
     UIPanGestureRecognizer *drag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
     drag.maximumNumberOfTouches=1; drag.delegate=self; [dividerView addGestureRecognizer:drag];
     UITapGestureRecognizer *tap=[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleActions)];
