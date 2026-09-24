@@ -1,4 +1,4 @@
-// TAduo 0.26.0: draggable divider (30–70%) on top of 0.25 direct scene activation.
+// TAduo 0.27.0: A→Home→B→Home opens a staged split (dark rail) that drags into 30–70%.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -84,6 +84,12 @@ static const CGFloat kTAMinRatio=0.30, kTAMaxRatio=0.70;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static UIView *dividerView, *dividerGrip;
 static UIView *dragCovers[2];
+// Staged split: after A→Home→B→Home, B fills the display except a dark rail
+// on the left; dragging the rail right reveals A and becomes a normal split.
+static BOOL staged;
+static NSString *stagedBundle, *lastHomeBundle, *consumedHomeBundle;
+static NSTimeInterval lastHomeTime, consumedHomeTime;
+static UIImageView *railIcon;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSArray<NSString *> *resumeBundles;
@@ -448,18 +454,44 @@ static CGFloat TAVisualRatio(CGFloat raw) {
     if (raw>kTAMaxRatio) return kTAMaxRatio+TARubber(raw-kTAMaxRatio,0.08);
     return raw;
 }
+static CGFloat TARailWidth(CGFloat width) { return MAX(56,round(width*0.12)); }
+static UIColor *TADividerColor(void) { return staged ? [UIColor colorWithWhite:0.035 alpha:1] : [UIColor colorWithWhite:0.1 alpha:1]; }
 // Only moves containers. Hosted presentations keep their committed frame
 // until TACommitSplit, so no scene resize happens per touch-move.
-static void TALayoutSplit(CGFloat ratio) {
+static void TALayoutAt(CGFloat cx, CGFloat dw) {
     if (!splitWindow || !panes[0] || !panes[1]) return;
-    CGSize size=splitWindow.bounds.size; CGFloat inset=3, dw=TADividerWidth(size.width);
-    CGFloat cx=round(size.width*ratio), height=size.height-2*inset;
-    panes[0].frame=CGRectMake(inset,inset,MAX(1,cx-dw/2-inset),height);
+    CGSize size=splitWindow.bounds.size; CGFloat inset=3, height=size.height-2*inset;
+    CGFloat normal=TADividerWidth(size.width), rail=TARailWidth(size.width);
+    CGFloat lw=cx-dw/2-inset;
+    panes[0].hidden=lw<2; panes[0].frame=CGRectMake(inset,inset,MAX(1,lw),height);
     CGFloat rx=cx+dw/2; panes[1].frame=CGRectMake(rx,inset,MAX(1,size.width-inset-rx),height);
     dividerView.frame=CGRectMake(cx-dw/2,0,dw,size.height);
     dividerGrip.frame=CGRectMake((dw-4)/2,14,4,MAX(0,size.height-28));
+    CGFloat look=rail>normal ? MIN(1,MAX(0,(dw-normal)/(rail-normal))) : 0;
+    railIcon.frame=CGRectMake((dw-40)/2,14,40,40); railIcon.alpha=staged ? look : 0;
+    dividerGrip.alpha=1-look;
     if (floatingActions) floatingActions.center=CGPointMake(cx,floatingActions.center.y);
     for (NSInteger i=0;i<2;i++) { choose[i].frame=panes[i].bounds; dragCovers[i].frame=panes[i].bounds; }
+}
+static void TALayoutSplit(CGFloat ratio) {
+    if (!splitWindow) return;
+    CGFloat width=splitWindow.bounds.size.width;
+    TALayoutAt(round(width*ratio),TADividerWidth(width));
+}
+static CGFloat TAStagedRestRatio(void) {
+    CGFloat width=MAX(1,splitWindow.bounds.size.width);
+    return TARailWidth(width)/2/width;
+}
+// raw = divider centre / width. The rail narrows smoothly into the normal
+// divider while moving from rest to 30%; past 30% it is a normal drag.
+static void TALayoutStaged(CGFloat raw) {
+    if (!splitWindow) return;
+    CGFloat width=splitWindow.bounds.size.width, rest=TAStagedRestRatio();
+    CGFloat normal=TADividerWidth(width), rail=TARailWidth(width);
+    if (raw>=kTAMinRatio) { TALayoutAt(round(width*TAVisualRatio(raw)),normal); return; }
+    if (raw<rest) raw=rest-TARubber(rest-raw,0.02);
+    CGFloat t=MIN(1,MAX(0,(raw-rest)/(kTAMinRatio-rest)));
+    TALayoutAt(round(width*raw),round(rail+(normal-rail)*t));
 }
 static void TAShowCovers(BOOL show) {
     for (NSInteger i=0;i<2;i++) {
@@ -502,7 +534,8 @@ static void TAStop(NSString *reason) {
     BOOL previous = ownCall; ownCall = YES;
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
-    dividerView = nil; dividerGrip = nil; dragCovers[0] = dragCovers[1] = nil;
+    dividerView = nil; dividerGrip = nil; railIcon = nil; dragCovers[0] = dragCovers[1] = nil;
+    staged = NO; stagedBundle = nil;
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
     buttonWindow.hidden = order.count < 1;
 }
@@ -549,6 +582,9 @@ static void TASuspend(NSString *reason) {
 - (void)dragDivider:(UIPanGestureRecognizer *)gesture;
 - (void)resetDivider:(UITapGestureRecognizer *)gesture;
 - (void)commitSplit:(CGFloat)ratio;
+- (void)tapDivider:(UITapGestureRecognizer *)gesture;
+- (void)finishStaged:(CGFloat)ratio;
+- (void)autoStage:(NSString *)left right:(NSString *)right attempt:(NSUInteger)attempt;
 @end
 static TAControls *controls;
 static UIButton *TAButton(NSString *title, SEL action) {
@@ -664,7 +700,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [picker addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
     [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
 }
-- (void)stop { TARememberPair(); TAStop(@"user"); }
+- (void)stop { TARememberPair(); TAStop(@"user"); lastHomeBundle=nil; }
 - (void)toggleActions { [self showActions]; }
 - (void)snapshot {
     floatingActions.hidden = NO;
@@ -711,6 +747,11 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [dividerView addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragDivider:)]];
     UITapGestureRecognizer *reset = [[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(resetDivider:)];
     reset.numberOfTapsRequired = 2; [dividerView addGestureRecognizer:reset];
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(tapDivider:)];
+    [tap requireGestureRecognizerToFail:reset]; [dividerView addGestureRecognizer:tap];
+    railIcon = [[UIImageView alloc] initWithFrame:CGRectZero];
+    railIcon.layer.cornerRadius = 10; railIcon.clipsToBounds = YES; railIcon.alpha = 0; railIcon.userInteractionEnabled = NO;
+    [dividerView addSubview:railIcon];
 
     floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-22,MAX(4,(bounds.size.height-44)/2),44,44)];
     floatingActions.backgroundColor=[UIColor colorWithWhite:0.04 alpha:0.96];
@@ -852,29 +893,74 @@ static UIButton *TAButton(NSString *title, SEL action) {
     CGFloat raw=dragStartRatio+[gesture translationInView:root].x/width;
     switch (gesture.state) {
         case UIGestureRecognizerStateBegan:
-            dragStartRatio=splitRatio; floatingActions.hidden=NO;
+            dragStartRatio=staged ? TAStagedRestRatio() : splitRatio; floatingActions.hidden=NO;
             for (NSInteger i=0;i<2;i++) appPickers[i].hidden=YES;
             dividerGrip.backgroundColor=TACyan();
             TAShowCovers(YES);
             break;
         case UIGestureRecognizerStateChanged:
-            TALayoutSplit(TAVisualRatio(raw));
+            if (staged) TALayoutStaged(raw); else TALayoutSplit(TAVisualRatio(raw));
             break;
         case UIGestureRecognizerStateEnded: {
             // Short flick projection, then clamp to 30–70%.
             CGFloat projected=raw+[gesture velocityInView:root].x/width*0.08;
+            if (staged && projected<0.2) {
+                // Not pulled far enough: rail springs back, B stays large.
+                dividerGrip.backgroundColor=[UIColor colorWithWhite:0.38 alpha:1];
+                [UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+                    TALayoutStaged(TAStagedRestRatio());
+                } completion:nil];
+                TAShowCovers(NO); break;
+            }
             [self commitSplit:projected];
             break;
         }
         default:
-            [self commitSplit:splitRatio];
+            if (staged) { TALayoutStaged(TAStagedRestRatio()); TAShowCovers(NO); dividerGrip.backgroundColor=[UIColor colorWithWhite:0.38 alpha:1]; }
+            else [self commitSplit:splitRatio];
             break;
     }
 }
 - (void)resetDivider:(UITapGestureRecognizer *)gesture {
     if (gesture.state==UIGestureRecognizerStateRecognized) [self commitSplit:0.5];
 }
+- (void)tapDivider:(UITapGestureRecognizer *)gesture {
+    if (gesture.state==UIGestureRecognizerStateRecognized && staged) [self finishStaged:kTAMinRatio];
+}
+- (void)finishStaged:(CGFloat)ratio {
+    if (!running || !staged) return;
+    NSString *bundle=[stagedBundle copy];
+    staged=NO; stagedBundle=nil;
+    dividerView.backgroundColor=TADividerColor();
+    choose[0].enabled=YES;
+    TALog(@"STAGED OPEN left=%@ ratio=%.3f",bundle,TAClampRatio(ratio));
+    [self commitSplit:ratio];
+    if (bundle.length && !slots[0]) [self replace:bundle slot:0];
+}
+// Called after the second Home. B (right) attaches immediately behind the
+// rail; A (left) attaches only when the user pulls the rail open.
+- (void)autoStage:(NSString *)left right:(NSString *)right attempt:(NSUInteger)attempt {
+    if (running || primeBundle || !dashboard || TADashboard()!=dashboard) return;
+    if (NSProcessInfo.processInfo.systemUptime-lastNativeTransition<0.6 && attempt<8) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(),^{ [self autoStage:left right:right attempt:attempt+1]; });
+        return;
+    }
+    if (!TADirectReady(records[right]) || (!records[left] && !catalog[left])) { TALog(@"STAGED SKIP left=%@ right=%@ (no live scene)",left,right); return; }
+    resumeBundles=nil; resumeCandidate=nil;
+    staged=YES; stagedBundle=[left copy];
+    [self start];
+    if (!running) { staged=NO; stagedBundle=nil; return; }
+    dividerView.backgroundColor=TADividerColor();
+    railIcon.image=TAAppIcon(left);
+    [choose[0] setTitle:@"" forState:UIControlStateNormal];
+    [choose[0] setImage:TAAppIcon(left) forState:UIControlStateNormal];
+    choose[0].enabled=NO; choose[0].adjustsImageWhenDisabled=NO;
+    TALayoutStaged(TAStagedRestRatio());
+    TALog(@"STAGED START left=%@ right=%@ rail=%.1f",left,right,dividerView.bounds.size.width);
+    [self attach:right slot:1];
+}
 - (void)commitSplit:(CGFloat)ratio {
+    if (staged) { [self finishStaged:ratio]; return; }
     if (!running || !panes[0] || !panes[1]) return;
     ratio=TAClampRatio(ratio);
     if (fabs(ratio-0.5)<0.03) ratio=0.5;   // light magnet to the centre
@@ -1797,6 +1883,23 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
     if (!running && self==mountedDock && !dockAdjusting) TAInstallDock(self);
 }
 %end
+// Two consecutive Home transitions from different apps (A, then B) within
+// 5 minutes start a staged split. Each pair of Homes is consumed once, and a
+// duplicate callback for the same app right after a trigger is ignored.
+static void TAHomeFrom(NSString *bundle) {
+    if (!TASelectableBundle(bundle)) return;
+    NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+    if ([consumedHomeBundle isEqual:bundle] && now-consumedHomeTime<3) return;
+    NSString *previous=lastHomeBundle; NSTimeInterval previousTime=lastHomeTime;
+    lastHomeBundle=[bundle copy]; lastHomeTime=now;
+    TALog(@"HOME FROM %@ previous=%@",bundle,previous);
+    if (!previous || [previous isEqual:bundle] || now-previousTime>300) return;
+    lastHomeBundle=nil; consumedHomeBundle=[bundle copy]; consumedHomeTime=now;
+    NSUInteger token=generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.9*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        if (generation==token) [controls autoStage:previous right:bundle attempt:0];
+    });
+}
 %hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
     BOOL external=!ownCall;
@@ -1850,6 +1953,7 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
     });
 }
 - (id)presentationViewWithIdentifier:(id)identifier {
+    if (!ownCall && !running && !primeBundle && [identifier isEqual:@"kCARAppToHomeAnimationIdentifier"]) TAHomeFrom(TABundle(self));
     if (!ownCall && running && [identifier isEqual:@"kCARAppToHomeAnimationIdentifier"]) {
         if (TAAttachPending()) TALog(@"HOME TRANSITION during attach (session retained)");
         else TALog(@"HOME TRANSITION retain split bundle=%@",TABundle(self));
