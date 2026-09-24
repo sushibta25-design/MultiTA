@@ -1,6 +1,6 @@
 Package: com.sushibta.taduo
 Name: TAduo
-Version: 0.27.0
+Version: 0.26.0
 Architecture: iphoneos-arm64
 Description: Experimental CarPlay split with draggable divider (30–70%) and native geometry requests.
 Maintainer: sushibta25-design

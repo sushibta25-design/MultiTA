@@ -191,11 +191,3 @@ Bỏ chia cố định 50/50. Divider rộng ~3% chiều ngang màn (số chẵn
 Trong lúc kéo chỉ di chuyển khung pane, app bị che bằng lớp tối có icon; resize scene (TAResize) chỉ chạy một lần khi thả tay, rồi bỏ lớp che sau 0.45s. Đổi trái ↔ phải lật tỉ lệ để mỗi app giữ nguyên kích thước (không resize). Tỉ lệ giữ nguyên qua Thu/Home, reset khi respring.
 
 Device gates: kéo chậm/nhanh, kéo quá 30/70, chạm đúp, preset trong menu, Swap sau khi đổi tỉ lệ, kéo trong lúc một ô đang attach, Maps/YouTube layout ở ô 30%.
-
-## 0.27 — chia màn tự động bằng thanh ray (A → Home → B → Home)
-
-Mở app A → Home → mở app B → Home (trong vòng 5 phút) thì tự vào trạng thái chờ chia: B chiếm gần hết màn, bên trái là thanh ray tối màu rộng ~12% (tối thiểu 56pt) có icon app A. Kéo ray sang phải: ray thu nhỏ dần thành divider thường, ô A lộ ra; tới 30% (3:7) thì thành chia màn thường và tiếp tục đi theo tay tới 70% cho tới khi thả. Thả trước ~20% thì ray bật về, B vẫn lớn. Thả sau đó thì chốt tỉ lệ (tối thiểu 3:7), A được gắn vào ô trái, B resize một lần. Chạm một lần vào ray = mở 3:7, chạm đúp = 5:5.
-
-Mỗi cặp Home chỉ kích hoạt một lần; Home liên tiếp từ cùng một app không kích hoạt; bỏ qua nếu B không còn scene sống. Bắt Home qua `kCARAppToHomeAnimationIdentifier` — cần log `HOME FROM` trên máy để xác nhận hook này bắn khi không chia màn.
-
-Device gates: A→Home→B→Home với Maps/YouTube cả hai thứ tự, kéo chậm qua 30%, thả trước 20%, chạm/chạm đúp ray, Home khi đang ở trạng thái ray, Thoát rồi lặp lại luồng.
