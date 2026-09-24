@@ -1,4 +1,4 @@
-// MultiTA 0.10.24.1: resume the previous split and Vietnamese Telex input.
+// MultiTA 0.10.24.2: resume the previous split and Vietnamese Telex input.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -16,7 +16,7 @@ static void TALog(NSString *format, ...) {
             [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
             [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
         }
-        NSData *data = [[NSString stringWithFormat:@"%@ [MultiTA 0.10.24.1] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *data = [[NSString stringWithFormat:@"%@ [MultiTA 0.10.24.2] %@\n", NSDate.date, s] dataUsingEncoding:NSUTF8StringEncoding];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!f) { [data writeToFile:path atomically:YES]; return; }
         @try { [f seekToEndOfFile]; [f writeData:data]; } @catch (__unused NSException *e) {} @finally { [f closeFile]; }
@@ -73,8 +73,9 @@ static BOOL entryExpanded=NO, entryDragging=NO, entryLeft=NO;
 static CGFloat entryYRatio=0.5;
 static void TALayoutEntry(void);
 static UIControl *gapTouchShield;
-static const CGFloat TADividerGap=4;
-static const CGFloat TADividerHitWidth=18;
+static CGFloat TADividerGap=4;
+static CGFloat TADividerHitWidth=18;
+static BOOL swipeSplitPending=NO;
 static const CGFloat TADividerHitHeight=84;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static NSString *resumeBundles[2];
@@ -319,6 +320,9 @@ static UIImage *TAChoiceIcon(NSString *bundle) {
 - (void)restartSplit;
 - (void)changeSide:(UIButton *)sender;
 - (void)toggleActions;
+@property(nonatomic) CGPoint homeSwipeStart;
+@property(nonatomic) NSTimeInterval homeSwipeStartTime;
+@property(nonatomic) BOOL homeSwipeTracking;
 - (void)pick:(UIButton *)sender;
 - (void)attach:(NSString *)bundle slot:(NSInteger)slot;
 @end
@@ -444,7 +448,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     CGFloat available=splitWindow.bounds.size.width-TADividerGap;
     if (available<=0) return;
     if (gesture.state==UIGestureRecognizerStateBegan || gesture.state==UIGestureRecognizerStateChanged || gesture.state==UIGestureRecognizerStateEnded) {
-        CGFloat minimum=MIN(140,available/2);
+        CGFloat minimum=MIN(MAX(1,available*0.03),available/2);
         CGFloat requested=available*dragStartRatio+[gesture translationInView:splitWindow.rootViewController.view].x;
         splitRatio=MAX(minimum,MIN(available-minimum,requested))/available;
         [self layoutSplit:gesture.state==UIGestureRecognizerStateEnded];
@@ -494,8 +498,34 @@ static UIImage *TAActionIcon(BOOL exitAction) {
 }
 - (void)touchActivity:(UIEvent *)event {
     if (!running) {
-        for (UITouch *touch in event.allTouches) if (touch.phase==UITouchPhaseBegan && touch.window.windowScene==dashboard && touch.window!=buttonWindow) {
-            entryExpanded=NO; TALayoutEntry();
+        for (UITouch *touch in event.allTouches) {
+            if (touch.window.windowScene!=dashboard || touch.window==buttonWindow) continue;
+            if (touch.phase==UITouchPhaseBegan) {
+                entryExpanded=NO; TALayoutEntry();
+                CGPoint p=[touch locationInView:nil];
+                CGRect screen=dashboard.coordinateSpace.bounds;
+                self.homeSwipeStart=p; self.homeSwipeStartTime=NSDate.timeIntervalSinceReferenceDate;
+                self.homeSwipeTracking=(event.allTouches.count==1 && p.x<=CGRectGetMinX(screen)+MAX(60,screen.size.width*0.08));
+            } else if (self.homeSwipeTracking && (touch.phase==UITouchPhaseMoved || touch.phase==UITouchPhaseEnded ||
+                                                   touch.phase==UITouchPhaseCancelled)) {
+                CGPoint p=[touch locationInView:nil];
+                CGRect screen=dashboard.coordinateSpace.bounds;
+                CGFloat dx=p.x-self.homeSwipeStart.x, dy=p.y-self.homeSwipeStart.y;
+                NSTimeInterval elapsed=NSDate.timeIntervalSinceReferenceDate-self.homeSwipeStartTime;
+                if (touch.phase==UITouchPhaseEnded) {
+                    self.homeSwipeTracking=NO;
+                    NSMutableArray<NSString *> *recent=[NSMutableArray new];
+                    for (NSString *bundle in order) if (records[bundle]) [recent addObject:bundle];
+                    BOOL deliberate=dx>=MAX(120,screen.size.width*0.16) &&
+                        fabs(dy)<=MAX(60,screen.size.height*0.16) && elapsed<=1.5;
+                    if (deliberate && recent.count>=2) {
+                        resumeBundles[0]=recent[recent.count-2]; resumeBundles[1]=recent.lastObject;
+                        swipeSplitPending=YES;
+                        TALog(@"HOME SWIPE split left=%@ right=%@ dx=%.1f",resumeBundles[0],resumeBundles[1],dx);
+                        [self start];
+                    }
+                } else if (touch.phase==UITouchPhaseCancelled) self.homeSwipeTracking=NO;
+            }
         }
         return;
     }
@@ -543,17 +573,22 @@ static UIImage *TAActionIcon(BOOL exitAction) {
         else if (recent.count==1) resumeBundles[0]=recent.firstObject;
         TALog(@"FIRST SPLIT left=%@ right=%@",resumeBundles[0],resumeBundles[1]);
     }
-    running = YES; ++generation; splitRatio=MAX(0.2,MIN(0.8,resumeRatio));
+    running = YES; ++generation;
+    CGFloat initialRatio=swipeSplitPending ? 0.03 : resumeRatio; swipeSplitPending=NO;
+    splitRatio=MAX(0.03,MIN(0.97,initialRatio));
+    TADividerGap=MAX(6,MIN(16,bounds.size.width*0.01));
+    TADividerHitWidth=MAX(12,MIN(32,bounds.size.width*0.018));
     splitWindow = [[TASplitWindow alloc] initWithWindowScene:dashboard];
     splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
     splitWindow.opaque=YES; splitWindow.backgroundColor=UIColor.blackColor;
     splitWindow.rootViewController = [UIViewController new];
     UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.blackColor; root.opaque=YES;
     // Thin visual gap; enlarged hit area overlaps each pane by 7pt at the center.
-    CGFloat half = bounds.size.width / 2;
-    CGFloat gap=TADividerGap, paneWidth=(bounds.size.width-gap)/2;
+    CGFloat gap=TADividerGap, available=bounds.size.width-gap, leftWidth=available*splitRatio;
     for (NSInteger i = 0; i < 2; i++) {
-        panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * (paneWidth+gap), 0, paneWidth, bounds.size.height)];
+        CGFloat x=i==0 ? 0 : leftWidth+gap;
+        CGFloat width=i==0 ? leftWidth : available-leftWidth;
+        panes[i] = [[UIView alloc] initWithFrame:CGRectMake(x, 0, width, bounds.size.height)];
         panes[i].backgroundColor=UIColor.blackColor;
         panes[i].layer.cornerRadius=6;
         panes[i].clipsToBounds = YES; [root addSubview:panes[i]];
@@ -567,7 +602,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
         [choose[i] addTarget:self action:@selector(pick:) forControlEvents:UIControlEventTouchUpInside];
         choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
     }
-    gapTouchShield=[[UIControl alloc] initWithFrame:CGRectMake(paneWidth,0,TADividerGap,bounds.size.height)];
+    gapTouchShield=[[UIControl alloc] initWithFrame:CGRectMake(leftWidth,0,TADividerGap,bounds.size.height)];
     gapTouchShield.backgroundColor=UIColor.blackColor; gapTouchShield.opaque=YES;
     gapTouchShield.userInteractionEnabled=YES; [root addSubview:gapTouchShield];
     dividerHighlight=[UIView new]; dividerHighlight.backgroundColor=[UIColor colorWithRed:0 green:0.75 blue:0.95 alpha:1];
