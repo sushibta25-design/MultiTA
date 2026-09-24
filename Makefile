@@ -4,10 +4,10 @@ THEOS_PACKAGE_SCHEME = rootless
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = TAduo
+TWEAK_NAME = MultiTABeta
 
-TAduo_FILES = Tweak.xm
-TAduo_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
-TAduo_FRAMEWORKS = UIKit Foundation QuartzCore
+MultiTABeta_FILES = Tweak.xm
+MultiTABeta_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
+MultiTABeta_FRAMEWORKS = UIKit Foundation QuartzCore
 
 include $(THEOS_MAKE_PATH)/tweak.mk

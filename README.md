@@ -1,3 +1,15 @@
+# MultiTA Beta 0.28.0
+
+Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.28 — nhấn giữ cạnh phải rồi kéo để chia màn
+
+Khi một app đang mở toàn màn trên CarPlay (đã mở qua CarPlay ít nhất một lần), cạnh phải màn có tay nắm mỏng (dải chạm 16pt, bắt đầu dưới nút launcher góc trên). Nhấn giữ 0.3s rồi kéo sang trái: thanh ray tối màu có icon app đi kèm theo tay, app đang mở co về ô trái; tới 70/30 thì thành divider thường và tiếp tục theo tay trong khoảng 30–70% cho tới khi thả. Thả khi còn sát cạnh (>80%) thì huỷ, app giữ nguyên toàn màn. Thả ở chỗ khác thì chốt tỉ lệ rồi mới gắn app: ô trái là app đang mở, ô phải là app dùng gần nhất khác (hoặc bảng chọn app nếu chưa có).
+
+Bỏ trigger A→Home→B→Home của 0.27. Dải 16pt ở cạnh phải không nhận chạm của app khi tay nắm hiện. Chưa build/test trên máy.
+
+---
+
 # TAduo 0.21.0 — thử nghiệm 50/50
 
 Dựng lại từ cơ chế capture/foreground/presentation của Duophone 6.40 (commit a17518d8751314c8ca5b44170b73430ad866bbcf). Không kế thừa các patch safe-area, offset riêng Google Maps, giả lập callback, snapshot recovery hoặc sửa cây view của app.
@@ -191,3 +203,11 @@ Bỏ chia cố định 50/50. Divider rộng ~3% chiều ngang màn (số chẵn
 Trong lúc kéo chỉ di chuyển khung pane, app bị che bằng lớp tối có icon; resize scene (TAResize) chỉ chạy một lần khi thả tay, rồi bỏ lớp che sau 0.45s. Đổi trái ↔ phải lật tỉ lệ để mỗi app giữ nguyên kích thước (không resize). Tỉ lệ giữ nguyên qua Thu/Home, reset khi respring.
 
 Device gates: kéo chậm/nhanh, kéo quá 30/70, chạm đúp, preset trong menu, Swap sau khi đổi tỉ lệ, kéo trong lúc một ô đang attach, Maps/YouTube layout ở ô 30%.
+
+## 0.27 — chia màn tự động bằng thanh ray (A → Home → B → Home)
+
+Mở app A → Home → mở app B → Home (trong vòng 5 phút) thì tự vào trạng thái chờ chia: B chiếm gần hết màn, bên trái là thanh ray tối màu rộng ~12% (tối thiểu 56pt) có icon app A. Kéo ray sang phải: ray thu nhỏ dần thành divider thường, ô A lộ ra; tới 30% (3:7) thì thành chia màn thường và tiếp tục đi theo tay tới 70% cho tới khi thả. Thả trước ~20% thì ray bật về, B vẫn lớn. Thả sau đó thì chốt tỉ lệ (tối thiểu 3:7), A được gắn vào ô trái, B resize một lần. Chạm một lần vào ray = mở 3:7, chạm đúp = 5:5.
+
+Mỗi cặp Home chỉ kích hoạt một lần; Home liên tiếp từ cùng một app không kích hoạt; bỏ qua nếu B không còn scene sống. Bắt Home qua `kCARAppToHomeAnimationIdentifier` — cần log `HOME FROM` trên máy để xác nhận hook này bắn khi không chia màn.
+
+Device gates: A→Home→B→Home với Maps/YouTube cả hai thứ tự, kéo chậm qua 30%, thả trước 20%, chạm/chạm đúp ray, Home khi đang ở trạng thái ray, Thoát rồi lặp lại luồng.

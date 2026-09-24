@@ -1,4 +1,4 @@
-// TAduo 0.27.0: A→Home→B→Home opens a staged split (dark rail) that drags into 30–70%.
+// MultiTA 0.28.0 (beta, from TAduo): long-press the right screen edge and drag to split, 30–70%.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -14,17 +14,17 @@ static void TALog(NSString *format, ...) {
     // Never perform file IO on CarPlay's UI/event thread. O_APPEND also avoids
     // seek/write races between the host and native-app processes sharing a log.
     static dispatch_queue_t queue; static dispatch_once_t once;
-    dispatch_once(&once, ^{ queue=dispatch_queue_create("com.sushibta.taduo.log",DISPATCH_QUEUE_SERIAL); });
+    dispatch_once(&once, ^{ queue=dispatch_queue_create("com.sushibta.multita.beta.log",DISPATCH_QUEUE_SERIAL); });
     NSDate *time=NSDate.date;
     dispatch_async(queue, ^{
         @autoreleasepool {
-            NSString *path=[NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/TAduo-template.log" : @"/var/mobile/TAduo.log";
+            NSString *path=[NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [TAduo 0.25] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.28.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -84,11 +84,13 @@ static const CGFloat kTAMinRatio=0.30, kTAMaxRatio=0.70;
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static UIView *dividerView, *dividerGrip;
 static UIView *dragCovers[2];
-// Staged split: after A→Home→B→Home, B fills the display except a dark rail
-// on the left; dragging the rail right reveals A and becomes a normal split.
-static BOOL staged;
-static NSString *stagedBundle, *lastHomeBundle, *consumedHomeBundle;
-static NSTimeInterval lastHomeTime, consumedHomeTime;
+// Edge pull: while an app is open natively, a thin handle sits on the right
+// edge. Long-press it and drag left: a dark rail follows the finger, the open
+// app shrinks to the left pane and the companion app appears on the right.
+// Nothing is attached until the finger lifts; lifting early cancels cleanly.
+static BOOL staged;                       // edge pull in progress
+static NSString *pullCurrent, *pullCompanion, *nativeForeground;
+static UIWindow *edgeWindow;
 static UIImageView *railIcon;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
@@ -107,6 +109,7 @@ static void TAClearSlot(NSInteger slot, NSString *reason);
 static BOOL TAAttachPending(void) { return slots[0].attaching || slots[1].attaching; }
 static NSArray<NSString *> *TAClientBundles(void);
 static void TASetLayoutTarget(NSString *bundle, CGSize size);
+static void TAUpdateEdge(void);
 static UIWindowScene *TADashboard(void) {
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:UIWindowScene.class] && [s.session.persistentIdentifier containsString:@"DBDashboard-Car"])
@@ -301,7 +304,7 @@ static BOOL TANativeLaunch(NSString *bundle) {
         TALog(@"NATIVE REQUEST unsupported bundle=%@ owner=%@ info=%d",bundle,NSStringFromClass([nativeDashboard class]),info!=nil); return NO;
     }
     @try {
-        id request=((id(*)(id,SEL,id,id))objc_msgSend)(allocated,init,info,@{@"DBActivationSettingLaunchSource":@"TAduo"});
+        id request=((id(*)(id,SEL,id,id))objc_msgSend)(allocated,init,info,@{@"DBActivationSettingLaunchSource":@"MultiTA"});
         if (!request) return NO;
         TALog(@"NATIVE REQUEST bundle=%@ requestClass=%@",bundle,NSStringFromClass([request class]));
         ((void(*)(id,SEL,id,id))objc_msgSend)(nativeDashboard,launch,request,nil); TALog(@"NATIVE REQUEST RETURNED %@",bundle); return YES;
@@ -464,7 +467,8 @@ static void TALayoutAt(CGFloat cx, CGFloat dw) {
     CGFloat normal=TADividerWidth(size.width), rail=TARailWidth(size.width);
     CGFloat lw=cx-dw/2-inset;
     panes[0].hidden=lw<2; panes[0].frame=CGRectMake(inset,inset,MAX(1,lw),height);
-    CGFloat rx=cx+dw/2; panes[1].frame=CGRectMake(rx,inset,MAX(1,size.width-inset-rx),height);
+    CGFloat rx=cx+dw/2, rw=size.width-inset-rx;
+    panes[1].hidden=rw<2; panes[1].frame=CGRectMake(rx,inset,MAX(1,rw),height);
     dividerView.frame=CGRectMake(cx-dw/2,0,dw,size.height);
     dividerGrip.frame=CGRectMake((dw-4)/2,14,4,MAX(0,size.height-28));
     CGFloat look=rail>normal ? MIN(1,MAX(0,(dw-normal)/(rail-normal))) : 0;
@@ -478,19 +482,19 @@ static void TALayoutSplit(CGFloat ratio) {
     CGFloat width=splitWindow.bounds.size.width;
     TALayoutAt(round(width*ratio),TADividerWidth(width));
 }
-static CGFloat TAStagedRestRatio(void) {
+// Divider centre follows the finger. From the right edge down to 70% the
+// rail narrows into the normal divider; past that it is a normal 30–70% drag.
+static CGFloat TAPullRestRatio(void) {
     CGFloat width=MAX(1,splitWindow.bounds.size.width);
-    return TARailWidth(width)/2/width;
+    return 1-TARailWidth(width)/2/width;
 }
-// raw = divider centre / width. The rail narrows smoothly into the normal
-// divider while moving from rest to 30%; past 30% it is a normal drag.
-static void TALayoutStaged(CGFloat raw) {
+static void TALayoutPull(CGFloat raw) {
     if (!splitWindow) return;
-    CGFloat width=splitWindow.bounds.size.width, rest=TAStagedRestRatio();
+    CGFloat width=splitWindow.bounds.size.width, rest=TAPullRestRatio();
     CGFloat normal=TADividerWidth(width), rail=TARailWidth(width);
-    if (raw>=kTAMinRatio) { TALayoutAt(round(width*TAVisualRatio(raw)),normal); return; }
-    if (raw<rest) raw=rest-TARubber(rest-raw,0.02);
-    CGFloat t=MIN(1,MAX(0,(raw-rest)/(kTAMinRatio-rest)));
+    if (raw<=kTAMaxRatio) { TALayoutAt(round(width*TAVisualRatio(raw)),normal); return; }
+    if (raw>rest) raw=rest+TARubber(raw-rest,0.02);
+    CGFloat t=MIN(1,MAX(0,(rest-raw)/(rest-kTAMaxRatio)));
     TALayoutAt(round(width*raw),round(rail+(normal-rail)*t));
 }
 static void TAShowCovers(BOOL show) {
@@ -535,9 +539,10 @@ static void TAStop(NSString *reason) {
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
     dividerView = nil; dividerGrip = nil; railIcon = nil; dragCovers[0] = dragCovers[1] = nil;
-    staged = NO; stagedBundle = nil;
+    staged = NO; pullCurrent = nil; pullCompanion = nil;
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
     buttonWindow.hidden = order.count < 1;
+    TAUpdateEdge();
 }
 // Native Home releases presentations and restores geometry, but retains the
 // selected bundle IDs. Never retain old scene pointers as a resume snapshot.
@@ -582,9 +587,8 @@ static void TASuspend(NSString *reason) {
 - (void)dragDivider:(UIPanGestureRecognizer *)gesture;
 - (void)resetDivider:(UITapGestureRecognizer *)gesture;
 - (void)commitSplit:(CGFloat)ratio;
-- (void)tapDivider:(UITapGestureRecognizer *)gesture;
-- (void)finishStaged:(CGFloat)ratio;
-- (void)autoStage:(NSString *)left right:(NSString *)right attempt:(NSUInteger)attempt;
+- (void)edgePull:(UILongPressGestureRecognizer *)gesture;
+- (void)finishPull:(CGFloat)ratio;
 @end
 static TAControls *controls;
 static UIButton *TAButton(NSString *title, SEL action) {
@@ -700,13 +704,13 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [picker addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
     [splitWindow.rootViewController presentViewController:picker animated:YES completion:nil];
 }
-- (void)stop { TARememberPair(); TAStop(@"user"); lastHomeBundle=nil; }
+- (void)stop { TARememberPair(); TAStop(@"user"); }
 - (void)toggleActions { [self showActions]; }
 - (void)snapshot {
     floatingActions.hidden = NO;
     TALog(@"MANUAL SNAPSHOT REQUEST");
     TADumpDock();
-    notify_post("com.sushibta.taduo.snapshot");
+    notify_post("com.sushibta.multita.beta.snapshot");
 }
 - (void)restartSplit {
     if (!running || splitWindow.rootViewController.presentedViewController) return;
@@ -747,8 +751,6 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [dividerView addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragDivider:)]];
     UITapGestureRecognizer *reset = [[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(resetDivider:)];
     reset.numberOfTapsRequired = 2; [dividerView addGestureRecognizer:reset];
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(tapDivider:)];
-    [tap requireGestureRecognizerToFail:reset]; [dividerView addGestureRecognizer:tap];
     railIcon = [[UIImageView alloc] initWithFrame:CGRectZero];
     railIcon.layer.cornerRadius = 10; railIcon.clipsToBounds = YES; railIcon.alpha = 0; railIcon.userInteractionEnabled = NO;
     [dividerView addSubview:railIcon];
@@ -885,7 +887,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
 }
 - (void)dragDivider:(UIPanGestureRecognizer *)gesture {
     UIView *root=splitWindow.rootViewController.view;
-    if (!running || !root || !panes[0] || !panes[1]) return;
+    if (!running || staged || !root || !panes[0] || !panes[1]) return;
     if (gesture.state==UIGestureRecognizerStateBegan && root.window.rootViewController.presentedViewController) {
         gesture.enabled=NO; gesture.enabled=YES; return;
     }
@@ -893,74 +895,98 @@ static UIButton *TAButton(NSString *title, SEL action) {
     CGFloat raw=dragStartRatio+[gesture translationInView:root].x/width;
     switch (gesture.state) {
         case UIGestureRecognizerStateBegan:
-            dragStartRatio=staged ? TAStagedRestRatio() : splitRatio; floatingActions.hidden=NO;
+            dragStartRatio=splitRatio; floatingActions.hidden=NO;
             for (NSInteger i=0;i<2;i++) appPickers[i].hidden=YES;
             dividerGrip.backgroundColor=TACyan();
             TAShowCovers(YES);
             break;
         case UIGestureRecognizerStateChanged:
-            if (staged) TALayoutStaged(raw); else TALayoutSplit(TAVisualRatio(raw));
+            TALayoutSplit(TAVisualRatio(raw));
             break;
         case UIGestureRecognizerStateEnded: {
             // Short flick projection, then clamp to 30–70%.
             CGFloat projected=raw+[gesture velocityInView:root].x/width*0.08;
-            if (staged && projected<0.2) {
-                // Not pulled far enough: rail springs back, B stays large.
-                dividerGrip.backgroundColor=[UIColor colorWithWhite:0.38 alpha:1];
-                [UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
-                    TALayoutStaged(TAStagedRestRatio());
-                } completion:nil];
-                TAShowCovers(NO); break;
-            }
             [self commitSplit:projected];
             break;
         }
         default:
-            if (staged) { TALayoutStaged(TAStagedRestRatio()); TAShowCovers(NO); dividerGrip.backgroundColor=[UIColor colorWithWhite:0.38 alpha:1]; }
-            else [self commitSplit:splitRatio];
+            [self commitSplit:splitRatio];
             break;
     }
 }
 - (void)resetDivider:(UITapGestureRecognizer *)gesture {
     if (gesture.state==UIGestureRecognizerStateRecognized) [self commitSplit:0.5];
 }
-- (void)tapDivider:(UITapGestureRecognizer *)gesture {
-    if (gesture.state==UIGestureRecognizerStateRecognized && staged) [self finishStaged:kTAMinRatio];
-}
-- (void)finishStaged:(CGFloat)ratio {
-    if (!running || !staged) return;
-    NSString *bundle=[stagedBundle copy];
-    staged=NO; stagedBundle=nil;
-    dividerView.backgroundColor=TADividerColor();
-    choose[0].enabled=YES;
-    TALog(@"STAGED OPEN left=%@ ratio=%.3f",bundle,TAClampRatio(ratio));
-    [self commitSplit:ratio];
-    if (bundle.length && !slots[0]) [self replace:bundle slot:0];
-}
-// Called after the second Home. B (right) attaches immediately behind the
-// rail; A (left) attaches only when the user pulls the rail open.
-- (void)autoStage:(NSString *)left right:(NSString *)right attempt:(NSUInteger)attempt {
-    if (running || primeBundle || !dashboard || TADashboard()!=dashboard) return;
-    if (NSProcessInfo.processInfo.systemUptime-lastNativeTransition<0.6 && attempt<8) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(),^{ [self autoStage:left right:right attempt:attempt+1]; });
-        return;
+- (void)edgePull:(UILongPressGestureRecognizer *)gesture {
+    CGFloat x=[gesture locationInView:edgeWindow].x+edgeWindow.frame.origin.x;
+    switch (gesture.state) {
+        case UIGestureRecognizerStateBegan: {
+            NSString *current=[nativeForeground copy];
+            if (running || primeBundle || !current.length || !TADirectReady(records[current])) {
+                TALog(@"EDGE PULL rejected current=%@ running=%d ready=%d",current,running,TADirectReady(records[current]));
+                gesture.enabled=NO; gesture.enabled=YES; return;
+            }
+            // Companion: most recently used other app that can attach directly.
+            NSString *companion=nil;
+            for (NSString *bundle in [order reverseObjectEnumerator])
+                if (![bundle isEqual:current] && TADirectReady(records[bundle])) { companion=bundle; break; }
+            resumeBundles=nil; resumeCandidate=nil;
+            staged=YES; pullCurrent=current; pullCompanion=companion;
+            [self start];
+            if (!running) { staged=NO; pullCurrent=nil; pullCompanion=nil; return; }
+            floatingActions.hidden=YES;
+            dividerView.backgroundColor=TADividerColor();
+            railIcon.image=companion ? TAAppIcon(companion) : [UIImage systemImageNamed:@"plus.square.on.square"];
+            railIcon.tintColor=UIColor.lightGrayColor;
+            for (NSInteger i=0;i<2;i++) {
+                NSString *bundle=i==0 ? current : companion;
+                [choose[i] setTitle:bundle ? @"" : @"Chọn ứng dụng" forState:UIControlStateNormal];
+                [choose[i] setImage:bundle ? TAAppIcon(bundle) : nil forState:UIControlStateNormal];
+                choose[i].enabled=NO; choose[i].adjustsImageWhenDisabled=NO;
+            }
+            [splitWindow.rootViewController.view bringSubviewToFront:dividerView];
+            edgeWindow.alpha=0.02;   // keep the touch alive, hide the handle
+            TALayoutPull(x/MAX(1,splitWindow.bounds.size.width));
+            TALog(@"EDGE PULL begin current=%@ companion=%@",current,companion);
+            break;
+        }
+        case UIGestureRecognizerStateChanged:
+            if (staged) TALayoutPull(x/MAX(1,splitWindow.bounds.size.width));
+            break;
+        case UIGestureRecognizerStateEnded:
+            if (staged) [self finishPull:x/MAX(1,splitWindow.bounds.size.width)];
+            break;
+        default:
+            if (staged) [self finishPull:1];
+            break;
     }
-    if (!TADirectReady(records[right]) || (!records[left] && !catalog[left])) { TALog(@"STAGED SKIP left=%@ right=%@ (no live scene)",left,right); return; }
-    resumeBundles=nil; resumeCandidate=nil;
-    staged=YES; stagedBundle=[left copy];
-    [self start];
-    if (!running) { staged=NO; stagedBundle=nil; return; }
-    dividerView.backgroundColor=TADividerColor();
-    railIcon.image=TAAppIcon(left);
-    [choose[0] setTitle:@"" forState:UIControlStateNormal];
-    [choose[0] setImage:TAAppIcon(left) forState:UIControlStateNormal];
-    choose[0].enabled=NO; choose[0].adjustsImageWhenDisabled=NO;
-    TALayoutStaged(TAStagedRestRatio());
-    TALog(@"STAGED START left=%@ right=%@ rail=%.1f",left,right,dividerView.bounds.size.width);
-    [self attach:right slot:1];
+}
+- (void)finishPull:(CGFloat)ratio {
+    edgeWindow.alpha=1;
+    if (!running || !staged) return;
+    NSString *current=[pullCurrent copy], *companion=[pullCompanion copy];
+    staged=NO; pullCurrent=nil; pullCompanion=nil;
+    // Released near the edge: nothing was attached, just remove the overlay.
+    if (ratio>0.8) { TALog(@"EDGE PULL cancelled ratio=%.3f",ratio); TAStop(@"edge pull cancelled"); return; }
+    ratio=TAClampRatio(ratio);
+    if (fabs(ratio-0.5)<0.03) ratio=0.5;
+    splitRatio=ratio;
+    dividerView.backgroundColor=TADividerColor(); floatingActions.hidden=NO;
+    for (NSInteger i=0;i<2;i++) {
+        [choose[i] setImage:nil forState:UIControlStateNormal];
+        [choose[i] setTitle:@"Chạm để chọn ứng dụng" forState:UIControlStateNormal];
+        choose[i].enabled=YES;
+    }
+    [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+        TALayoutSplit(ratio);
+    } completion:nil];
+    TALog(@"EDGE PULL open ratio=%.3f left=%@ right=%@",ratio,current,companion);
+    TAUpdateEdge();
+    [self attach:current slot:0];
+    if (companion.length) [self replace:companion slot:1];
 }
 - (void)commitSplit:(CGFloat)ratio {
-    if (staged) { [self finishStaged:ratio]; return; }
+    if (staged) return;
     if (!running || !panes[0] || !panes[1]) return;
     ratio=TAClampRatio(ratio);
     if (fabs(ratio-0.5)<0.03) ratio=0.5;   // light magnet to the centre
@@ -1100,7 +1126,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
             if (!running || slots[slot]!=r || !r.frameCaptured) @throw [NSException exceptionWithName:@"SceneNotReady" reason:r.bundle userInfo:nil];
             SEL create=NSSelectorFromString(@"presentationViewWithIdentifier:");
             if (!TAObjectMethod(r.controller,create,1)) @throw [NSException exceptionWithName:@"MissingPresentationAPI" reason:r.bundle userInfo:nil];
-            r.presentationID=[NSString stringWithFormat:@"com.sushibta.taduo.%lu.%ld.%lu",(unsigned long)token,(long)slot,(unsigned long)request];
+            r.presentationID=[NSString stringWithFormat:@"com.sushibta.multita.beta.%lu.%ld.%lu",(unsigned long)token,(long)slot,(unsigned long)request];
             id view=((id(*)(id,SEL,id))objc_msgSend)(r.controller,create,r.presentationID);
             if (![view isKindOfClass:UIView.class] || ((UIView *)view).superview) @throw [NSException exceptionWithName:@"NotIndependent" reason:r.bundle userInfo:nil];
             r.presentation=view; r.presentation.transform=CGAffineTransformIdentity; r.presentation.frame=panes[slot].bounds;
@@ -1133,7 +1159,7 @@ static void TAInstallDock(UIView *dock) {
     if (mountedDock!=dock) { [dockButton removeFromSuperview]; mountedDock=dock; TALog(@"DOCK mounted class=%@ bounds=%@",NSStringFromClass(dock.class),NSStringFromCGRect(dock.bounds)); }
     if (!dockButton) {
         dockButton=TAButton(@"",@selector(enter)); [dockButton setImage:TAGlyph(0) forState:UIControlStateNormal];
-        dockButton.backgroundColor=UIColor.clearColor; dockButton.accessibilityLabel=@"TAduo — Chia màn hình";
+        dockButton.backgroundColor=UIColor.clearColor; dockButton.accessibilityLabel=@"MultiTA — Chia màn hình";
         [dockButton addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:controls action:@selector(holdDock:)]];
     }
     CGFloat height=dock.bounds.size.height, width=dock.bounds.size.width;
@@ -1203,7 +1229,7 @@ static void TACapture(id controller, id settings) {
 static void TAStartResponsivenessProbe(void) {
     static dispatch_source_t timer;
     if (timer) return;
-    dispatch_queue_t queue=dispatch_queue_create("com.sushibta.taduo.heartbeat",DISPATCH_QUEUE_SERIAL);
+    dispatch_queue_t queue=dispatch_queue_create("com.sushibta.multita.beta.heartbeat",DISPATCH_QUEUE_SERIAL);
     __block BOOL pending=NO;
     __block NSTimeInterval sent=0, lastReport=0;
     timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,queue);
@@ -1231,6 +1257,7 @@ static void TATick(void) {
         TAStop(@"display changed"); buttonWindow.hidden = YES; buttonWindow = nil;
         TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil;
         [records removeAllObjects]; [order removeAllObjects]; dashboard = s;
+        nativeForeground=nil; edgeWindow.hidden=YES; edgeWindow=nil;
         TALog(@"DISPLAY %@", s.session.persistentIdentifier);
     }
     if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
@@ -1247,7 +1274,7 @@ static void TATick(void) {
         buttonWindow.rootViewController.view.backgroundColor=UIColor.clearColor;
         UIButton *button=TAButton(@"",@selector(enter));
         button.tag=1818; [button setImage:TAGlyph(0) forState:UIControlStateNormal];
-        button.layer.cornerRadius=10; button.accessibilityLabel=@"TAduo 0.21 — Chia màn hình";
+        button.layer.cornerRadius=10; button.accessibilityLabel=@"MultiTA — Chia màn hình";
         [button addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:controls action:@selector(holdDock:)]];
         [buttonWindow.rootViewController.view addSubview:button];
     }
@@ -1266,12 +1293,13 @@ static void TATick(void) {
         // Full Dock trees are captured only by the explicit log action.
         if (attempts<4) attempts++;
     }
+    TAUpdateEdge();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ TATick(); });
 }
 // Darwin state channels carry only dimensions, never application content.
 // The host logs receipt as an observation, not proof of correct app layout.
 static NSString *TAChannel(NSString *bundle, NSString *kind) {
-    return [NSString stringWithFormat:@"com.sushibta.taduo.geometry.%@.%@", bundle, kind];
+    return [NSString stringWithFormat:@"com.sushibta.multita.beta.geometry.%@.%@", bundle, kind];
 }
 static NSArray<NSString *> *TAClientBundles(void) {
     return @[@"com.apple.Maps", @"com.google.Maps", @"com.google.ios.youtube", @"com.google.ios.youtubemusic", @"vn.vietmap.live"];
@@ -1737,7 +1765,7 @@ static void TAVisibleTransition(UIViewController *vc) {
 }
 static void TAListenSnapshots(void) {
     int token;
-    notify_register_dispatch("com.sushibta.taduo.snapshot", &token, dispatch_get_main_queue(), ^(__unused int delivered) {
+    notify_register_dispatch("com.sushibta.multita.beta.snapshot", &token, dispatch_get_main_queue(), ^(__unused int delivered) {
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if (![scene isKindOfClass:UIWindowScene.class]) continue;
             for (UIWindow *w in ((UIWindowScene *)scene).windows) TACaptureVisible(w, @"manual");
@@ -1883,24 +1911,33 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
     if (!running && self==mountedDock && !dockAdjusting) TAInstallDock(self);
 }
 %end
-// Two consecutive Home transitions from different apps (A, then B) within
-// 5 minutes start a staged split. Each pair of Homes is consumed once, and a
-// duplicate callback for the same app right after a trigger is ignored.
-static void TAHomeFrom(NSString *bundle) {
-    if (!TASelectableBundle(bundle)) return;
-    NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
-    if ([consumedHomeBundle isEqual:bundle] && now-consumedHomeTime<3) return;
-    NSString *previous=lastHomeBundle; NSTimeInterval previousTime=lastHomeTime;
-    lastHomeBundle=[bundle copy]; lastHomeTime=now;
-    TALog(@"HOME FROM %@ previous=%@",bundle,previous);
-    if (!previous || [previous isEqual:bundle] || now-previousTime>300) return;
-    lastHomeBundle=nil; consumedHomeBundle=[bundle copy]; consumedHomeTime=now;
-    NSUInteger token=generation;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.9*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-        if (generation==token) [controls autoStage:previous right:bundle attempt:0];
-    });
+// Show the edge handle only while a captured app is open natively.
+static void TAUpdateEdge(void) {
+    UIWindowScene *s=dashboard;
+    if (!s) { edgeWindow.hidden=YES; return; }
+    if (!edgeWindow || edgeWindow.windowScene!=s) {
+        edgeWindow.hidden=YES;
+        edgeWindow=[[UIWindow alloc] initWithWindowScene:s];
+        edgeWindow.windowLevel=UIWindowLevelAlert+75;
+        edgeWindow.rootViewController=[UIViewController new];
+        UIView *root=edgeWindow.rootViewController.view; root.backgroundColor=UIColor.clearColor;
+        UIView *pill=[[UIView alloc] initWithFrame:CGRectZero]; pill.tag=2828;
+        pill.backgroundColor=[UIColor colorWithWhite:0.85 alpha:0.55]; pill.layer.cornerRadius=2.5;
+        pill.layer.borderWidth=0.5; pill.layer.borderColor=[UIColor colorWithWhite:0 alpha:0.5].CGColor;
+        pill.userInteractionEnabled=NO; [root addSubview:pill];
+        UILongPressGestureRecognizer *hold=[[UILongPressGestureRecognizer alloc] initWithTarget:controls action:@selector(edgePull:)];
+        hold.minimumPressDuration=0.3; hold.allowableMovement=CGFLOAT_MAX;
+        [root addGestureRecognizer:hold];
+        root.accessibilityLabel=@"Giữ rồi kéo để chia màn";
+    }
+    CGRect b=s.coordinateSpace.bounds;
+    // Starts below the top-right fallback launcher.
+    edgeWindow.frame=CGRectMake(CGRectGetMaxX(b)-16,CGRectGetMinY(b)+48,16,MAX(40,b.size.height-56));
+    [edgeWindow.rootViewController.view viewWithTag:2828].frame=CGRectMake(16-5-3,(edgeWindow.bounds.size.height-44)/2,5,44);
+    BOOL show=staged || (!running && !primeBundle && nativeForeground.length && records[nativeForeground]);
+    edgeWindow.hidden=!show;
 }
-%hook DBApplicationSceneViewController
+%hook DBApplicationSceneViewController%hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
     BOOL external=!ownCall;
     lastNativeTransition=NSProcessInfo.processInfo.systemUptime;
@@ -1915,6 +1952,7 @@ static void TAHomeFrom(NSString *bundle) {
     TALog(@"FOREGROUND NATIVE RETURNED bundle=%@ own=%d",bundle,ownCall);
     TARecord *foregroundRecord=records[bundle ?: @""];
     if (foregroundRecord.controller==self) foregroundRecord.backgrounded=NO;
+    if (external && !running && bundle) { nativeForeground=bundle; dispatch_async(dispatch_get_main_queue(), ^{ TAUpdateEdge(); }); }
     // Retry once after native foreground has established its scene ID. No
     // fabricated callback or repeated foreground requests.
     if (external && [settings isKindOfClass:NSDictionary.class]) {
@@ -1939,6 +1977,7 @@ static void TAHomeFrom(NSString *bundle) {
     if (r.controller==self) r.backgrounded=YES;
     lastNativeTransition=NSProcessInfo.processInfo.systemUptime;
     TALog(@"BACKGROUND NATIVE BEGIN bundle=%@ owned=%d",r.bundle,owned);
+    if (!ownCall && !running && [TABundle(self) isEqual:nativeForeground]) { nativeForeground=nil; TAUpdateEdge(); }
     %orig;
     lastNativeTransition=NSProcessInfo.processInfo.systemUptime;
     TALog(@"BACKGROUND NATIVE RETURNED bundle=%@ owned=%d",r.bundle,owned);
@@ -1953,7 +1992,7 @@ static void TAHomeFrom(NSString *bundle) {
     });
 }
 - (id)presentationViewWithIdentifier:(id)identifier {
-    if (!ownCall && !running && !primeBundle && [identifier isEqual:@"kCARAppToHomeAnimationIdentifier"]) TAHomeFrom(TABundle(self));
+    if (!ownCall && !running && !staged && [identifier isEqual:@"kCARAppToHomeAnimationIdentifier"]) { nativeForeground=nil; TAUpdateEdge(); }
     if (!ownCall && running && [identifier isEqual:@"kCARAppToHomeAnimationIdentifier"]) {
         if (TAAttachPending()) TALog(@"HOME TRANSITION during attach (session retained)");
         else TALog(@"HOME TRANSITION retain split bundle=%@",TABundle(self));

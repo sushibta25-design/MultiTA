@@ -1,10 +1,10 @@
-Package: com.sushibta.taduo
-Name: TAduo
-Version: 0.26.0
+Package: com.sushibta.multita.beta
+Name: MultiTA Beta
+Version: 0.28.0
 Architecture: iphoneos-arm64
-Description: Experimental CarPlay split with draggable divider (30–70%) and native geometry requests.
+Description: MultiTA beta: CarPlay split screen, long-press the right edge and drag to split (30–70%).
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
 Depends: mobilesubstrate, firmware (>= 15.0)
-Conflicts: com.sushibta.duophone
+Conflicts: com.sushibta.multita, com.sushibta.taduo, com.sushibta.duophone
