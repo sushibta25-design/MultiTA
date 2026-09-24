@@ -1937,7 +1937,7 @@ static void TAUpdateEdge(void) {
     BOOL show=staged || (!running && !primeBundle && nativeForeground.length && records[nativeForeground]);
     edgeWindow.hidden=!show;
 }
-%hook DBApplicationSceneViewController%hook DBApplicationSceneViewController
+%hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
     BOOL external=!ownCall;
     lastNativeTransition=NSProcessInfo.processInfo.systemUptime;
