@@ -1,4 +1,4 @@
-// MultiTA 0.28.0 (beta, from TAduo): long-press the right screen edge and drag to split, 30–70%.
+// MultiTA 0.29.0 (beta, from TAduo): edge pull to split; drag the divider back to an edge to close.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -24,7 +24,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.28.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.29.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -452,9 +452,12 @@ static CGFloat TAClampRatio(CGFloat r) { return MIN(kTAMaxRatio,MAX(kTAMinRatio,
 // UIScrollView-style resistance past the 30/70 limits: the divider keeps
 // following the finger a little, then springs back to the limit on release.
 static CGFloat TARubber(CGFloat over, CGFloat limit) { return (1.0-1.0/(over*0.55/limit+1.0))*limit; }
+// Past 30/70 the divider still follows at ~55% speed so it can be pulled
+// toward an edge; releasing beyond kTACollapse closes the split.
+static const CGFloat kTACollapse=0.88;
 static CGFloat TAVisualRatio(CGFloat raw) {
-    if (raw<kTAMinRatio) return kTAMinRatio-TARubber(kTAMinRatio-raw,0.08);
-    if (raw>kTAMaxRatio) return kTAMaxRatio+TARubber(raw-kTAMaxRatio,0.08);
+    if (raw<kTAMinRatio) return MAX(0.03,kTAMinRatio-(kTAMinRatio-raw)*0.55);
+    if (raw>kTAMaxRatio) return MIN(0.97,kTAMaxRatio+(raw-kTAMaxRatio)*0.55);
     return raw;
 }
 static CGFloat TARailWidth(CGFloat width) { return MAX(56,round(width*0.12)); }
@@ -589,6 +592,7 @@ static void TASuspend(NSString *reason) {
 - (void)commitSplit:(CGFloat)ratio;
 - (void)edgePull:(UILongPressGestureRecognizer *)gesture;
 - (void)finishPull:(CGFloat)ratio;
+- (void)collapseTo:(NSInteger)winner;
 @end
 static TAControls *controls;
 static UIButton *TAButton(NSString *title, SEL action) {
@@ -902,10 +906,14 @@ static UIButton *TAButton(NSString *title, SEL action) {
             break;
         case UIGestureRecognizerStateChanged:
             TALayoutSplit(TAVisualRatio(raw));
+            // Orange grip = releasing here closes the split.
+            dividerGrip.backgroundColor=(raw>=kTACollapse || raw<=1-kTACollapse) ? TAOrange() : TACyan();
             break;
         case UIGestureRecognizerStateEnded: {
             // Short flick projection, then clamp to 30–70%.
             CGFloat projected=raw+[gesture velocityInView:root].x/width*0.08;
+            if (projected>=kTACollapse) { [self collapseTo:0]; break; }
+            if (projected<=1-kTACollapse) { [self collapseTo:1]; break; }
             [self commitSplit:projected];
             break;
         }
@@ -984,6 +992,32 @@ static UIButton *TAButton(NSString *title, SEL action) {
     TAUpdateEdge();
     [self attach:current slot:0];
     if (companion.length) [self replace:companion slot:1];
+}
+// Divider dragged to an edge: the pane that keeps the screen returns to
+// native full screen; the other app goes back to the background as normal.
+- (void)collapseTo:(NSInteger)winner {
+    if (!running || staged || winner<0 || winner>1) return;
+    NSString *keep=[slots[winner].bundle copy];
+    TALog(@"COLLAPSE keep=%@ side=%ld",keep,(long)winner);
+    CGFloat width=splitWindow.bounds.size.width;
+    NSUInteger token=generation;
+    TAShowCovers(YES);
+    [UIView animateWithDuration:0.22 animations:^{
+        TALayoutAt(winner==0 ? width+20 : -20,TADividerWidth(width));
+    } completion:^(__unused BOOL finished) {
+        if (!running || generation!=token) return;
+        // Keep the winner foreground instead of restoring its old background state.
+        if (slots[winner]) slots[winner].restoreBackground=NO;
+        TARememberPair();
+        TAStop(@"collapse");
+        if (keep.length && ![keep isEqual:nativeForeground]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (running || primeBundle) return;
+                BOOL ok=TANativeLaunch(keep);
+                TALog(@"COLLAPSE native launch %@ ok=%d",keep,ok);
+            });
+        }
+    }];
 }
 - (void)commitSplit:(CGFloat)ratio {
     if (staged) return;

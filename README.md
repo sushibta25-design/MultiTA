@@ -1,6 +1,10 @@
-# MultiTA Beta 0.28.0
+# MultiTA Beta 0.29.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.29 — kéo divider về sát cạnh để thu chia màn
+
+Ngoài khoảng 30–70% divider vẫn đi theo tay (chậm lại ~55%) để có thể kéo về phía cạnh. Qua mốc 88% (hoặc 12%) vạch grip đổi sang màu cam: thả tay lúc đó là thoát chia màn. App ở ô còn lại (ô lớn) trở về toàn màn native; nếu đó không phải app đang mở native trước khi chia thì mở nó qua Dashboard. Thả trước mốc cam thì bật về 30/70 như cũ. Log: COLLAPSE.
 
 ## 0.28 — nhấn giữ cạnh phải rồi kéo để chia màn
 
