@@ -1,4 +1,4 @@
-name: Build DuoPhone
+name: Build MultiTA Beta
 
 on:
   workflow_dispatch:
@@ -36,5 +36,5 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: DuoPhone-DEB
+          name: MultiTA-Beta-DEB
           path: packages/*.deb
