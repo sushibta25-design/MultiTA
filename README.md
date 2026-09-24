@@ -1,6 +1,12 @@
-# MultiTA Beta 0.30.0
+# MultiTA Beta 0.31.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.31 — đếm chạm tay nắm, bàn phím tìm kiếm toàn màn
+
+Tay nắm dùng một bộ đếm chạm với khoảng chờ 0.6s thay cho nhận dạng chạm đúp của UIKit (màn xe có độ trễ nên chạm đúp hay trượt). Chạm lần thứ 2 là vào ngay chế độ đổi app; chạm 1 lần thì sau 0.6s mới mở menu Tác vụ. Log: HANDLE TAP, CHANGE MODE.
+
+Khi một app dạng template (Podcast, Nhạc, YouTube Music, Google Maps…) mở màn tìm kiếm trong một ô, ô đó tạm chiếm toàn màn để dùng bàn phím CarPlay đầy đủ; ô kia, divider và tay nắm ẩn đi. Bấm Hủy (hoặc chọn kết quả làm màn tìm kiếm đóng lại) thì thoát tìm kiếm luôn và trả về chia màn với tỉ lệ cũ — không quay lại bàn phím nhỏ trong ô. Nhận biết màn tìm kiếm theo tên lớp view controller chứa "Search" và "Template" trong CarPlayTemplateUIHost (chưa xác minh trên máy; log SEARCH VC liệt kê tên lớp thật). Không áp dụng cho app tự vẽ bàn phím như YouTube. Log: SEARCH SIGNAL (template log), SEARCH open/closed, SEARCH EXPAND/RESTORE.
 
 ## 0.30 — tay nắm mới, tự ẩn, chạm hai lần để đổi app
 
