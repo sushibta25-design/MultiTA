@@ -1,4 +1,4 @@
-// MultiTA 0.29.0 (beta, from TAduo): edge pull to split; drag the divider back to an edge to close.
+// MultiTA 0.30.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle with auto-hide, double-tap change mode.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -24,7 +24,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.29.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.30.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -92,6 +92,14 @@ static BOOL staged;                       // edge pull in progress
 static NSString *pullCurrent, *pullCompanion, *nativeForeground;
 static UIWindow *edgeWindow;
 static UIImageView *railIcon;
+// Capsule handle (visual part fades after 3s; its touch area stays live).
+static UIView *lockVisual;
+static NSUInteger chromeToken;
+static BOOL chromeHold;
+// Change mode: double/triple tap on the handle shows a change badge on both panes.
+static UIView *changeOverlays[2];
+static NSTimeInterval changeModeSince;
+static const CGFloat kTAPaneGap=4;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSArray<NSString *> *resumeBundles;
@@ -355,16 +363,35 @@ static UIImage *TAAppIcon(NSString *bundle) {
     if (image) cache[bundle]=image;
     return image;
 }
-static void TARevealActions(void) {
+static void TAShowChrome(void) {
     if (!running || !floatingActions) return;
     floatingActions.hidden=NO;
+    NSUInteger token=++chromeToken;
+    [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionBeginFromCurrentState|UIViewAnimationOptionAllowUserInteraction animations:^{
+        lockVisual.alpha=1; dividerGrip.alpha=1;
+    } completion:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+        if (!running || chromeHold || token!=chromeToken) return;
+        // Only the visuals fade. Hit areas remain active (alpha of the
+        // touch containers is untouched), so a hidden handle still works.
+        [UIView animateWithDuration:0.35 delay:0 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+            lockVisual.alpha=0; if (!staged) dividerGrip.alpha=0;
+        } completion:nil];
+    });
 }
+static void TARevealActions(void) { TAShowChrome(); }
 @interface TASplitWindow : UIWindow
 @end
 @implementation TASplitWindow
 - (void)sendEvent:(UIEvent *)event {
     [super sendEvent:event];
-    if (event.type==UIEventTypeTouches && event.allTouches.count) TARevealActions();
+    // Reveal the handle only for touches that begin near the divider, so
+    // normal use of either app lets it stay hidden.
+    if (event.type!=UIEventTypeTouches || !dividerView) return;
+    for (UITouch *touch in event.allTouches) {
+        if (touch.phase!=UITouchPhaseBegan) continue;
+        if (fabs([touch locationInView:self].x-dividerView.center.x)<48) { TAShowChrome(); break; }
+    }
 }
 @end
 @interface TAAppTile : UIButton
@@ -461,22 +488,26 @@ static CGFloat TAVisualRatio(CGFloat raw) {
     return raw;
 }
 static CGFloat TARailWidth(CGFloat width) { return MAX(56,round(width*0.12)); }
-static UIColor *TADividerColor(void) { return staged ? [UIColor colorWithWhite:0.035 alpha:1] : [UIColor colorWithWhite:0.1 alpha:1]; }
+static UIColor *TADividerColor(void) { return staged ? [UIColor colorWithWhite:0.035 alpha:1] : UIColor.clearColor; }
 // Only moves containers. Hosted presentations keep their committed frame
 // until TACommitSplit, so no scene resize happens per touch-move.
 static void TALayoutAt(CGFloat cx, CGFloat dw) {
     if (!splitWindow || !panes[0] || !panes[1]) return;
     CGSize size=splitWindow.bounds.size; CGFloat inset=3, height=size.height-2*inset;
     CGFloat normal=TADividerWidth(size.width), rail=TARailWidth(size.width);
-    CGFloat lw=cx-dw/2-inset;
+    // Visual gap between panes is only 4pt; the divider view keeps its full
+    // width (plus 6pt each side) as touch area and overlaps the pane edges.
+    // While the pull rail is wider than normal, the gap grows with it.
+    CGFloat gap=dw>normal ? kTAPaneGap+(dw-normal) : kTAPaneGap;
+    CGFloat lw=cx-gap/2-inset;
     panes[0].hidden=lw<2; panes[0].frame=CGRectMake(inset,inset,MAX(1,lw),height);
-    CGFloat rx=cx+dw/2, rw=size.width-inset-rx;
+    CGFloat rx=cx+gap/2, rw=size.width-inset-rx;
     panes[1].hidden=rw<2; panes[1].frame=CGRectMake(rx,inset,MAX(1,rw),height);
     dividerView.frame=CGRectMake(cx-dw/2,0,dw,size.height);
-    dividerGrip.frame=CGRectMake((dw-4)/2,14,4,MAX(0,size.height-28));
+    dividerGrip.frame=CGRectMake((dw-2)/2,18,2,MAX(0,size.height-36));
     CGFloat look=rail>normal ? MIN(1,MAX(0,(dw-normal)/(rail-normal))) : 0;
     railIcon.frame=CGRectMake((dw-40)/2,14,40,40); railIcon.alpha=staged ? look : 0;
-    dividerGrip.alpha=1-look;
+    dividerGrip.hidden=look>0.5;
     if (floatingActions) floatingActions.center=CGPointMake(cx,floatingActions.center.y);
     for (NSInteger i=0;i<2;i++) { choose[i].frame=panes[i].bounds; dragCovers[i].frame=panes[i].bounds; }
 }
@@ -543,8 +574,9 @@ static void TAStop(NSString *reason) {
     ownCall = previous;
     dividerView = nil; dividerGrip = nil; railIcon = nil; dragCovers[0] = dragCovers[1] = nil;
     staged = NO; pullCurrent = nil; pullCompanion = nil;
+    lockVisual = nil; chromeHold = NO; ++chromeToken; changeOverlays[0] = changeOverlays[1] = nil;
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
-    buttonWindow.hidden = order.count < 1;
+    buttonWindow.hidden = YES;   // square launcher retired; edge pull is the entry
     TAUpdateEdge();
 }
 // Native Home releases presentations and restores geometry, but retains the
@@ -555,7 +587,7 @@ static void TASuspend(NSString *reason) {
     TAStop(reason);
     resumeBundles=selection;
     TALog(@"SESSION SAVED left=%@ right=%@",selection[0],selection[1]);
-    buttonWindow.hidden=NO;
+    buttonWindow.hidden=YES;
 }
 @interface TAControls : NSObject
 - (void)start;
@@ -593,6 +625,10 @@ static void TASuspend(NSString *reason) {
 - (void)edgePull:(UILongPressGestureRecognizer *)gesture;
 - (void)finishPull:(CGFloat)ratio;
 - (void)collapseTo:(NSInteger)winner;
+- (void)lockTap:(UITapGestureRecognizer *)gesture;
+- (void)lockDoubleTap:(UITapGestureRecognizer *)gesture;
+- (void)changeTap:(UITapGestureRecognizer *)gesture;
+- (void)exitChangeMode;
 @end
 static TAControls *controls;
 static UIButton *TAButton(NSString *title, SEL action) {
@@ -749,8 +785,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
     dividerView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1];
     dividerView.accessibilityLabel = @"Thanh chia màn hình";
     dividerGrip = [[UIView alloc] initWithFrame:CGRectZero];
-    dividerGrip.backgroundColor = [UIColor colorWithWhite:0.38 alpha:1];
-    dividerGrip.layer.cornerRadius = 2; dividerGrip.userInteractionEnabled = NO;
+    dividerGrip.backgroundColor = [UIColor colorWithWhite:1 alpha:0.35];
+    dividerGrip.layer.cornerRadius = 1; dividerGrip.userInteractionEnabled = NO;
     [dividerView addSubview:dividerGrip]; [root addSubview:dividerView];
     [dividerView addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragDivider:)]];
     UITapGestureRecognizer *reset = [[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(resetDivider:)];
@@ -759,20 +795,32 @@ static UIButton *TAButton(NSString *title, SEL action) {
     railIcon.layer.cornerRadius = 10; railIcon.clipsToBounds = YES; railIcon.alpha = 0; railIcon.userInteractionEnabled = NO;
     [dividerView addSubview:railIcon];
 
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-22,MAX(4,(bounds.size.height-44)/2),44,44)];
-    floatingActions.backgroundColor=[UIColor colorWithWhite:0.04 alpha:0.96];
-    floatingActions.layer.cornerRadius=12;
-    floatingActions.layer.borderWidth=1;
-    floatingActions.layer.borderColor=[UIColor colorWithWhite:0.5 alpha:1].CGColor;
-    UIButton *more=TAButton(@"…",@selector(showActions));
-    more.frame=floatingActions.bounds; more.backgroundColor=UIColor.clearColor;
-    more.titleLabel.font=[UIFont boldSystemFontOfSize:28];
-    more.accessibilityLabel=@"Tác vụ chia màn hình";
-    [floatingActions addSubview:more]; [root addSubview:floatingActions];
-    // The ••• button is also a drag handle: tap = menu, drag = move divider.
+    // Touch container: 56x88 transparent, larger than the visible capsule.
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-28,MAX(4,(bounds.size.height-88)/2),56,88)];
+    floatingActions.backgroundColor=UIColor.clearColor;
+    floatingActions.isAccessibilityElement=YES;
+    floatingActions.accessibilityLabel=@"Tay nắm chia màn: chạm mở tác vụ, chạm hai lần để đổi app, kéo để đổi tỉ lệ";
+    // Visible part: 22x60 dark frosted capsule with hairline and three dots.
+    lockVisual=[[UIView alloc] initWithFrame:CGRectMake(17,14,22,60)];
+    lockVisual.userInteractionEnabled=NO; lockVisual.layer.cornerRadius=11; lockVisual.clipsToBounds=YES;
+    lockVisual.layer.borderWidth=0.5; lockVisual.layer.borderColor=[UIColor colorWithWhite:1 alpha:0.28].CGColor;
+    UIVisualEffectView *blur=[[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
+    blur.frame=lockVisual.bounds; [lockVisual addSubview:blur];
+    UIView *tint=[[UIView alloc] initWithFrame:lockVisual.bounds]; tint.backgroundColor=[UIColor colorWithWhite:0.08 alpha:0.55]; [lockVisual addSubview:tint];
+    for (NSInteger d=0;d<3;d++) {
+        UIView *dot=[[UIView alloc] initWithFrame:CGRectMake(8.5,19+d*9,5,5)];
+        dot.backgroundColor=[UIColor colorWithWhite:1 alpha:0.9]; dot.layer.cornerRadius=2.5; [lockVisual addSubview:dot];
+    }
+    [floatingActions addSubview:lockVisual]; [root addSubview:floatingActions];
+    // Tap = menu, double (or triple) tap = change mode, drag = move divider.
+    UITapGestureRecognizer *lockDouble=[[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(lockDoubleTap:)];
+    lockDouble.numberOfTapsRequired=2; [floatingActions addGestureRecognizer:lockDouble];
+    UITapGestureRecognizer *lockSingle=[[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(lockTap:)];
+    [lockSingle requireGestureRecognizerToFail:lockDouble]; [floatingActions addGestureRecognizer:lockSingle];
     [floatingActions addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragDivider:)]];
     TALayoutSplit(splitRatio);
     buttonWindow.hidden = YES; splitWindow.hidden = NO;
+    TAShowChrome();
     TALog(@"START display=%@ ratio=%.2f left=%@ right=%@", NSStringFromCGRect(bounds), splitRatio, NSStringFromCGRect(panes[0].bounds), NSStringFromCGRect(panes[1].bounds));
 }
 - (void)holdDock:(UILongPressGestureRecognizer *)gesture {
@@ -899,7 +947,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     CGFloat raw=dragStartRatio+[gesture translationInView:root].x/width;
     switch (gesture.state) {
         case UIGestureRecognizerStateBegan:
-            dragStartRatio=splitRatio; floatingActions.hidden=NO;
+            dragStartRatio=splitRatio; floatingActions.hidden=NO; chromeHold=YES; TAShowChrome(); [self exitChangeMode];
             for (NSInteger i=0;i<2;i++) appPickers[i].hidden=YES;
             dividerGrip.backgroundColor=TACyan();
             TAShowCovers(YES);
@@ -912,12 +960,14 @@ static UIButton *TAButton(NSString *title, SEL action) {
         case UIGestureRecognizerStateEnded: {
             // Short flick projection, then clamp to 30–70%.
             CGFloat projected=raw+[gesture velocityInView:root].x/width*0.08;
+            chromeHold=NO; TAShowChrome();
             if (projected>=kTACollapse) { [self collapseTo:0]; break; }
             if (projected<=1-kTACollapse) { [self collapseTo:1]; break; }
             [self commitSplit:projected];
             break;
         }
         default:
+            chromeHold=NO; TAShowChrome();
             [self commitSplit:splitRatio];
             break;
     }
@@ -1019,12 +1069,69 @@ static UIButton *TAButton(NSString *title, SEL action) {
         }
     }];
 }
+- (void)lockTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state!=UIGestureRecognizerStateRecognized || !running || staged) return;
+    TAShowChrome();
+    // Third tap of a triple tap arrives as a single tap: ignore it.
+    if (NSProcessInfo.processInfo.systemUptime-changeModeSince<0.8) return;
+    if (changeOverlays[0] || changeOverlays[1]) { [self exitChangeMode]; return; }
+    [self showActions];
+}
+- (void)lockDoubleTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state!=UIGestureRecognizerStateRecognized || !running || staged) return;
+    if (splitWindow.rootViewController.presentedViewController) return;
+    TAShowChrome();
+    [self exitChangeMode];
+    changeModeSince=NSProcessInfo.processInfo.systemUptime;
+    for (NSInteger i=0;i<2;i++) {
+        if (!panes[i]) continue;
+        [appPickers[i] removeFromSuperview]; appPickers[i]=nil;
+        UIView *overlay=[[UIView alloc] initWithFrame:panes[i].bounds];
+        overlay.tag=i; overlay.backgroundColor=[UIColor colorWithWhite:0 alpha:0.5]; overlay.alpha=0;
+        overlay.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+        UIView *badge=[[UIView alloc] initWithFrame:CGRectMake(0,0,96,96)];
+        badge.userInteractionEnabled=NO; badge.layer.cornerRadius=24; badge.clipsToBounds=YES;
+        badge.layer.borderWidth=0.5; badge.layer.borderColor=[UIColor colorWithWhite:1 alpha:0.25].CGColor;
+        UIVisualEffectView *blur=[[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialDark]];
+        blur.frame=badge.bounds; [badge addSubview:blur];
+        UIImageView *icon=[[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.triangle.2.circlepath" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:30 weight:UIImageSymbolWeightSemibold]]];
+        icon.tintColor=TACyan(); icon.contentMode=UIViewContentModeCenter; icon.frame=CGRectMake(0,12,96,46); [badge addSubview:icon];
+        UILabel *label=[[UILabel alloc] initWithFrame:CGRectMake(0,60,96,22)];
+        label.text=@"Chạm"; label.textAlignment=NSTextAlignmentCenter; label.textColor=UIColor.whiteColor;
+        label.font=[UIFont systemFontOfSize:15 weight:UIFontWeightSemibold]; [badge addSubview:label];
+        badge.center=CGPointMake(CGRectGetMidX(overlay.bounds),CGRectGetMidY(overlay.bounds));
+        badge.autoresizingMask=UIViewAutoresizingFlexibleLeftMargin|UIViewAutoresizingFlexibleRightMargin|UIViewAutoresizingFlexibleTopMargin|UIViewAutoresizingFlexibleBottomMargin;
+        [overlay addSubview:badge];
+        [overlay addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(changeTap:)]];
+        [panes[i] addSubview:overlay]; changeOverlays[i]=overlay;
+        [UIView animateWithDuration:0.18 animations:^{ overlay.alpha=1; }];
+    }
+    TALog(@"CHANGE MODE on");
+    NSTimeInterval since=changeModeSince;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,6*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+        if (running && changeModeSince==since) [self exitChangeMode];
+    });
+}
+- (void)changeTap:(UITapGestureRecognizer *)gesture {
+    NSInteger slot=gesture.view.tag;
+    if (gesture.state!=UIGestureRecognizerStateRecognized || !running || slot<0 || slot>1) return;
+    [self exitChangeMode];
+    TALog(@"CHANGE MODE pick side=%ld",(long)slot);
+    [self pick:choose[slot]];
+}
+- (void)exitChangeMode {
+    changeModeSince=changeOverlays[0] || changeOverlays[1] ? 0 : changeModeSince;
+    for (NSInteger i=0;i<2;i++) {
+        UIView *overlay=changeOverlays[i]; changeOverlays[i]=nil;
+        [UIView animateWithDuration:0.15 animations:^{ overlay.alpha=0; } completion:^(__unused BOOL f){ [overlay removeFromSuperview]; }];
+    }
+}
 - (void)commitSplit:(CGFloat)ratio {
     if (staged) return;
     if (!running || !panes[0] || !panes[1]) return;
     ratio=TAClampRatio(ratio);
     if (fabs(ratio-0.5)<0.03) ratio=0.5;   // light magnet to the centre
-    splitRatio=ratio; dividerGrip.backgroundColor=[UIColor colorWithWhite:0.38 alpha:1];
+    splitRatio=ratio; dividerGrip.backgroundColor=[UIColor colorWithWhite:1 alpha:0.35];
     BOOL needsCover=NO;
     for (NSInteger i=0;i<2;i++) if (slots[i].presentation) needsCover=YES;
     if (needsCover) TAShowCovers(YES);
@@ -1258,7 +1365,6 @@ static void TACapture(id controller, id settings) {
     }
     if (resumeBundles && (launch || [TAClientBundles() containsObject:bundle])) resumeCandidate=bundle;
     TALog(@"CAPTURE %@ sid=%@ launchSource=%d",bundle,sid,launch);
-    if (!running) buttonWindow.hidden=NO;
 }
 static void TAStartResponsivenessProbe(void) {
     static dispatch_source_t timer;
@@ -1316,7 +1422,7 @@ static void TATick(void) {
         CGRect bounds=s.coordinateSpace.bounds;
         buttonWindow.frame=CGRectMake(CGRectGetMaxX(bounds)-42,CGRectGetMinY(bounds)+4,38,38);
         [buttonWindow.rootViewController.view viewWithTag:1818].frame=buttonWindow.bounds;
-        BOOL fallback=!running && !TADockButtonVisible();
+        BOOL fallback=NO;   // square launcher hidden by request
         buttonWindow.hidden=!fallback;
         static __weak UIWindowScene *lastScene;
         static BOOL lastFallback;
@@ -1966,7 +2072,7 @@ static void TAUpdateEdge(void) {
     }
     CGRect b=s.coordinateSpace.bounds;
     // Starts below the top-right fallback launcher.
-    edgeWindow.frame=CGRectMake(CGRectGetMaxX(b)-16,CGRectGetMinY(b)+48,16,MAX(40,b.size.height-56));
+    edgeWindow.frame=CGRectMake(CGRectGetMaxX(b)-16,CGRectGetMinY(b)+8,16,MAX(40,b.size.height-16));
     [edgeWindow.rootViewController.view viewWithTag:2828].frame=CGRectMake(16-5-3,(edgeWindow.bounds.size.height-44)/2,5,44);
     BOOL show=staged || (!running && !primeBundle && nativeForeground.length && records[nativeForeground]);
     edgeWindow.hidden=!show;

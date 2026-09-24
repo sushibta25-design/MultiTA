@@ -1,6 +1,12 @@
-# MultiTA Beta 0.29.0
+# MultiTA Beta 0.30.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.30 — tay nắm mới, tự ẩn, chạm hai lần để đổi app
+
+Hai ô chỉ cách nhau 4pt; vùng chạm của divider giữ nguyên (rộng ~16pt + 6pt mỗi bên, đè lên mép hai ô). Nền divider trong suốt, vạch mảnh 2pt. Nút ••• thay bằng tay nắm dạng viên thuốc 22×60 nền kính mờ tối, viền mảnh, ba chấm; vùng chạm 56×88. Tay nắm và vạch divider tự mờ sau 3 giây; vùng chạm vẫn hoạt động khi đã ẩn. Chạm gần divider (±48pt) thì hiện lại; chạm trong app thì không.
+
+Chạm 1 lần vào tay nắm: menu Tác vụ (trễ ~0.3s để chờ xem có phải chạm đúp). Chạm 2 hoặc 3 lần: hai ô hiện biểu tượng vòng xoay + chữ "Chạm"; chạm ô nào thì mở bảng chọn app cho ô đó (app đã mở đứng đầu). Tự tắt sau 6 giây hoặc chạm tay nắm lần nữa. Ẩn hẳn nút vuông cyan/cam góc trên phải; dải kéo cạnh phải giờ chạy gần hết chiều cao. Log: CHANGE MODE.
 
 ## 0.29 — kéo divider về sát cạnh để thu chia màn
 
