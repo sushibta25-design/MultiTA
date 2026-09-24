@@ -1,6 +1,16 @@
-# MultiTA Beta 0.31.1
+# MultiTA Beta 0.32.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.32 — ưu tiên app dẫn đường/giải trí, giao diện chọn app và trang Tác vụ mới
+
+Bảng chọn app sắp theo nhóm: dẫn đường trước, rồi giải trí (nhạc, video, podcast, radio), rồi app khác; trong mỗi nhóm app dùng gần nhất đứng trước. Nhận nhóm theo danh sách bundle ID đã biết, thể loại App Store (genreID 6010/6011/6016/6008) và từ khoá trong bundle ID. Nút đóng, mũi tên trang dạng kính mờ tròn với SF Symbol; chỉ số trang dạng chấm (trang hiện tại là viên cyan) kèm "1 / 3" font bo tròn.
+
+Trang Tác vụ thay UIAlertController bằng thẻ kính mờ riêng: dòng chữ "Vạn dặm bình an!" gradient cyan→cam, danh sách tác vụ cuộn được, dưới cùng là nút ô tô — chạm để đóng trang (ô tô chạy sang phải). Chạm ra ngoài thẻ hoặc chạm tay nắm cũng đóng. Log: ACTIONS open.
+
+## 0.31.2 — tay nắm bị divider che
+
+Log 0.31.1: không có dòng HANDLE TAP nào, nhưng có hàng loạt DIVIDER ratio=0.500 khi chạm tay nắm. Nguyên nhân: khi mở chia màn bằng kéo cạnh, thanh ray (divider) được đưa lên trên cùng và nằm đè lên tay nắm; chạm vào tay nắm thực ra rơi vào divider, và bộ nhận chạm đúp của divider đưa tỉ lệ về 5:5. Giờ tay nắm luôn được đưa lên trên divider sau khi kéo cạnh.
 
 ## 0.31.1 — sửa đổi app bằng tay nắm, bỏ phần bàn phím
 
