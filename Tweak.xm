@@ -1,4 +1,4 @@
-// MultiTA 0.31.1 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, tap-count change mode.
+// MultiTA 0.31.2 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, tap-count change mode.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -24,7 +24,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.31.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.31.2] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -1020,7 +1020,10 @@ static UIButton *TAButton(NSString *title, SEL action) {
                 [choose[i] setImage:bundle ? TAAppIcon(bundle) : nil forState:UIControlStateNormal];
                 choose[i].enabled=NO; choose[i].adjustsImageWhenDisabled=NO;
             }
+            // Rail above the panes, but the handle must stay above the rail:
+            // otherwise the divider's own tap recognizers swallow handle taps.
             [splitWindow.rootViewController.view bringSubviewToFront:dividerView];
+            [splitWindow.rootViewController.view bringSubviewToFront:floatingActions];
             edgeWindow.alpha=0.02;   // keep the touch alive, hide the handle
             TALayoutPull(x/MAX(1,splitWindow.bounds.size.width));
             TALog(@"EDGE PULL begin current=%@ companion=%@",current,companion);
@@ -1048,6 +1051,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     if (fabs(ratio-0.5)<0.03) ratio=0.5;
     splitRatio=ratio;
     dividerView.backgroundColor=TADividerColor(); floatingActions.hidden=NO;
+    [splitWindow.rootViewController.view bringSubviewToFront:floatingActions];
     for (NSInteger i=0;i<2;i++) {
         [choose[i] setImage:nil forState:UIControlStateNormal];
         [choose[i] setTitle:@"Chạm để chọn ứng dụng" forState:UIControlStateNormal];
