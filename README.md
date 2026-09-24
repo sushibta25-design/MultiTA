@@ -183,3 +183,11 @@ An uncaptured app is prepared outside split: save the pair, release/restore pres
 Cold preparation can briefly show the app full-screen. Menu, icon pages, rounded geometry and hidden up/down rails remain. Existing surface checks do not prove visible pixels. Main-thread stall probe remains; native foreground/background and preparation return boundaries identify which operation fails to return.
 
 Device gates: both Maps/YouTube launch orders, already-open versus cold YouTube, existing companion preserved on warm replacement, cancelled/timed-out preparation, rapid selection, retry, Fold/Exit and disconnect. This removes the suspect lifecycle bypass, but exact original termination cause remains unknown without a matching crash stack. Compile validation is not device stability validation.
+
+## 0.26 — divider kéo được (30–70%)
+
+Bỏ chia cố định 50/50. Divider rộng ~3% chiều ngang màn (số chẵn, tối thiểu 16pt, vùng chạm nới thêm 6pt mỗi bên). Kéo divider hoặc kéo chính nút ••• để đổi tỉ lệ; giới hạn 30%–70%. Kéo quá giới hạn vẫn đi theo tay có lực cản rồi bật về đúng 30%/70% khi thả. Gần 50% (±3%) tự hút về 5:5. Chạm đúp divider = về 5:5. Menu ••• thêm Tỉ lệ 7:3 / 5:5 / 3:7.
+
+Trong lúc kéo chỉ di chuyển khung pane, app bị che bằng lớp tối có icon; resize scene (TAResize) chỉ chạy một lần khi thả tay, rồi bỏ lớp che sau 0.45s. Đổi trái ↔ phải lật tỉ lệ để mỗi app giữ nguyên kích thước (không resize). Tỉ lệ giữ nguyên qua Thu/Home, reset khi respring.
+
+Device gates: kéo chậm/nhanh, kéo quá 30/70, chạm đúp, preset trong menu, Swap sau khi đổi tỉ lệ, kéo trong lúc một ô đang attach, Maps/YouTube layout ở ô 30%.

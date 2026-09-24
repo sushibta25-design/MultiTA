@@ -1,4 +1,4 @@
-// TAduo 0.25.0: direct scene activation with isolated native app preparation.
+// TAduo 0.26.0: draggable divider (30–70%) on top of 0.25 direct scene activation.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -78,6 +78,12 @@ static UIView *panes[2];
 static UIButton *choose[2];
 static UIWindow *splitWindow, *buttonWindow;
 static UIView *floatingActions;
+// Resizable split. splitRatio = divider centre / display width, kept for the
+// SpringBoard lifetime so Fold/Home resume with the same proportions.
+static const CGFloat kTAMinRatio=0.30, kTAMaxRatio=0.70;
+static CGFloat splitRatio=0.5, dragStartRatio=0.5;
+static UIView *dividerView, *dividerGrip;
+static UIView *dragCovers[2];
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSArray<NSString *> *resumeBundles;
@@ -422,6 +428,61 @@ static void TADumpDock(void) {
     }
 }
 
+// ---- Resizable divider -------------------------------------------------
+// Divider is ~3% of display width (even number of points, min 16pt). The
+// hit area extends 6pt into each pane so it is easy to grab while driving.
+@interface TADividerView : UIView
+@end
+@implementation TADividerView
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    return CGRectContainsPoint(CGRectInset(self.bounds,-6,0),point);
+}
+@end
+static CGFloat TADividerWidth(CGFloat width) { return MAX(16,2*round(width*0.015)); }
+static CGFloat TAClampRatio(CGFloat r) { return MIN(kTAMaxRatio,MAX(kTAMinRatio,r)); }
+// UIScrollView-style resistance past the 30/70 limits: the divider keeps
+// following the finger a little, then springs back to the limit on release.
+static CGFloat TARubber(CGFloat over, CGFloat limit) { return (1.0-1.0/(over*0.55/limit+1.0))*limit; }
+static CGFloat TAVisualRatio(CGFloat raw) {
+    if (raw<kTAMinRatio) return kTAMinRatio-TARubber(kTAMinRatio-raw,0.08);
+    if (raw>kTAMaxRatio) return kTAMaxRatio+TARubber(raw-kTAMaxRatio,0.08);
+    return raw;
+}
+// Only moves containers. Hosted presentations keep their committed frame
+// until TACommitSplit, so no scene resize happens per touch-move.
+static void TALayoutSplit(CGFloat ratio) {
+    if (!splitWindow || !panes[0] || !panes[1]) return;
+    CGSize size=splitWindow.bounds.size; CGFloat inset=3, dw=TADividerWidth(size.width);
+    CGFloat cx=round(size.width*ratio), height=size.height-2*inset;
+    panes[0].frame=CGRectMake(inset,inset,MAX(1,cx-dw/2-inset),height);
+    CGFloat rx=cx+dw/2; panes[1].frame=CGRectMake(rx,inset,MAX(1,size.width-inset-rx),height);
+    dividerView.frame=CGRectMake(cx-dw/2,0,dw,size.height);
+    dividerGrip.frame=CGRectMake((dw-4)/2,14,4,MAX(0,size.height-28));
+    if (floatingActions) floatingActions.center=CGPointMake(cx,floatingActions.center.y);
+    for (NSInteger i=0;i<2;i++) { choose[i].frame=panes[i].bounds; dragCovers[i].frame=panes[i].bounds; }
+}
+static void TAShowCovers(BOOL show) {
+    for (NSInteger i=0;i<2;i++) {
+        if (show) {
+            if (!slots[i].presentation || !panes[i]) continue;
+            if (!dragCovers[i]) {
+                UIView *cover=[[UIView alloc] initWithFrame:panes[i].bounds];
+                cover.backgroundColor=[UIColor colorWithWhite:0.07 alpha:1]; cover.userInteractionEnabled=NO; cover.alpha=0;
+                UIImageView *icon=[[UIImageView alloc] initWithImage:TAAppIcon(slots[i].bundle)];
+                icon.frame=CGRectMake(0,0,52,52); icon.layer.cornerRadius=12; icon.clipsToBounds=YES;
+                icon.center=CGPointMake(CGRectGetMidX(cover.bounds),CGRectGetMidY(cover.bounds));
+                icon.autoresizingMask=UIViewAutoresizingFlexibleLeftMargin|UIViewAutoresizingFlexibleRightMargin|UIViewAutoresizingFlexibleTopMargin|UIViewAutoresizingFlexibleBottomMargin;
+                [cover addSubview:icon]; [panes[i] addSubview:cover]; dragCovers[i]=cover;
+            }
+            [panes[i] bringSubviewToFront:dragCovers[i]];
+            [UIView animateWithDuration:0.12 animations:^{ dragCovers[i].alpha=1; }];
+        } else if (dragCovers[i]) {
+            UIView *cover=dragCovers[i]; dragCovers[i]=nil;
+            [UIView animateWithDuration:0.2 animations:^{ cover.alpha=0; } completion:^(__unused BOOL f){ [cover removeFromSuperview]; }];
+        }
+    }
+}
+
 static void TAClearSlot(NSInteger slot, NSString *reason) {
     ++slotRequests[slot]; retryTargets[slot]=nil;
     TARecord *r=slots[slot]; r.attaching=NO; slots[slot]=nil;
@@ -441,6 +502,7 @@ static void TAStop(NSString *reason) {
     BOOL previous = ownCall; ownCall = YES;
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
+    dividerView = nil; dividerGrip = nil; dragCovers[0] = dragCovers[1] = nil;
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
     buttonWindow.hidden = order.count < 1;
 }
@@ -484,6 +546,9 @@ static void TASuspend(NSString *reason) {
 - (void)retryPane:(NSInteger)slot;
 - (void)failAttach:(NSInteger)slot bundle:(NSString *)bundle reason:(NSString *)reason;
 - (void)paneAction:(UIButton *)sender;
+- (void)dragDivider:(UIPanGestureRecognizer *)gesture;
+- (void)resetDivider:(UITapGestureRecognizer *)gesture;
+- (void)commitSplit:(CGFloat)ratio;
 @end
 static TAControls *controls;
 static UIButton *TAButton(NSString *title, SEL action) {
@@ -574,6 +639,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
     for (NSInteger i=0;i<2;i++) { [appPickers[i] removeFromSuperview]; appPickers[i]=nil; }
     TARecord *left=slots[0]; slots[0]=slots[1]; slots[1]=left;
     ++slotRequests[0]; ++slotRequests[1];
+    // Mirror the divider: each app keeps its own width, so no scene resize.
+    splitRatio=1-splitRatio; TALayoutSplit(splitRatio);
     for (NSInteger i=0;i<2;i++) {
         [panes[i] addSubview:slots[i].presentation]; slots[i].presentation.frame=panes[i].bounds;
     }
@@ -620,19 +687,30 @@ static UIButton *TAButton(NSString *title, SEL action) {
     splitWindow.frame = bounds; splitWindow.windowLevel = UIWindowLevelAlert + 70;
     splitWindow.rootViewController = [UIViewController new];
     UIView *root = splitWindow.rootViewController.view; root.backgroundColor = UIColor.blackColor;
-    // Scene target equals rounded pane bounds: 3pt outer inset, 6pt gap.
+    // Scene target equals rounded pane bounds: 3pt outer inset, ~3% divider.
     // No image scaling or independent crop of the app content.
-    CGFloat half = bounds.size.width / 2;
+    splitRatio = TAClampRatio(splitRatio);
+    CGFloat half = round(bounds.size.width * splitRatio);
     for (NSInteger i = 0; i < 2; i++) {
-        panes[i] = [[UIView alloc] initWithFrame:CGRectMake(i * half + 3, 3, half - 6, bounds.size.height - 6)];
+        panes[i] = [[UIView alloc] initWithFrame:CGRectZero];
         panes[i].layer.cornerRadius=8; panes[i].layer.cornerCurve=kCACornerCurveContinuous;
         panes[i].clipsToBounds = YES; [root addSubview:panes[i]];
         choose[i] = TAButton(@"Chạm để chọn ứng dụng", @selector(paneAction:));
         choose[i].titleLabel.font=[UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
         choose[i].titleLabel.numberOfLines=2; choose[i].titleLabel.textAlignment=NSTextAlignmentCenter;
         choose[i].backgroundColor=[UIColor colorWithWhite:0.065 alpha:1];
-        choose[i].tag = i; choose[i].frame = panes[i].bounds; [panes[i] addSubview:choose[i]];
+        choose[i].tag = i; [panes[i] addSubview:choose[i]];
     }
+    dividerView = [[TADividerView alloc] initWithFrame:CGRectZero];
+    dividerView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1];
+    dividerView.accessibilityLabel = @"Thanh chia màn hình";
+    dividerGrip = [[UIView alloc] initWithFrame:CGRectZero];
+    dividerGrip.backgroundColor = [UIColor colorWithWhite:0.38 alpha:1];
+    dividerGrip.layer.cornerRadius = 2; dividerGrip.userInteractionEnabled = NO;
+    [dividerView addSubview:dividerGrip]; [root addSubview:dividerView];
+    [dividerView addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragDivider:)]];
+    UITapGestureRecognizer *reset = [[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(resetDivider:)];
+    reset.numberOfTapsRequired = 2; [dividerView addGestureRecognizer:reset];
 
     floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-22,MAX(4,(bounds.size.height-44)/2),44,44)];
     floatingActions.backgroundColor=[UIColor colorWithWhite:0.04 alpha:0.96];
@@ -644,8 +722,11 @@ static UIButton *TAButton(NSString *title, SEL action) {
     more.titleLabel.font=[UIFont boldSystemFontOfSize:28];
     more.accessibilityLabel=@"Tác vụ chia màn hình";
     [floatingActions addSubview:more]; [root addSubview:floatingActions];
+    // The ••• button is also a drag handle: tap = menu, drag = move divider.
+    [floatingActions addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragDivider:)]];
+    TALayoutSplit(splitRatio);
     buttonWindow.hidden = YES; splitWindow.hidden = NO;
-    TALog(@"START display=%@ pane=%@", NSStringFromCGRect(bounds), NSStringFromCGRect(panes[0].bounds));
+    TALog(@"START display=%@ ratio=%.2f left=%@ right=%@", NSStringFromCGRect(bounds), splitRatio, NSStringFromCGRect(panes[0].bounds), NSStringFromCGRect(panes[1].bounds));
 }
 - (void)holdDock:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state==UIGestureRecognizerStateBegan) [self snapshot];
@@ -670,6 +751,9 @@ static UIButton *TAButton(NSString *title, SEL action) {
     add(@"Đổi trái ↔ phải",UIAlertActionStyleDefault,
         slots[0].presentation && slots[1].presentation && !TAAttachPending(),^{ [self swapSides]; });
     add(@"Cặp gần dùng",UIAlertActionStyleDefault,!TAAttachPending(),^{ [self showPairs]; });
+    add(@"Tỉ lệ 7 : 3",UIAlertActionStyleDefault,fabs(splitRatio-kTAMaxRatio)>0.005,^{ [self commitSplit:kTAMaxRatio]; });
+    add(@"Tỉ lệ 5 : 5",UIAlertActionStyleDefault,fabs(splitRatio-0.5)>0.005,^{ [self commitSplit:0.5]; });
+    add(@"Tỉ lệ 3 : 7",UIAlertActionStyleDefault,fabs(splitRatio-kTAMinRatio)>0.005,^{ [self commitSplit:kTAMinRatio]; });
     for (NSInteger i=0;i<2;i++) {
         add(i==0 ? @"Tải lại ô trái" : @"Tải lại ô phải",UIAlertActionStyleDefault,
             (slots[i].bundle || retryTargets[i]) && !slots[i].attaching,^{ [self retryPane:i]; });
@@ -757,6 +841,70 @@ static UIButton *TAButton(NSString *title, SEL action) {
     if (!index) {
         UILabel *empty=[[UILabel alloc] initWithFrame:grid.bounds]; empty.text=@"Chưa đọc được danh sách ứng dụng CarPlay. Hãy kết nối lại rồi thử chọn."; empty.textColor=UIColor.lightGrayColor; empty.font=[UIFont systemFontOfSize:13]; empty.numberOfLines=0; empty.textAlignment=NSTextAlignmentCenter; [grid addSubview:empty];
     }
+}
+- (void)dragDivider:(UIPanGestureRecognizer *)gesture {
+    UIView *root=splitWindow.rootViewController.view;
+    if (!running || !root || !panes[0] || !panes[1]) return;
+    if (gesture.state==UIGestureRecognizerStateBegan && root.window.rootViewController.presentedViewController) {
+        gesture.enabled=NO; gesture.enabled=YES; return;
+    }
+    CGFloat width=MAX(1,root.bounds.size.width);
+    CGFloat raw=dragStartRatio+[gesture translationInView:root].x/width;
+    switch (gesture.state) {
+        case UIGestureRecognizerStateBegan:
+            dragStartRatio=splitRatio; floatingActions.hidden=NO;
+            for (NSInteger i=0;i<2;i++) appPickers[i].hidden=YES;
+            dividerGrip.backgroundColor=TACyan();
+            TAShowCovers(YES);
+            break;
+        case UIGestureRecognizerStateChanged:
+            TALayoutSplit(TAVisualRatio(raw));
+            break;
+        case UIGestureRecognizerStateEnded: {
+            // Short flick projection, then clamp to 30–70%.
+            CGFloat projected=raw+[gesture velocityInView:root].x/width*0.08;
+            [self commitSplit:projected];
+            break;
+        }
+        default:
+            [self commitSplit:splitRatio];
+            break;
+    }
+}
+- (void)resetDivider:(UITapGestureRecognizer *)gesture {
+    if (gesture.state==UIGestureRecognizerStateRecognized) [self commitSplit:0.5];
+}
+- (void)commitSplit:(CGFloat)ratio {
+    if (!running || !panes[0] || !panes[1]) return;
+    ratio=TAClampRatio(ratio);
+    if (fabs(ratio-0.5)<0.03) ratio=0.5;   // light magnet to the centre
+    splitRatio=ratio; dividerGrip.backgroundColor=[UIColor colorWithWhite:0.38 alpha:1];
+    BOOL needsCover=NO;
+    for (NSInteger i=0;i<2;i++) if (slots[i].presentation) needsCover=YES;
+    if (needsCover) TAShowCovers(YES);
+    NSUInteger token=generation;
+    [UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+        TALayoutSplit(ratio);
+    } completion:^(__unused BOOL finished) {
+        if (!running || generation!=token) return;
+        TALayoutSplit(splitRatio);
+        for (NSInteger i=0;i<2;i++) {
+            TARecord *r=slots[i]; if (!r.presentation) continue;
+            CGSize target=panes[i].bounds.size;
+            r.presentation.frame=panes[i].bounds;
+            if (fabs(r.targetSize.width-target.width)>0.5 || fabs(r.targetSize.height-target.height)>0.5) {
+                BOOL previous=ownCall; ownCall=YES;
+                @try { TAResize(r,target); } @catch (NSException *e) { TALog(@"DIVIDER RESIZE ERROR %@ %@",r.bundle,e.name); }
+                ownCall=previous;
+            }
+        }
+        for (NSInteger i=0;i<2;i++) if (appPickers[i]) [self renderPicker:i];
+        TALog(@"DIVIDER ratio=%.3f left=%@ right=%@",splitRatio,NSStringFromCGSize(panes[0].bounds.size),NSStringFromCGSize(panes[1].bounds.size));
+        // Let the resized scenes lay out before revealing them.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.45*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            if (running && generation==token) TAShowCovers(NO);
+        });
+    }];
 }
 - (void)paneAction:(UIButton *)sender {
     NSInteger slot=sender.tag; if (slot<0 || slot>1) return;
