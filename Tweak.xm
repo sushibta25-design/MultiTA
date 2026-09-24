@@ -608,7 +608,8 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     dividerHighlight=[UIView new]; dividerHighlight.backgroundColor=[UIColor colorWithRed:0 green:0.75 blue:0.95 alpha:1];
     dividerHighlight.layer.cornerRadius=1; dividerHighlight.alpha=0; dividerHighlight.userInteractionEnabled=NO;
     [gapTouchShield addSubview:dividerHighlight];
-    dividerView=[[UIView alloc] initWithFrame:CGRectMake(half-TADividerHitWidth/2,(bounds.size.height-TADividerHitHeight)/2,TADividerHitWidth,TADividerHitHeight)];
+    CGFloat dividerCenter=leftWidth+TADividerGap/2;
+    dividerView=[[UIView alloc] initWithFrame:CGRectMake(dividerCenter-TADividerHitWidth/2,(bounds.size.height-TADividerHitHeight)/2,TADividerHitWidth,TADividerHitHeight)];
     dividerView.backgroundColor=UIColor.clearColor;
     UIPanGestureRecognizer *drag=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDivider:)];
     drag.maximumNumberOfTouches=1; drag.delegate=self; [dividerView addGestureRecognizer:drag];
@@ -635,7 +636,7 @@ static UIImage *TAActionIcon(BOOL exitAction) {
     dividerFeedback.font=[UIFont boldSystemFontOfSize:20]; dividerFeedback.textColor=UIColor.whiteColor;
     dividerFeedback.backgroundColor=[UIColor colorWithWhite:0 alpha:0.55]; dividerFeedback.layer.cornerRadius=8;
     dividerFeedback.clipsToBounds=YES; dividerFeedback.alpha=0; dividerFeedback.userInteractionEnabled=NO; [root addSubview:dividerFeedback];
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-78,bounds.size.height/2-15,156,30)];
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(dividerCenter-78,bounds.size.height/2-15,156,30)];
     floatingActions.backgroundColor = UIColor.clearColor;
     NSArray *titles = @[@"", @"", @""];
     NSArray *actions = @[@"restartSplit", @"swapSides", @"stop"];
