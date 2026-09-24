@@ -1,4 +1,4 @@
-// MultiTA 0.31.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, tap-count change mode, full-width search keyboard.
+// MultiTA 0.31.1 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, tap-count change mode.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -24,7 +24,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.31.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.31.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -100,19 +100,11 @@ static BOOL chromeHold;
 static UIView *changeOverlays[2];
 static NSTimeInterval changeModeSince;
 static const CGFloat kTAPaneGap=4;
-// Handle taps are counted manually with a generous window: head-unit touch
-// latency often breaks UIKit's short double-tap timeout.
+// Handle taps are counted manually. Head-unit touches wobble and arrive late,
+// so a tap may be delivered as a tiny pan; both paths feed this counter.
 static NSUInteger lockTaps, lockTapSerial;
-// Search keyboard: while a template search screen is open in a pane, that
-// pane temporarily fills the display (full CarPlay keyboard).
-static NSInteger expandedSlot=-1;
-// FNV-1a, shared by the host and the template process to identify bundles
-// through a single Darwin state channel.
-static uint32_t TAHash(NSString *text) {
-    uint32_t h=2166136261u; const char *c=text.UTF8String;
-    while (c && *c) { h^=(uint8_t)*c++; h*=16777619u; }
-    return h;
-}
+static BOOL dragMoved;
+static const CGFloat kTADragSlop=12;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSArray<NSString *> *resumeBundles;
@@ -588,7 +580,7 @@ static void TAStop(NSString *reason) {
     dividerView = nil; dividerGrip = nil; railIcon = nil; dragCovers[0] = dragCovers[1] = nil;
     staged = NO; pullCurrent = nil; pullCompanion = nil;
     lockVisual = nil; chromeHold = NO; ++chromeToken; changeOverlays[0] = changeOverlays[1] = nil;
-    expandedSlot = -1; lockTaps = 0; ++lockTapSerial;
+    lockTaps = 0; ++lockTapSerial; dragMoved = NO;
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
     buttonWindow.hidden = YES;   // square launcher retired; edge pull is the entry
     TAUpdateEdge();
@@ -641,9 +633,8 @@ static void TASuspend(NSString *reason) {
 - (void)collapseTo:(NSInteger)winner;
 - (void)lockTap:(UITapGestureRecognizer *)gesture;
 - (void)enterChangeMode;
-- (void)expandSlot:(NSInteger)slot;
-- (void)restoreExpanded;
-- (void)changeTap:(UITapGestureRecognizer *)gesture;
+- (void)registerLockTap;
+- (void)changeTap:(UIGestureRecognizer *)gesture;
 - (void)exitChangeMode;
 @end
 static TAControls *controls;
@@ -830,8 +821,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [floatingActions addSubview:lockVisual]; [root addSubview:floatingActions];
     // Tap = menu, double (or triple) tap = change mode, drag = move divider.
     [floatingActions addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(lockTap:)]];
-    UIPanGestureRecognizer *lockPan=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragDivider:)];
-    [floatingActions addGestureRecognizer:lockPan];
+    [floatingActions addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragDivider:)]];
     TALayoutSplit(splitRatio);
     buttonWindow.hidden = YES; splitWindow.hidden = NO;
     TAShowChrome();
@@ -953,7 +943,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
 }
 - (void)dragDivider:(UIPanGestureRecognizer *)gesture {
     UIView *root=splitWindow.rootViewController.view;
-    if (!running || staged || expandedSlot>=0 || !root || !panes[0] || !panes[1]) return;
+    if (!running || staged || !root || !panes[0] || !panes[1]) return;
     if (gesture.state==UIGestureRecognizerStateBegan && root.window.rootViewController.presentedViewController) {
         gesture.enabled=NO; gesture.enabled=YES; return;
     }
@@ -961,12 +951,18 @@ static UIButton *TAButton(NSString *title, SEL action) {
     CGFloat raw=dragStartRatio+[gesture translationInView:root].x/width;
     switch (gesture.state) {
         case UIGestureRecognizerStateBegan:
-            dragStartRatio=splitRatio; floatingActions.hidden=NO; chromeHold=YES; TAShowChrome(); [self exitChangeMode];
-            for (NSInteger i=0;i<2;i++) appPickers[i].hidden=YES;
-            dividerGrip.backgroundColor=TACyan();
-            TAShowCovers(YES);
+            dragStartRatio=splitRatio; floatingActions.hidden=NO; chromeHold=YES; TAShowChrome();
+            dragMoved=NO;
             break;
         case UIGestureRecognizerStateChanged:
+            if (!dragMoved) {
+                CGPoint t=[gesture translationInView:root];
+                if (hypot(t.x,t.y)<kTADragSlop) break;
+                // Real drag starts only now.
+                dragMoved=YES; [self exitChangeMode];
+                for (NSInteger i=0;i<2;i++) appPickers[i].hidden=YES;
+                TAShowCovers(YES);
+            }
             TALayoutSplit(TAVisualRatio(raw));
             // Orange grip = releasing here closes the split.
             dividerGrip.backgroundColor=(raw>=kTACollapse || raw<=1-kTACollapse) ? TAOrange() : TACyan();
@@ -975,6 +971,13 @@ static UIButton *TAButton(NSString *title, SEL action) {
             // Short flick projection, then clamp to 30–70%.
             CGFloat projected=raw+[gesture velocityInView:root].x/width*0.08;
             chromeHold=NO; TAShowChrome();
+            if (!dragMoved) {
+                // Finger barely moved: this was a tap, not a drag.
+                dividerGrip.backgroundColor=[UIColor colorWithWhite:1 alpha:0.35];
+                for (NSInteger i=0;i<2;i++) appPickers[i].hidden=NO;
+                if (gesture.view==floatingActions) [self registerLockTap];
+                break;
+            }
             if (projected>=kTACollapse) { [self collapseTo:0]; break; }
             if (projected<=1-kTACollapse) { [self collapseTo:1]; break; }
             [self commitSplit:projected];
@@ -982,6 +985,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
         }
         default:
             chromeHold=NO; TAShowChrome();
+            if (!dragMoved) { for (NSInteger i=0;i<2;i++) appPickers[i].hidden=NO; break; }
             [self commitSplit:splitRatio];
             break;
     }
@@ -1083,9 +1087,13 @@ static UIButton *TAButton(NSString *title, SEL action) {
         }
     }];
 }
-// 1 tap = Tác vụ menu (after 0.6s); 2–3 taps within 0.6s of each other = change mode.
 - (void)lockTap:(UITapGestureRecognizer *)gesture {
-    if (gesture.state!=UIGestureRecognizerStateRecognized || !running || staged || expandedSlot>=0) return;
+    if (gesture.state==UIGestureRecognizerStateRecognized) [self registerLockTap];
+}
+// 1 tap = Tác vụ menu (after 0.6s). 2 or 3 taps, each within 0.6s of the
+// previous one, = change mode (entered on the 2nd tap).
+- (void)registerLockTap {
+    if (!running || staged) return;
     TAShowChrome();
     NSUInteger serial=++lockTapSerial;
     if (++lockTaps==2) [self enterChangeMode];
@@ -1122,7 +1130,10 @@ static UIButton *TAButton(NSString *title, SEL action) {
         badge.center=CGPointMake(CGRectGetMidX(overlay.bounds),CGRectGetMidY(overlay.bounds));
         badge.autoresizingMask=UIViewAutoresizingFlexibleLeftMargin|UIViewAutoresizingFlexibleRightMargin|UIViewAutoresizingFlexibleTopMargin|UIViewAutoresizingFlexibleBottomMargin;
         [overlay addSubview:badge];
-        [overlay addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(changeTap:)]];
+        // Fires on lift regardless of finger wobble (head-unit touches jitter).
+        UILongPressGestureRecognizer *press=[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(changeTap:)];
+        press.minimumPressDuration=0; press.allowableMovement=CGFLOAT_MAX;
+        [overlay addGestureRecognizer:press];
         [panes[i] addSubview:overlay]; changeOverlays[i]=overlay;
         [UIView animateWithDuration:0.18 animations:^{ overlay.alpha=1; }];
     }
@@ -1132,9 +1143,9 @@ static UIButton *TAButton(NSString *title, SEL action) {
         if (running && changeModeSince==since) [self exitChangeMode];
     });
 }
-- (void)changeTap:(UITapGestureRecognizer *)gesture {
+- (void)changeTap:(UIGestureRecognizer *)gesture {
     NSInteger slot=gesture.view.tag;
-    if (gesture.state!=UIGestureRecognizerStateRecognized || !running || slot<0 || slot>1) return;
+    if (gesture.state!=UIGestureRecognizerStateEnded || !running || slot<0 || slot>1) return;
     [self exitChangeMode];
     TALog(@"CHANGE MODE pick side=%ld",(long)slot);
     [self pick:choose[slot]];
@@ -1145,38 +1156,6 @@ static UIButton *TAButton(NSString *title, SEL action) {
         UIView *overlay=changeOverlays[i]; changeOverlays[i]=nil;
         [UIView animateWithDuration:0.15 animations:^{ overlay.alpha=0; } completion:^(__unused BOOL f){ [overlay removeFromSuperview]; }];
     }
-}
-- (void)expandSlot:(NSInteger)slot {
-    if (!running || staged || slot<0 || slot>1 || expandedSlot==slot || !slots[slot].presentation) return;
-    if (expandedSlot>=0) [self restoreExpanded];
-    expandedSlot=slot;
-    [self exitChangeMode];
-    for (NSInteger i=0;i<2;i++) { [appPickers[i] removeFromSuperview]; appPickers[i]=nil; }
-    dividerView.hidden=YES; floatingActions.hidden=YES;
-    CGSize size=splitWindow.bounds.size;
-    [splitWindow.rootViewController.view bringSubviewToFront:panes[slot]];
-    [UIView animateWithDuration:0.22 animations:^{
-        panes[slot].frame=CGRectMake(3,3,size.width-6,size.height-6);
-        panes[1-slot].alpha=0;
-    } completion:^(__unused BOOL f) {
-        if (!running || expandedSlot!=slot) return;
-        TARecord *r=slots[slot]; if (!r.presentation) return;
-        r.presentation.frame=panes[slot].bounds; choose[slot].frame=panes[slot].bounds;
-        BOOL previous=ownCall; ownCall=YES;
-        @try { TAResize(r,panes[slot].bounds.size); } @catch (NSException *e) { TALog(@"SEARCH EXPAND ERROR %@",e.name); }
-        ownCall=previous;
-    }];
-    TALog(@"SEARCH EXPAND side=%ld bundle=%@",(long)slot,slots[slot].bundle);
-}
-- (void)restoreExpanded {
-    if (!running || expandedSlot<0) return;
-    NSInteger slot=expandedSlot; expandedSlot=-1;
-    dividerView.hidden=NO; floatingActions.hidden=NO;
-    panes[1-slot].alpha=1;
-    TALog(@"SEARCH RESTORE side=%ld",(long)slot);
-    // commitSplit relayouts both panes and resizes any scene whose size changed.
-    [self commitSplit:splitRatio];
-    TAShowChrome();
 }
 - (void)commitSplit:(CGFloat)ratio {
     if (staged) return;
@@ -1417,20 +1396,6 @@ static void TACapture(id controller, id settings) {
     }
     if (resumeBundles && (launch || [TAClientBundles() containsObject:bundle])) resumeCandidate=bundle;
     TALog(@"CAPTURE %@ sid=%@ launchSource=%d",bundle,sid,launch);
-}
-static void TAListenSearch(void) {
-    int token;
-    notify_register_dispatch("com.sushibta.multita.beta.search",&token,dispatch_get_main_queue(),^(int delivered) {
-        uint64_t state=0;
-        if (!running || notify_get_state(delivered,&state)!=NOTIFY_STATUS_OK) return;
-        uint32_t hash=(uint32_t)(state>>1); BOOL on=state&1;
-        for (NSInteger i=0;i<2;i++) {
-            if (!slots[i].bundle || TAHash(slots[i].bundle)!=hash) continue;
-            TALog(@"SEARCH %@ side=%ld bundle=%@",on ? @"open" : @"closed",(long)i,slots[i].bundle);
-            if (on) [controls expandSlot:i];
-            else if (expandedSlot==i) [controls restoreExpanded];
-        }
-    });
 }
 static void TAStartResponsivenessProbe(void) {
     static dispatch_source_t timer;
@@ -1969,29 +1934,6 @@ static void TAVisibleTransition(UIViewController *vc) {
         TACaptureVisible(window, [@"appeared:" stringByAppendingString:NSStringFromClass(controller.class)]);
     });
 }
-// Template process: report when a search template appears/disappears in any
-// CarPlay template app (not only the diagnostic client list).
-static char TASearchBundleKey;
-static void TASearchSignal(UIViewController *vc, BOOL on) {
-    if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"]) return;
-    NSString *name=NSStringFromClass(vc.class);
-    if ([name containsString:@"Search"] || [name containsString:@"Keyboard"])
-        TALog(@"SEARCH VC %@ on=%d",name,on);
-    if (!([name containsString:@"Search"] && [name containsString:@"Template"])) return;
-    NSString *bundle=objc_getAssociatedObject(vc,&TASearchBundleKey);
-    if (on) {
-        NSArray *parts=[vc.viewIfLoaded.window.windowScene.session.persistentIdentifier componentsSeparatedByString:@":"];
-        if (parts.count!=3 || ![parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"]) return;
-        bundle=parts.lastObject;
-        objc_setAssociatedObject(vc,&TASearchBundleKey,bundle,OBJC_ASSOCIATION_COPY_NONATOMIC);
-    }
-    if (!bundle.length) return;
-    static int token=-1;
-    if (token<0 && notify_register_check("com.sushibta.multita.beta.search",&token)!=NOTIFY_STATUS_OK) { token=-1; return; }
-    uint64_t state=((uint64_t)TAHash(bundle)<<1)|(on ? 1 : 0);
-    if (notify_set_state(token,state)==NOTIFY_STATUS_OK) notify_post("com.sushibta.multita.beta.search");
-    TALog(@"SEARCH SIGNAL bundle=%@ on=%d",bundle,on);
-}
 static void TAListenSnapshots(void) {
     int token;
     notify_register_dispatch("com.sushibta.multita.beta.snapshot", &token, dispatch_get_main_queue(), ^(__unused int delivered) {
@@ -2108,11 +2050,6 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     TAVisibleTransition(self);
-    TASearchSignal(self,YES);
-}
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig;
-    TASearchSignal(self,NO);
 }
 %end
 %hook UIWindow
@@ -2282,6 +2219,6 @@ static void TAUpdateEdge(void) {
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
-        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TAListenSearch(); TATick(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }
