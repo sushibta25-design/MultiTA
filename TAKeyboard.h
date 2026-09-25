@@ -4,6 +4,9 @@
 #import <stdint.h>
 #include "TATelex.hpp"
 
+// Implemented by Tweak.xm after this header is included.
+static void TAHideSideActions(void);
+
 static void TAKBInsertVietnamese(UIView *input, uint32_t scalar) {
     NSString *key=[[NSString alloc] initWithBytes:&scalar length:4 encoding:NSUTF32LittleEndianStringEncoding];
     if (!key) return;
