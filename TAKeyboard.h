@@ -253,35 +253,13 @@ static void TAKBReceive(NSString *bundle) {
     } else if (op==4 && scalar<=0x10ffff && !(scalar>=0xd800 && scalar<=0xdfff)) TAKBInsertVietnamese(input,scalar);
     else if (op==1) [(id<UIKeyInput>)input deleteBackward];
     else if (op==2) {
-        BOOL submitted=NO;
-        for (UIView *view=input; view && view!=input.window; view=view.superview) {
-            if (![view isKindOfClass:UISearchBar.class]) continue;
-            UISearchBar *bar=(UISearchBar *)view;
-            if ([bar.delegate respondsToSelector:@selector(searchBarSearchButtonClicked:)]) {
-                [bar.delegate searchBarSearchButtonClicked:bar];
-                submitted=YES;
-                TALog(@"KEYBOARD SEARCH route=searchbar bundle=%@",bundle);
-            }
-            break;
-        }
         if ([input isKindOfClass:UITextField.class]) {
             UITextField *field=(UITextField *)input;
-            BOOL allow=YES;
             id<UITextFieldDelegate> delegate=field.delegate;
-            if (!submitted && [delegate respondsToSelector:@selector(textFieldShouldReturn:)])
-                allow=[delegate textFieldShouldReturn:field];
-            if (!submitted && allow) {
-                [field sendActionsForControlEvents:UIControlEventEditingDidEndOnExit];
-                submitted=YES;
-                TALog(@"KEYBOARD SEARCH route=textfield bundle=%@",bundle);
-            }
-            if (submitted) [field resignFirstResponder];
-        } else if (!submitted) {
-            [(id<UIKeyInput>)input insertText:@"\n"];
-            submitted=YES;
-            TALog(@"KEYBOARD SEARCH route=newline bundle=%@",bundle);
-        }
-        TAKBWrite(bundle,@"submitted",submitted ? command : 0);
+            if ([delegate respondsToSelector:@selector(textFieldShouldReturn:)]) {
+                if ([delegate textFieldShouldReturn:field]) [field resignFirstResponder];
+            } else [field sendActionsForControlEvents:UIControlEventEditingDidEndOnExit];
+        } else [(id<UIKeyInput>)input insertText:@"\n"];
     } else if (op==3) {
         BOOL cancelled=TAKBCancelSearch(input);
         TAKBWrite(bundle,@"cancel-failed",cancelled ? 0 : command);
@@ -320,7 +298,6 @@ static void TAKBInstallClients(void) {
 @property(nonatomic) BOOL numbers;
 @property(nonatomic) BOOL english;
 @property(nonatomic) BOOL stalled;
-@property(nonatomic) BOOL searching;
 @property(nonatomic,copy) NSString *shownText;
 @property(nonatomic,strong) UILabel *heading;
 @property(nonatomic,strong) UIView *panel;
@@ -380,8 +357,7 @@ static void TAKBHostStop(void) {
 - (void)loadView {
     self.view=[UIView new]; self.view.backgroundColor=[UIColor colorWithRed:0.025 green:0.10 blue:0.22 alpha:1];
     self.heading=[UILabel new]; self.heading.textColor=UIColor.whiteColor;
-    self.heading.backgroundColor=[UIColor colorWithWhite:1 alpha:0.12];
-    self.heading.font=[UIFont systemFontOfSize:18 weight:UIFontWeightSemibold];
+    self.heading.font=[UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
     self.heading.lineBreakMode=NSLineBreakByTruncatingHead;
     self.heading.layer.cornerRadius=16; self.heading.layer.borderWidth=1.5;
     BOOL left=slots[0]==self.record;
@@ -389,10 +365,7 @@ static void TAKBHostStop(void) {
     self.heading.text=@"  ⌕  Tìm kiếm";
     self.heading.accessibilityLabel=left ? @"Nội dung nhập bên trái" : @"Nội dung nhập bên phải";
     [self.view addSubview:self.heading];
-    self.closeButton=[self key:@"×"];
-    self.closeButton.backgroundColor=[UIColor colorWithWhite:1 alpha:0.16];
-    self.closeButton.titleLabel.font=[UIFont systemFontOfSize:25 weight:UIFontWeightSemibold];
-    [self.view addSubview:self.closeButton];
+    self.closeButton=[self key:@"×"]; [self.view addSubview:self.closeButton];
     self.panel=[UIView new]; self.panel.backgroundColor=[UIColor colorWithWhite:0 alpha:0.3];
     self.panel.layer.cornerRadius=15; [self.view addSubview:self.panel];
     [self buildKeys];
@@ -401,17 +374,10 @@ static void TAKBHostStop(void) {
 - (void)refreshPreview {
     if (self.stalled) return;
     NSString *text=TAKBReadPreview(self.bundle,self.nonce);
-    if (text && ![self.shownText isEqual:text]) self.shownText=text;
-    // Keep the submitted-search state visible instead of letting preview polling overwrite it.
-    if (self.searching) {
-        self.heading.text=self.shownText.length
-            ? [@"  ⌕  Đang tìm: " stringByAppendingString:self.shownText]
-            : @"  ⌕  Đang tìm kiếm…";
-        return;
+    if (text && ![self.shownText isEqual:text]) {
+        self.shownText=text;
+        self.heading.text=text.length ? [@"  ⌕  " stringByAppendingString:text] : @"  ⌕  Tìm kiếm";
     }
-    if (text) self.heading.text=text.length
-        ? [@"  ⌕  " stringByAppendingString:text]
-        : @"  ⌕  Tìm kiếm";
 }
 - (void)buildKeys {
     for (UIView *v in self.panel.subviews) [v removeFromSuperview];
@@ -441,13 +407,11 @@ static void TAKBHostStop(void) {
     CGFloat w=self.view.bounds.size.width,h=self.view.bounds.size.height;
     // Compact the header/gaps in alphabet mode to make room for the digit row.
     CGFloat margin=self.numbers ? 8 : 6;
-    CGFloat top=MIN(self.numbers ? 46 : 44,h*0.22);
+    CGFloat top=MIN(self.numbers ? 42 : 36,h*0.2);
     CGFloat gap=MAX(3,MIN(self.numbers ? 7 : 5,w/100));
     self.heading.frame=CGRectMake(margin,margin,MAX(1,w-top-3*margin),top);
     self.closeButton.frame=CGRectMake(w-margin-top,margin,top,top);
     self.panel.frame=CGRectMake(margin,top+2*margin,w-2*margin,MAX(1,h-top-3*margin));
-    [self.view bringSubviewToFront:self.heading];
-    [self.view bringSubviewToFront:self.closeButton];
     CGFloat pw=self.panel.bounds.size.width,ph=self.panel.bounds.size.height;
     NSUInteger rowCount=self.rows.count;
     BOOL hasDigitRow=!self.numbers;
@@ -483,14 +447,8 @@ static void TAKBHostStop(void) {
     if ([label isEqual:@"⇧"]) { self.shifted=!self.shifted; [self buildKeys]; return; }
     if ([label isEqual:@"#+="] || [label isEqual:@"ABC"]) { self.numbers=!self.numbers; [self buildKeys]; return; }
     if ([label isEqual:@"×"]) { if (self.stalled) TAKBHostStop(); else [self enqueue:3 scalar:0]; return; }
-    if ([label isEqual:@"⌫"]) { self.searching=NO; [self enqueue:1 scalar:0]; return; }
-    if ([label isEqual:@"Tìm"]) {
-        self.searching=YES;
-        self.heading.text=self.shownText.length ? [@"  ⌕  Đang tìm: " stringByAppendingString:self.shownText] : @"  ⌕  Đang tìm kiếm…";
-        [self enqueue:2 scalar:0];
-        return;
-    }
-    self.searching=NO;
+    if ([label isEqual:@"⌫"]) { [self enqueue:1 scalar:0]; return; }
+    if ([label isEqual:@"Tìm"]) { [self enqueue:2 scalar:0]; return; }
     NSString *text=[label isEqual:@"Dấu cách"] ? @" " : (self.shifted ? label : label.lowercaseString);
     NSData *data=[text dataUsingEncoding:NSUTF32LittleEndianStringEncoding];
     if (data.length==4) { uint32_t scalar=0; [data getBytes:&scalar length:4]; [self enqueue:self.english ? 0 : 4 scalar:scalar]; }
@@ -524,15 +482,8 @@ static void TAKBHostStop(void) {
     }
     if (!self.pending) return;
     if (TAKBRead(self.bundle,@"ack")==self.pending) {
-        unsigned op=(unsigned)((self.pending>>21)&7);
-        BOOL close=op==3;
+        BOOL close=((self.pending>>21)&7)==3;
         [self.queue removeObjectAtIndex:0]; self.pending=0;
-        if (op==2) {
-            self.searching=YES;
-            self.heading.text=self.shownText.length
-                ? [@"  ⌕  Đang tìm: " stringByAppendingString:self.shownText]
-                : @"  ⌕  Đang tìm kiếm…";
-        }
         if (close) {
             if (TAKBRead(self.bundle,@"cancel-failed")==TAKBRead(self.bundle,@"ack")) {
                 self.heading.text=@"  Chưa hủy được tìm kiếm trong app này.";
@@ -567,7 +518,7 @@ static void TAKBShow(NSString *bundle) {
         // A replacement search field owns a NEW session. Drop unsent old keys,
         // but keep the full-screen UI instead of flashing back into a pane.
         TAKBHost.nonce=(uint32_t)nonce; TAKBHost.sequence=0; TAKBHost.pending=0;
-        TAKBHost.retry=0; TAKBHost.stalled=NO; TAKBHost.searching=NO; TAKBHost.shownText=nil;
+        TAKBHost.retry=0; TAKBHost.stalled=NO; TAKBHost.shownText=nil;
         [TAKBHost.queue removeAllObjects]; TAKBWrite(bundle,@"command",0);
         [TAKBHost refreshPreview];
         TALog(@"KEYBOARD REBIND bundle=%@",bundle); return;
@@ -581,8 +532,7 @@ static void TAKBShow(NSString *bundle) {
     TAKBWindow.rootViewController=TAKBHost; TAKBWindow.hidden=NO;
     // Do not makeKeyWindow: the remote input must keep its focus and selection.
     floatingActions.hidden=YES;
-    // Shared keyboard is full-screen; hiding floating actions is sufficient here.
-    // The old TAHideSideActions helper no longer exists in the current MultiTA base.
+    TAHideSideActions();
     TALog(@"KEYBOARD OPEN side=%ld bundle=%@",(long)(slots[0]==r ? 0 : 1),bundle);
 }
 static void TAKBInstallHost(void) {
