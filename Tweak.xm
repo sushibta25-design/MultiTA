@@ -1,4 +1,4 @@
-// MultiTA 0.41.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
+// MultiTA 0.42.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.41.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.42.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -395,6 +395,15 @@ static BOOL TANativeLaunch(NSString *bundle) {
         ((void(*)(id,SEL,id,id))objc_msgSend)(nativeDashboard,launch,request,nil); TALog(@"NATIVE REQUEST RETURNED %@",bundle); return YES;
     } @catch (NSException *e) { TALog(@"NATIVE REQUEST ERROR %@ bundle=%@",e.name,bundle); return NO; }
 }
+// Remote-render context ids hosted under a layer tree (LayerHost layers).
+static void TACollectContexts(CALayer *layer, NSUInteger depth, NSInteger *budget, NSMutableSet *out) {
+    if (!layer || depth>14 || --*budget<0) return;
+    if ([NSStringFromClass(layer.class) containsString:@"LayerHost"]) {
+        id context=TAValue(layer,@"contextId");
+        if ([context respondsToSelector:@selector(unsignedLongLongValue)] && [context unsignedLongLongValue]!=0) [out addObject:context];
+    }
+    for (CALayer *child in layer.sublayers) TACollectContexts(child,depth+1,budget,out);
+}
 static BOOL TAHasHostedSurface(CALayer *layer, NSUInteger depth, NSInteger *budget) {
     if (!layer || depth>14 || --*budget<0) return NO;
     if ([NSStringFromClass(layer.class) containsString:@"LayerHost"]) {
@@ -748,6 +757,7 @@ static void TASuspend(NSString *reason) {
 - (void)goHome;
 - (void)swapFromHandle;
 - (void)autoRejoin:(NSUInteger)attempt;
+- (void)verifyPane:(NSInteger)slot record:(TARecord *)r generation:(NSUInteger)token attempt:(NSUInteger)attempt;
 - (void)waitLaunch:(NSUInteger)attempt generation:(NSUInteger)token;
 - (void)holdHandle:(UILongPressGestureRecognizer *)gesture;
 @end
@@ -1535,6 +1545,44 @@ static UIButton *TAButton(NSString *title, SEL action) {
     if (!ok) { launchBundle=nil; launchGuardUntil=0; [self failAttach:slot bundle:bundle reason:@"launch request failed"]; return; }
     [self waitLaunch:0 generation:token];
 }
+// A pane showing only the wallpaper still has a hosted layer, but it points
+// at a render context the app has since replaced (the pane was created while
+// the app was still starting). Compare with the context ids Dashboard's own
+// view of the same app is hosting; if they share none, build a fresh pane view.
+- (void)verifyPane:(NSInteger)slot record:(TARecord *)r generation:(NSUInteger)token attempt:(NSUInteger)attempt {
+    NSTimeInterval delay=attempt==0 ? 1.5 : 3.0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        if (!running || generation!=token || slots[slot]!=r || !r.presentation || r.attaching) return;
+        UIView *native=[r.controller isKindOfClass:UIViewController.class] ? ((UIViewController *)r.controller).viewIfLoaded : nil;
+        NSMutableSet *nativeIDs=[NSMutableSet new], *paneIDs=[NSMutableSet new];
+        NSInteger b1=300, b2=300;
+        if (native && ![r.presentation isDescendantOfView:native]) TACollectContexts(native.layer,0,&b1,nativeIDs);
+        TACollectContexts(r.presentation.layer,0,&b2,paneIDs);
+        BOOL stale=nativeIDs.count && paneIDs.count && ![paneIDs intersectsSet:nativeIDs];
+        TALog(@"PANE CHECK side=%ld bundle=%@ native=%@ pane=%@ stale=%d",(long)slot,r.bundle,nativeIDs.allObjects,paneIDs.allObjects,stale);
+        if (!stale) { if (attempt==0) [self verifyPane:slot record:r generation:token attempt:1]; return; }
+        if (attempt>=3) { TALog(@"PANE CHECK giving up side=%ld",(long)slot); return; }
+        // Rebuild only our view of the scene; the app itself is untouched.
+        BOOL previous=ownCall; ownCall=YES;
+        @try {
+            SEL invalidate=NSSelectorFromString(@"invalidatePresentationViewForIdentifier:");
+            UIView *old=r.presentation; NSString *oldID=r.presentationID;
+            NSString *newID=[oldID stringByAppendingFormat:@".r%lu",(unsigned long)attempt+1];
+            id view=((id(*)(id,SEL,id))objc_msgSend)(r.controller,NSSelectorFromString(@"presentationViewWithIdentifier:"),newID);
+            if ([view isKindOfClass:UIView.class] && !((UIView *)view).superview) {
+                ((UIView *)view).frame=panes[slot].bounds;
+                [panes[slot] insertSubview:view aboveSubview:old];
+                [old removeFromSuperview];
+                if (oldID && [r.controller respondsToSelector:invalidate]) ((void(*)(id,SEL,id))objc_msgSend)(r.controller,invalidate,oldID);
+                r.presentation=view; r.presentationID=newID;
+                [view setNeedsLayout]; [view layoutIfNeeded];
+                TALog(@"PANE REFRESH side=%ld bundle=%@",(long)slot,r.bundle);
+            }
+        } @catch (NSException *e) { TALog(@"PANE REFRESH error %@",e.name); }
+        ownCall=previous;
+        [self verifyPane:slot record:r generation:token attempt:attempt+1];
+    });
+}
 - (void)waitLaunch:(NSUInteger)attempt generation:(NSUInteger)token {
     if (!running || generation!=token || !launchBundle) return;
     NSString *bundle=launchBundle; NSInteger slot=launchSlot;
@@ -1545,7 +1593,9 @@ static UIButton *TAButton(NSString *title, SEL action) {
     // attaching it ≥5s after launch never did. Template apps are fine at 0.8s.
     BOOL templ=r && [[TAValue(r.controller,@"sceneID") componentsSeparatedByString:@":"] count]==3;
     BOOL settledApp=YES;
-    if (r && !templ && ![bundle hasPrefix:@"com.apple."]) {
+    if (r) {
+        BOOL slow=!templ && ![bundle hasPrefix:@"com.apple."];
+        NSTimeInterval floor=slow ? 2 : 1, hold=slow ? 2 : 1, cap=slow ? 6 : 4;
         // Readiness signal + time cap: the app's own native picture (drawn by
         // Dashboard behind the split window) must exist for ≥2s, or 6s must
         // have passed since the launch request. Never before 2s.
@@ -1554,7 +1604,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
         if (launchSurfaceSince<=0 && native && TAHasHostedSurface(native.layer,0,&budget)) {
             launchSurfaceSince=now; TALog(@"LAUNCH IN PANE native picture seen %@ after %.1fs",bundle,now-launchStart);
         }
-        settledApp=now-launchStart>=2 && ((launchSurfaceSince>0 && now-launchSurfaceSince>=2) || now-launchStart>=6);
+        settledApp=now-launchStart>=floor && ((launchSurfaceSince>0 && now-launchSurfaceSince>=hold) || now-launchStart>=cap);
     }
     BOOL ready=r && TADirectReady(r) && now-lastNativeTransition>=0.8 && settledApp;
     if (ready && !slots[slot]) {
@@ -1693,6 +1743,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
             if (r.restoreBackground) TAKickVideo(r.bundle,@"attached from background");
         }
         TALog(@"ATTACHED slot=%ld bundle=%@ surface=1 foregroundIssued=%d attempt=%lu (not pixel validation)",(long)slot,r.bundle,r.foregroundIssued,(unsigned long)attempt);
+        [self verifyPane:slot record:r generation:token attempt:0];
         TARememberPair(); return;
     }
     if (attempt%4==0) TALog(@"ATTACH WAIT bundle=%@ frame=%d foregroundIssued=%d presentation=%d hostedSurface=%d",r.bundle,ready,r.foregroundIssued,r.presentation!=nil,surface);
