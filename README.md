@@ -1,6 +1,12 @@
-# MultiTA Beta 0.48.4
+# MultiTA Beta 0.48.5
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.48.5 — vuốt từ Home, tay nắm to khi hiện
+
+Log 0.48.4: vuốt Dock từ màn Home luôn bị từ chối (`DOCK PULL rejected current=(null)`). Giờ vuốt từ Home cũng mở chia màn: app dùng gần nhất vào ô phải, app trước đó vào ô trái; chưa có app nào thì cả hai ô hiện bảng chọn. Log `DOCK PULL from Home recent=… + …`.
+
+Ổ khoá (tay nắm) và nút tròn đổi bên: khi hiện lên được vẽ và nhận chạm to gấp tối đa 2 lần, giới hạn theo chiều cao màn (≈1,73 lần trên màn cao 240pt), căn giữa theo chiều dọc; khi tự ẩn thì thu về cỡ cũ để vùng chạm vô hình không đè lên app.
 
 ## 0.48.4 — divider và vuốt Dock nhạy hơn
 

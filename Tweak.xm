@@ -1,4 +1,4 @@
-// MultiTA 0.48.4 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.48.5 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.4] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.5] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -463,6 +463,18 @@ static UIImage *TAAppIcon(NSString *bundle) {
     if (image) cache[bundle]=image;
     return image;
 }
+// While shown, the lock handle and the swap button are drawn and hit-tested
+// at up to 2x (bounded by the display height: ~1.73x on a 240pt display)
+// so they are easy to hit while driving; once faded they return to 1x, so
+// the invisible hit area does not cover the apps.
+static void TASetHandleBig(BOOL big) {
+    if (!floatingActions || !splitWindow) return;
+    CGFloat height=splitWindow.bounds.size.height, base=88+kTASwapArea;
+    CGFloat scale=big ? MAX(1,MIN(2,(height-8)/base)) : 1;
+    CGFloat restY=MAX(0,MAX(4,(height-88)/2)-kTASwapArea)+base/2;
+    floatingActions.transform=CGAffineTransformMakeScale(scale,scale);
+    floatingActions.center=CGPointMake(floatingActions.center.x,big ? height/2 : restY);
+}
 static void TAShowChrome(void) {
     if (!running || !floatingActions) return;
     floatingActions.hidden=NO;
@@ -470,6 +482,7 @@ static void TAShowChrome(void) {
     [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionBeginFromCurrentState|UIViewAnimationOptionAllowUserInteraction animations:^{
         lockVisual.alpha=1; dividerGrip.alpha=1;
         swapVisual.alpha=(slots[0].presentation && slots[1].presentation) ? 1 : 0.35;
+        TASetHandleBig(YES);
     } completion:nil];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),dispatch_get_main_queue(),^{
         if (!running || chromeHold || token!=chromeToken) return;
@@ -477,7 +490,9 @@ static void TAShowChrome(void) {
         // touch containers is untouched), so a hidden handle still works.
         [UIView animateWithDuration:0.35 delay:0 options:UIViewAnimationOptionAllowUserInteraction animations:^{
             lockVisual.alpha=0; swapVisual.alpha=0; if (!staged) dividerGrip.alpha=0;
-        } completion:nil];
+        } completion:^(__unused BOOL finished) {
+            if (running && !chromeHold && token==chromeToken) TASetHandleBig(NO);
+        }];
     });
 }
 static void TARevealActions(void) { TAShowChrome(); }
@@ -1343,10 +1358,13 @@ static UIButton *TAButton(NSString *title, SEL action) {
 }
 - (BOOL)beginPullFromLeft {
     NSString *current=[nativeForeground copy];
-    if (running || primeBundle || !current.length || !TADirectReady(records[current])) {
-        TALog(@"DOCK PULL rejected current=%@ running=%d ready=%d",current,running,TADirectReady(records[current]));
+    if (running || primeBundle) {
+        TALog(@"DOCK PULL rejected running=%d prime=%@",running,primeBundle);
         return NO;
     }
+    // From CarPlay Home (no app open, or one that cannot attach directly) the
+    // split still opens: the two most recent usable apps fill it below.
+    if (current.length && !TADirectReady(records[current])) current=nil;
     // Companion: most recently used other app that can attach directly.
     NSString *companion=nil; pullCurrentSlot=1;
     if (openBundle && [current isEqual:openBundle] && NSProcessInfo.processInfo.systemUptime-openTime<180 && openKeep.length && TADirectReady(records[openKeep])) {
@@ -1360,6 +1378,16 @@ static UIButton *TAButton(NSString *title, SEL action) {
     if (!companion) for (NSString *bundle in [order reverseObjectEnumerator]) {
         TARecord *candidate=records[bundle];
         if (![bundle isEqual:current] && candidate.userLaunched && !candidate.noSurface && TADirectReady(candidate)) { companion=bundle; break; }
+    }
+    if (!current.length) {
+        // Most recent app to the right pane, the one before it to the left;
+        // with none, both panes offer the app picker.
+        current=companion; companion=nil;
+        if (current) for (NSString *bundle in [order reverseObjectEnumerator]) {
+            TARecord *candidate=records[bundle];
+            if (![bundle isEqual:current] && candidate.userLaunched && !candidate.noSurface && TADirectReady(candidate)) { companion=bundle; break; }
+        }
+        TALog(@"DOCK PULL from Home recent=%@ + %@",current ?: @"-",companion ?: @"-");
     }
     resumeBundles=nil; resumeCandidate=nil;
     staged=YES; pullFromLeft=YES; pullCurrent=current; pullCompanion=companion;
@@ -1408,7 +1436,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     TALog(@"PULL open ratio=%.3f fromLeft=%d current=%@ companion=%@",ratio,fromLeft,current,companion);
     TAUpdateEdge();
     NSInteger cs=pullCurrentSlot; pullCurrentSlot=0;
-    [self attach:current slot:cs];
+    if (current.length) [self attach:current slot:cs];
     if (companion.length) [self replace:companion slot:1-cs];
 }
 // Divider dragged to an edge: the pane that keeps the screen returns to
