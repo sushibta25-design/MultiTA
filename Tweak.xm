@@ -1,4 +1,4 @@
-// MultiTA 0.47.1 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.47.2 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.47.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.47.2] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -2794,36 +2794,69 @@ static BOOL TAOwnWindow(UIWindow *w) {
     return w==edgeWindow || w==splitWindow || w==buttonWindow || w==TAKBWindow;
 }
 static UIPanGestureRecognizer *dockSwipe;
-static CGRect TAFindDockZone(UIWindowScene *s) {
-    CGRect b=s.coordinateSpace.bounds;
-    NSArray<UIWindow *> *windows=[s.windows sortedArrayUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *c) {
+static NSArray<UIWindow *> *TADockProbeWindows(UIWindowScene *s) {
+    return [s.windows sortedArrayUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *c) {
         return a.windowLevel>c.windowLevel ? NSOrderedAscending : a.windowLevel<c.windowLevel ? NSOrderedDescending : NSOrderedSame;
     }];
-    CGFloat probe=12;
-    for (CGFloat y=CGRectGetMinY(b)+6;y<CGRectGetMinY(b)+b.size.height*0.8;y+=3) {
-        for (UIWindow *w in windows) {
+}
+// One-time record of what sits along the left edge (window, hit view and two
+// ancestors every 12pt), so a missed Dock can be matched from a single log.
+static void TALogDockProbe(UIWindowScene *s) {
+    static __weak UIWindowScene *logged;
+    if (logged==s) return;
+    logged=s;
+    CGRect b=s.coordinateSpace.bounds;
+    TALog(@"DOCK PROBE display=%@",NSStringFromCGRect(b));
+    for (CGFloat y=CGRectGetMinY(b)+6;y<CGRectGetMaxY(b);y+=12) {
+        for (UIWindow *w in TADockProbeWindows(s)) {
             if (w.hidden || w.alpha<0.01 || TAOwnWindow(w)) continue;
-            CGPoint point=[w convertPoint:CGPointMake(probe,y) fromCoordinateSpace:s.coordinateSpace];
-            UIView *hit=[w hitTest:point withEvent:nil];
-            for (UIView *v=hit;v && v!=w;v=v.superview) {
-                CGRect f=[v convertRect:v.bounds toCoordinateSpace:s.coordinateSpace];
-                BOOL iconSized=f.size.width>=28 && f.size.width<=96 && f.size.height>=28 && f.size.height<=96;
-                NSString *name=NSStringFromClass(v.class);
-                BOOL iconLike=[v isKindOfClass:UIControl.class] || [name containsString:@"Icon"] || [name containsString:@"Button"] || v.gestureRecognizers.count>0;
-                if (iconSized && iconLike && CGRectGetMinX(f)<probe && CGRectGetMinY(f)>CGRectGetMinY(b)+20) {
-                    CGFloat right=MIN(120,MAX(40,round(CGRectGetMidX(f)*2)));
-                    CGFloat bottom=CGRectGetMinY(f)-4;
-                    static NSString *lastFound;
-                    NSString *found=[NSString stringWithFormat:@"%@ %@",name,NSStringFromCGRect(f)];
-                    if (![found isEqual:lastFound]) { lastFound=found; TALog(@"DOCK ZONE icon=%@ zone=%@",found,NSStringFromCGRect(CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),right,bottom-CGRectGetMinY(b)))); }
-                    return CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),right,MAX(0,bottom-CGRectGetMinY(b)));
+            UIView *hit=[w hitTest:[w convertPoint:CGPointMake(CGRectGetMinX(b)+20,y) fromCoordinateSpace:s.coordinateSpace] withEvent:nil];
+            if (!hit) continue;
+            NSMutableString *chain=[NSMutableString string];
+            NSUInteger depth=0;
+            for (UIView *v=hit;v && v!=w && depth<3;v=v.superview,depth++)
+                [chain appendFormat:@" %@%@%@",NSStringFromClass(v.class),NSStringFromCGRect([v convertRect:v.bounds toCoordinateSpace:s.coordinateSpace]),
+                    [v isKindOfClass:UIControl.class] || v.gestureRecognizers.count ? @"*" : @""];
+            TALog(@"DOCK PROBE y=%.0f window=%@%@",y,NSStringFromClass(w.class),chain);
+            break;
+        }
+    }
+}
+static CGRect TAFindDockZone(UIWindowScene *s) {
+    CGRect b=s.coordinateSpace.bounds;
+    TALogDockProbe(s);
+    NSArray<UIWindow *> *windows=TADockProbeWindows(s);
+    CGFloat limit=MAX(96,round(b.size.width*0.16));   // largest plausible Dock icon
+    // Probe several x positions: the Dock is wider than 44pt on large screens.
+    for (NSNumber *probeX in @[@12,@20,@30,@42]) {
+        CGFloat probe=CGRectGetMinX(b)+probeX.doubleValue;
+        for (CGFloat y=CGRectGetMinY(b)+6;y<CGRectGetMinY(b)+b.size.height*0.8;y+=3) {
+            for (UIWindow *w in windows) {
+                if (w.hidden || w.alpha<0.01 || TAOwnWindow(w)) continue;
+                CGPoint point=[w convertPoint:CGPointMake(probe,y) fromCoordinateSpace:s.coordinateSpace];
+                UIView *hit=[w hitTest:point withEvent:nil];
+                for (UIView *v=hit;v && v!=w;v=v.superview) {
+                    CGRect f=[v convertRect:v.bounds toCoordinateSpace:s.coordinateSpace];
+                    BOOL iconSized=f.size.width>=28 && f.size.width<=limit && f.size.height>=28 && f.size.height<=limit*1.4;
+                    NSString *name=NSStringFromClass(v.class);
+                    BOOL iconLike=[v isKindOfClass:UIControl.class] || [name containsString:@"Icon"] || [name containsString:@"Button"] || v.gestureRecognizers.count>0;
+                    if (iconSized && iconLike && CGRectGetMinY(f)>CGRectGetMinY(b)+20) {
+                        CGFloat right=MIN(round(b.size.width*0.2),MAX(40,round(CGRectGetMaxX(f)+CGRectGetMinX(f)-2*CGRectGetMinX(b))));
+                        CGFloat bottom=CGRectGetMinY(f)-4;
+                        CGRect zone=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),right,MAX(0,bottom-CGRectGetMinY(b)));
+                        static NSString *lastFound;
+                        NSString *found=[NSString stringWithFormat:@"%@ %@",name,NSStringFromCGRect(f)];
+                        if (![found isEqual:lastFound]) { lastFound=found; TALog(@"DOCK ZONE icon=%@ zone=%@",found,NSStringFromCGRect(zone)); }
+                        return zone;
+                    }
                 }
             }
         }
     }
+    CGRect fallback=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(44,round(b.size.width*0.12)),round(b.size.height*0.4));
     static BOOL loggedFallback;
-    if (!loggedFallback) { loggedFallback=YES; TALog(@"DOCK ZONE fallback: no Dock icon found along x=%.0f",probe); }
-    return CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),44,round(b.size.height*0.3));
+    if (!loggedFallback) { loggedFallback=YES; TALog(@"DOCK ZONE fallback: no Dock icon found; zone=%@",NSStringFromCGRect(fallback)); }
+    return fallback;
 }
 // Show the Dock swipe zone only while a captured app is open natively.
 static void TAUpdateEdge(void) {

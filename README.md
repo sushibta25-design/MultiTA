@@ -1,6 +1,10 @@
-# MultiTA Beta 0.47.1
+# MultiTA Beta 0.47.2
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.47.2 — dò Dock rộng hơn
+
+Log 0.47.1: vùng vuốt hiện nhưng không dò được icon Dock (`DOCK ZONE fallback`), vùng mặc định 44×72pt ở góc trên nhỏ hơn Dock thật nên không nhận được vuốt (không có `DOCK SWIPE start`). Giờ dò ở nhiều vị trí x (12/20/30/42pt), chấp nhận icon lớn hơn trên màn to; vùng mặc định rộng 12% màn hình, cao 40%. Ghi một lần `DOCK PROBE …` (view dọc mép trái mỗi 12pt) để khớp Dock từ log nếu vẫn trượt.
 
 ## 0.47.1 — vùng vuốt Dock luôn bật
 
