@@ -1,6 +1,10 @@
-# MultiTA Beta 0.34.0
+# MultiTA Beta 0.35.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.35 — giữ 1 giây để mở trang Tác vụ
+
+Thao tác mới: chạm 1 lần gần divider/tay nắm chỉ để hiện divider; nhấn giữ từ 1 giây trở lên vào divider hoặc tay nắm thì mở trang "Vạn dặm bình an!". Chạm 2–3 lần vào tay nắm vẫn là đổi app. Bỏ chạm đúp divider về 5:5 (chạm để hiện divider hay vô tình đưa tỉ lệ về 5:5). Việc giữ được nhận cả qua bộ nhận nhấn giữ lẫn qua bộ đếm thời gian trong đường kéo (màn xe rung tay có thể làm cú giữ bị hiểu là bắt đầu kéo). Chặn yêu cầu kích thước scene lớn hơn màn hình (log template có một lần 443pt trên màn 426pt). Log: HOLD open.
 
 ## 0.34 — nhẹ hơn, mũi tên đổi trái ↔ phải trên tay nắm
 

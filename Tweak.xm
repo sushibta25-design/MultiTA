@@ -1,4 +1,4 @@
-// MultiTA 0.34.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
+// MultiTA 0.35.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -24,7 +24,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.34.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.35.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -110,6 +110,9 @@ static const CGFloat kTAPaneGap=4;
 // so a tap may be delivered as a tiny pan; both paths feed this counter.
 static NSUInteger lockTaps, lockTapSerial;
 static BOOL dragMoved;
+// Hold ≥1s on the divider/handle opens the Tác vụ page (greeting card).
+static NSUInteger holdSerial;
+static BOOL holdFired;
 static const CGFloat kTADragSlop=12;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
@@ -202,6 +205,10 @@ static void TATransact(TARecord *r, NSUInteger token, NSUInteger serial, NSUInte
     });
 }
 static void TAResize(TARecord *r, CGSize size) {
+    if (splitWindow) {
+        CGSize limit=splitWindow.bounds.size;
+        size=CGSizeMake(MIN(size.width,limit.width-6),MIN(size.height,limit.height-6));
+    }
     id scene = TAValue(r.controller, @"scene");
     if (!r.frameCaptured) {
         CGRect original = CGRectZero;
@@ -707,6 +714,7 @@ static void TASuspend(NSString *reason) {
 - (void)closeActionPanel:(void (^)(void))then;
 - (void)goHome;
 - (void)swapFromHandle;
+- (void)holdHandle:(UILongPressGestureRecognizer *)gesture;
 @end
 static TAControls *controls;
 static UIButton *TAButton(NSString *title, SEL action) {
@@ -867,8 +875,10 @@ static UIButton *TAButton(NSString *title, SEL action) {
     dividerGrip.layer.cornerRadius = 1; dividerGrip.userInteractionEnabled = NO;
     [dividerView addSubview:dividerGrip]; [root addSubview:dividerView];
     [dividerView addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragDivider:)]];
-    UITapGestureRecognizer *reset = [[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(resetDivider:)];
-    reset.numberOfTapsRequired = 2; [dividerView addGestureRecognizer:reset];
+    // Hold ≥1s on the divider opens the Tác vụ page. (Double-tap-to-5:5 was
+    // removed: taps meant to reveal the divider kept resetting the ratio.)
+    UILongPressGestureRecognizer *dividerHold = [[UILongPressGestureRecognizer alloc] initWithTarget:controls action:@selector(holdHandle:)];
+    dividerHold.minimumPressDuration = 1.0; dividerHold.allowableMovement = 14; [dividerView addGestureRecognizer:dividerHold];
     railIcon = [[UIImageView alloc] initWithFrame:CGRectZero];
     railIcon.layer.cornerRadius = 10; railIcon.clipsToBounds = YES; railIcon.alpha = 0; railIcon.userInteractionEnabled = NO;
     [dividerView addSubview:railIcon];
@@ -904,6 +914,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [root addSubview:floatingActions];
     // Tap = menu, double (or triple) tap = change mode, drag = move divider.
     [floatingActions addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(lockTap:)]];
+    UILongPressGestureRecognizer *handleHold=[[UILongPressGestureRecognizer alloc] initWithTarget:controls action:@selector(holdHandle:)];
+    handleHold.minimumPressDuration=1.0; handleHold.allowableMovement=14; [floatingActions addGestureRecognizer:handleHold];
     [floatingActions addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragDivider:)]];
     TALayoutSplit(splitRatio);
     buttonWindow.hidden = YES; splitWindow.hidden = NO;
@@ -992,6 +1004,12 @@ static UIButton *TAButton(NSString *title, SEL action) {
         @catch (NSException *e) { TALog(@"HOME error %@ %@",name,e.name); }
     }
     TALog(@"HOME no dashboard selector (owner=%@); split folded only",NSStringFromClass([dash class]));
+}
+- (void)holdHandle:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state!=UIGestureRecognizerStateBegan || !running || staged) return;
+    ++lockTapSerial; lockTaps=0;   // a hold is not a tap
+    TALog(@"HOLD open");
+    [self showActions];
 }
 - (void)swapFromHandle {
     if (!running || staged) return;
@@ -1117,14 +1135,25 @@ static UIButton *TAButton(NSString *title, SEL action) {
     switch (gesture.state) {
         case UIGestureRecognizerStateBegan:
             dragStartRatio=splitRatio; floatingActions.hidden=NO; chromeHold=YES; TAShowChrome();
-            dragMoved=NO;
+            dragMoved=NO; holdFired=NO;
+            {
+                NSUInteger serial=++holdSerial;
+                __weak UIPanGestureRecognizer *weakGesture=gesture;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{
+                    UIGestureRecognizerState state=weakGesture.state;
+                    if (serial!=holdSerial || dragMoved || !running) return;
+                    if (state!=UIGestureRecognizerStateBegan && state!=UIGestureRecognizerStateChanged) return;
+                    holdFired=YES; TALog(@"HOLD open (pan path)");
+                    [self showActions];
+                });
+            }
             break;
         case UIGestureRecognizerStateChanged:
             if (!dragMoved) {
                 CGPoint t=[gesture translationInView:root];
                 if (hypot(t.x,t.y)<kTADragSlop) break;
                 // Real drag starts only now.
-                dragMoved=YES; [self exitChangeMode];
+                dragMoved=YES; ++holdSerial; [self exitChangeMode];
                 for (NSInteger i=0;i<2;i++) appPickers[i].hidden=YES;
                 TAShowCovers(YES);
             }
@@ -1135,7 +1164,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
         case UIGestureRecognizerStateEnded: {
             // Short flick projection, then clamp to 30–70%.
             CGFloat projected=raw+[gesture velocityInView:root].x/width*0.08;
-            chromeHold=NO; TAShowChrome();
+            chromeHold=NO; TAShowChrome(); ++holdSerial;
+            if (holdFired) { holdFired=NO; dividerGrip.backgroundColor=[UIColor colorWithWhite:1 alpha:0.35]; break; }
             if (!dragMoved) {
                 // Finger barely moved: this was a tap, not a drag.
                 dividerGrip.backgroundColor=[UIColor colorWithWhite:1 alpha:0.35];
@@ -1152,7 +1182,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
             break;
         }
         default:
-            chromeHold=NO; TAShowChrome();
+            chromeHold=NO; TAShowChrome(); ++holdSerial; holdFired=NO;
             if (!dragMoved) { for (NSInteger i=0;i<2;i++) appPickers[i].hidden=NO; break; }
             [self commitSplit:splitRatio];
             break;
@@ -1262,8 +1292,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
 - (void)lockTap:(UITapGestureRecognizer *)gesture {
     if (gesture.state==UIGestureRecognizerStateRecognized) [self registerLockTap];
 }
-// 1 tap = Tác vụ menu (after 0.6s). 2 or 3 taps, each within 0.6s of the
-// previous one, = change mode (entered on the 2nd tap).
+// 1 tap = reveal the divider/handle only. 2 or 3 taps, each within 0.6s of
+// the previous one, = change mode (entered on the 2nd tap). Hold ≥1s = Tác vụ page.
 - (void)registerLockTap {
     if (!running || staged) return;
     if (actionPanel) { [self closeActionPanel:nil]; return; }
@@ -1275,8 +1305,9 @@ static UIButton *TAButton(NSString *title, SEL action) {
         if (serial!=lockTapSerial || !running) return;
         NSUInteger taps=lockTaps; lockTaps=0;
         if (taps!=1) return;
+        // A single tap only reveals the divider (TAShowChrome above). The
+        // Tác vụ page opens with a hold ≥1s instead.
         if (changeOverlays[0] || changeOverlays[1]) [self exitChangeMode];
-        else [self showActions];
     });
 }
 - (void)enterChangeMode {
