@@ -1,6 +1,14 @@
-# MultiTA Beta 0.37.0
+# MultiTA Beta 0.38.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.38 — giữ đúng cặp khi đổi sang app chưa mở, gỡ YouTube đứng hình
+
+Log 0.37: CarPlay không còn MAIN STALL; nút Màn hình chính chạy (HOME via _homeTapped:). Kịch bản lỗi: Maps + YouTube → đổi ô trái sang YouTube Music (chưa có scene) → mở toàn màn → kéo cạnh ghép YouTube Music với app dùng gần nhất (Maps) thay vì YouTube, và YouTube vừa bị đẩy xuống nền.
+
+Giờ khi chọn app chưa có scene: nhớ app mới, bên cần đặt, và app giữ lại ở bên kia. App template (YouTube Music, Maps, Vietmap…) được tự ghép lại đúng cặp, đúng bên sau khi đã mở ổn định ≥1.25s (AUTO REJOIN). App không phải template (YouTube) thì không tự ghép (tránh treo như 0.31–0.33); lần kéo cạnh tiếp theo trong 3 phút sẽ dùng đúng cặp và đúng bên (EDGE PULL uses remembered pair).
+
+YouTube đứng hình còn tiếng: người dùng gỡ bằng bấm bài trước/sau. Khi một app không phải template (YouTube) được gắn lại vào ô sau khi ở nền, hoặc lên toàn màn sau khi từng ở trong ô, nếu đúng app đó đang phát thì gửi Tạm dừng rồi Phát sau 0.35s để trình phát vẽ lại hình (VIDEO KICK). Không đổi bài; có thể nghe một nhịp ngắt rất ngắn.
 
 ## 0.37 — không nạp vào YouTube, sửa Home, sửa nhận diện gián đoạn
 

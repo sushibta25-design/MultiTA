@@ -1,4 +1,4 @@
-// MultiTA 0.37.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
+// MultiTA 0.38.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.37.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.38.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -102,6 +102,13 @@ static UIView *dragCovers[2];
 // Nothing is attached until the finger lifts; lifting early cancels cleanly.
 static BOOL staged;                       // edge pull in progress
 static NSString *pullCurrent, *pullCompanion, *nativeForeground;
+static NSInteger pullCurrentSlot;
+// Picking an app with no live scene opens it natively. Remember which side
+// it was meant for and which app stays on the other side, so the pair is
+// rebuilt (automatically for template apps, or by the next edge pull).
+static NSString *openBundle, *openKeep;
+static NSInteger openSlot;
+static NSTimeInterval openTime;
 static UIWindow *edgeWindow;
 static UIImageView *railIcon;
 // Capsule handle (visual part fades after 3s; its touch area stays live).
@@ -140,6 +147,8 @@ static BOOL TAAttachPending(void) { return slots[0].attaching || slots[1].attach
 static NSArray<NSString *> *TAClientBundles(void);
 static void TASetLayoutTarget(NSString *bundle, CGSize size);
 static void TAUpdateEdge(void);
+static void TAKickVideo(NSString *bundle, NSString *why);
+static NSMutableSet<NSString *> *hostedBundles;   // non-template apps shown in a pane this session
 static UIWindowScene *TADashboard(void) {
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:UIWindowScene.class] && [s.session.persistentIdentifier containsString:@"DBDashboard-Car"])
@@ -727,6 +736,7 @@ static void TASuspend(NSString *reason) {
 - (void)closeActionPanel:(void (^)(void))then;
 - (void)goHome;
 - (void)swapFromHandle;
+- (void)autoRejoin:(NSUInteger)attempt;
 - (void)holdHandle:(UILongPressGestureRecognizer *)gesture;
 @end
 static TAControls *controls;
@@ -1243,8 +1253,13 @@ static UIButton *TAButton(NSString *title, SEL action) {
                 gesture.enabled=NO; gesture.enabled=YES; return;
             }
             // Companion: most recently used other app that can attach directly.
-            NSString *companion=nil;
-            for (NSString *bundle in [order reverseObjectEnumerator])
+            NSString *companion=nil; pullCurrentSlot=0;
+            if (openBundle && [current isEqual:openBundle] && NSProcessInfo.processInfo.systemUptime-openTime<180 && openKeep.length && TADirectReady(records[openKeep])) {
+                companion=openKeep; pullCurrentSlot=openSlot;
+                TALog(@"EDGE PULL uses remembered pair %@ + %@",current,companion);
+            }
+            openBundle=nil; openKeep=nil;
+            if (!companion) for (NSString *bundle in [order reverseObjectEnumerator])
                 if (![bundle isEqual:current] && TADirectReady(records[bundle])) { companion=bundle; break; }
             resumeBundles=nil; resumeCandidate=nil;
             staged=YES; pullCurrent=current; pullCompanion=companion;
@@ -1255,7 +1270,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
             railIcon.image=companion ? TAAppIcon(companion) : [UIImage systemImageNamed:@"plus.square.on.square"];
             railIcon.tintColor=UIColor.lightGrayColor;
             for (NSInteger i=0;i<2;i++) {
-                NSString *bundle=i==0 ? current : companion;
+                NSString *bundle=i==pullCurrentSlot ? current : companion;
                 [choose[i] setTitle:bundle ? @"" : @"Chọn ứng dụng" forState:UIControlStateNormal];
                 [choose[i] setImage:bundle ? TAAppIcon(bundle) : nil forState:UIControlStateNormal];
                 choose[i].enabled=NO; choose[i].adjustsImageWhenDisabled=NO;
@@ -1303,8 +1318,9 @@ static UIButton *TAButton(NSString *title, SEL action) {
     } completion:nil];
     TALog(@"EDGE PULL open ratio=%.3f left=%@ right=%@",ratio,current,companion);
     TAUpdateEdge();
-    [self attach:current slot:0];
-    if (companion.length) [self replace:companion slot:1];
+    NSInteger cs=pullCurrentSlot; pullCurrentSlot=0;
+    [self attach:current slot:cs];
+    if (companion.length) [self replace:companion slot:1-cs];
 }
 // Divider dragged to an edge: the pane that keeps the screen returns to
 // native full screen; the other app goes back to the background as normal.
@@ -1462,6 +1478,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
 - (void)prepare:(NSString *)bundle slot:(NSInteger)slot {
     if (!running || slot<0 || slot>1 || primeBundle || !catalog[bundle]) return;
     TARememberPair();
+    openBundle=[bundle copy]; openKeep=[slots[1-slot].bundle copy]; openSlot=slot;
+    openTime=NSProcessInfo.processInfo.systemUptime;
     TAStop(@"open natively (no live scene)");
     lastNativeTransition=NSProcessInfo.processInfo.systemUptime;
     NSUInteger token=generation;
@@ -1469,8 +1487,32 @@ static UIButton *TAButton(NSString *title, SEL action) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (running || generation!=token) return;
         BOOL ok=TANativeLaunch(bundle);
-        TALog(@"OPEN NATIVE launched=%d bundle=%@",ok,bundle);
+        TALog(@"OPEN NATIVE launched=%d bundle=%@ keep=%@",ok,bundle,openKeep);
+        if (ok) [self autoRejoin:0];
     });
+}
+// Rebuild the pair once the newly opened app has settled natively. Only for
+// template apps: auto-rebuilding right after a YouTube (non-template) launch
+// hung CarPlay in 0.31–0.33. For those, the next edge pull uses the pair.
+- (void)autoRejoin:(NSUInteger)attempt {
+    if (running || primeBundle || !openBundle) return;
+    NSString *bundle=openBundle;
+    TARecord *r=records[bundle];
+    BOOL settled=NSProcessInfo.processInfo.systemUptime-lastNativeTransition>=1.25;
+    BOOL ready=r && TADirectReady(r) && [nativeForeground isEqual:bundle];
+    if (!(ready && settled)) {
+        if (attempt>=40) { TALog(@"AUTO REJOIN gave up %@",bundle); return; }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(),^{ [self autoRejoin:attempt+1]; });
+        return;
+    }
+    BOOL templ=[[TAValue(r.controller,@"sceneID") componentsSeparatedByString:@":"] count]==3;
+    if (!templ) { TALog(@"AUTO REJOIN skipped %@ (non-template): edge pull will pair it with %@",bundle,openKeep); return; }
+    NSMutableArray *selection=[@[@"",@""] mutableCopy];
+    selection[openSlot]=bundle; if (openKeep.length) selection[1-openSlot]=openKeep;
+    openBundle=nil; openKeep=nil;
+    TALog(@"AUTO REJOIN left=%@ right=%@",selection[0],selection[1]);
+    [self start];
+    if (running) [self restoreSelection:selection];
 }
 - (void)waitPreparation:(NSString *)bundle slot:(NSInteger)slot generation:(NSUInteger)token attempt:(NSUInteger)attempt {
     if (running || generation!=token || ![primeBundle isEqual:bundle]) return;
@@ -1564,6 +1606,13 @@ static UIButton *TAButton(NSString *title, SEL action) {
     BOOL surface=r.presentation && TAHasHostedSurface(r.presentation.layer,0,&budget);
     if (surface && ready) {
         choose[slot].hidden=YES; r.attaching=NO; r.backgrounded=NO;
+        // Non-template apps (YouTube via bridge) can come back from the
+        // background with a frozen picture while audio keeps playing.
+        if (![r.bundle hasPrefix:@"com.apple."] && [[TAValue(r.controller,@"sceneID") componentsSeparatedByString:@":"] count]==2) {
+            if (!hostedBundles) hostedBundles=[NSMutableSet new];
+            [hostedBundles addObject:r.bundle];
+            if (r.restoreBackground) TAKickVideo(r.bundle,@"attached from background");
+        }
         TALog(@"ATTACHED slot=%ld bundle=%@ surface=1 foregroundIssued=%d attempt=%lu (not pixel validation)",(long)slot,r.bundle,r.foregroundIssued,(unsigned long)attempt);
         TARememberPair(); return;
     }
@@ -1656,6 +1705,8 @@ typedef void (*TAMRIsPlayingFn)(dispatch_queue_t, void (^)(Boolean));
 typedef Boolean (*TAMRSendFn)(uint32_t, CFDictionaryRef);
 static TAMRIsPlayingFn TAMRIsPlaying;
 static TAMRSendFn TAMRSend;
+typedef void (*TAMRDisplayIDFn)(dispatch_queue_t, void (^)(CFStringRef));
+static TAMRDisplayIDFn TAMRDisplayID;
 static NSTimeInterval lastPlayingSeen, interruptionStart;
 static BOOL interruptionWasPlaying;
 static void TALoadMediaRemote(void) {
@@ -1665,6 +1716,7 @@ static void TALoadMediaRemote(void) {
         if (!h) { TALog(@"MEDIA remote unavailable"); return; }
         TAMRIsPlaying=(TAMRIsPlayingFn)dlsym(h,"MRMediaRemoteGetNowPlayingApplicationIsPlaying");
         TAMRSend=(TAMRSendFn)dlsym(h,"MRMediaRemoteSendCommand");
+        TAMRDisplayID=(TAMRDisplayIDFn)dlsym(h,"MRMediaRemoteGetNowPlayingApplicationDisplayID");
         TALog(@"MEDIA remote isPlaying=%d send=%d",TAMRIsPlaying!=NULL,TAMRSend!=NULL);
     });
 }
@@ -1672,6 +1724,25 @@ static void TAPollPlaying(void) {
     if (!TAMRIsPlaying) return;
     TAMRIsPlaying(dispatch_get_main_queue(), ^(Boolean playing) {
         if (playing) lastPlayingSeen=NSProcessInfo.processInfo.systemUptime;
+    });
+}
+// Frozen picture, audio still running (device photo, 0.37): the user fixes
+// it by pressing previous/next, which rebuilds YouTube's player. A pause/play
+// pair has the same effect on the video layer without changing the track.
+// Only when this exact app is the now-playing app and is playing.
+static void TAKickVideo(NSString *bundle, NSString *why) {
+    if (!TAMRSend || !TAMRIsPlaying || !TAMRDisplayID || !bundle.length) return;
+    NSString *target=[bundle copy], *reason=[why copy];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        TAMRDisplayID(dispatch_get_main_queue(), ^(CFStringRef displayID) {
+            if (![(__bridge NSString *)displayID isEqual:target]) return;
+            TAMRIsPlaying(dispatch_get_main_queue(), ^(Boolean playing) {
+                if (!playing) return;
+                TAMRSend(1,NULL);   // kMRPause
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,350*NSEC_PER_MSEC),dispatch_get_main_queue(),^{ TAMRSend(0,NULL); });   // kMRPlay
+                TALog(@"VIDEO KICK %@ reason=%@",target,reason);
+            });
+        });
     });
 }
 static void TAInterruptionBegan(NSString *why) {
@@ -2450,6 +2521,7 @@ static void TAUpdateEdge(void) {
     TARecord *foregroundRecord=records[bundle ?: @""];
     if (foregroundRecord.controller==self) foregroundRecord.backgrounded=NO;
     if (external && !running && bundle) { nativeForeground=bundle; dispatch_async(dispatch_get_main_queue(), ^{ TAUpdateEdge(); }); }
+    if (external && bundle && [hostedBundles containsObject:bundle]) TAKickVideo(bundle,@"native foreground after split");
     if (external && interruptionStart>0) {
         NSString *b=[bundle copy];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAInterruptionEnded([@"foreground " stringByAppendingString:b ?: @"?"]); });
