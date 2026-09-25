@@ -2865,8 +2865,12 @@ static void TAUpdateEdge(void) {
             return;
         }
         // YouTube is a full UIKit app bridged into CarPlay. It hung repeatedly
-        // after being hosted; keep MultiTA code out of its process entirely.
-        if ([process isEqual:@"com.google.ios.youtube"]) return;
+        // after being hosted, so install no hooks there: only the shared
+        // keyboard client, started after launch settles.
+        if ([process isEqual:@"com.google.ios.youtube"]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); });
+            return;
+        }
         // 0.44 stable base: all in-app layout experiments (45pt inset reclaim,
         // tab-title/image-row compaction, scroll-rail hiding, Now Playing art)
         // are off. Apps draw in a pane exactly as CarPlay renders them.

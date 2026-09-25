@@ -208,7 +208,15 @@ static void TAKBScanClients(void) {
         for (UIWindow *w in ((UIWindowScene *)scene).windows) {
             if (w.hidden || w.alpha<0.01) continue;
             NSString *bundle=TAKBWindowBundle(w); if (!bundle) continue;
-            NSInteger budget=500; UIView *input=TAKBFindInput(w,&budget);
+            // Large UIKit apps (YouTube) exceed the walk budget; ask the window first.
+            UIView *input=nil;
+            if ([w respondsToSelector:@selector(firstResponder)]) {
+                id responder=((id (*)(id,SEL))objc_msgSend)(w,@selector(firstResponder));
+                if ([responder isKindOfClass:UIView.class] && ((UIView *)responder).window==w) {
+                    NSInteger budget=1; input=TAKBFindInput(responder,&budget);
+                }
+            }
+            NSInteger budget=500; if (!input) input=TAKBFindInput(w,&budget);
             if (input) found[bundle]=input;
         }
     }
