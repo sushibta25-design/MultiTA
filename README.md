@@ -1,6 +1,10 @@
-# MultiTA Beta 0.46.2
+# MultiTA Beta 0.46.3
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.46.3 — log nhiệt độ
+
+Mỗi 30 giây (và ngay khi iOS đổi mức nhiệt) ghi một dòng `HEAT` vào `/var/mobile/MultiTA-beta.log`: mức nhiệt iOS (nominal/fair/serious/critical), nhiệt độ pin, % pin, đang sạc hay không, % CPU của CarPlay (nơi MultiTA chạy, 100% = một nhân), đang chia màn không, app ô trái/phải và tỉ lệ chia.
 
 ## 0.46.2 — ô hẹp cũng được trả lại khoảng Dock
 

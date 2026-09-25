@@ -1,4 +1,4 @@
-// MultiTA 0.46.2 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.46.3 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -8,6 +8,7 @@
 #import <fcntl.h>
 #import <dlfcn.h>
 #import <unistd.h>
+#import <sys/resource.h>
 
 static void TALog(NSString *format, ...) {
     va_list args; va_start(args, format);
@@ -25,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.46.2] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.46.3] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -2001,6 +2002,67 @@ static void TAStartResponsivenessProbe(void) {
     });
     dispatch_resume(timer);
 }
+// Heat diagnostics: every 30s (and on each iOS thermal-state change) log the
+// thermal state, battery temperature/level/charging, this process's CPU use,
+// and the split state, so a drive log shows when heat starts and what ran.
+static double TABatteryCelsius(void) {
+    typedef CFMutableDictionaryRef (*MatchFn)(const char *);
+    typedef unsigned int (*ServiceFn)(unsigned int, CFDictionaryRef);
+    typedef CFTypeRef (*PropFn)(unsigned int, CFStringRef, CFAllocatorRef, unsigned int);
+    typedef int (*ReleaseFn)(unsigned int);
+    static MatchFn matching; static ServiceFn service; static PropFn property; static ReleaseFn release;
+    static BOOL loaded;
+    if (!loaded) {
+        loaded=YES;
+        void *iokit=dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",RTLD_LAZY);
+        if (iokit) {
+            matching=(MatchFn)dlsym(iokit,"IOServiceMatching");
+            service=(ServiceFn)dlsym(iokit,"IOServiceGetMatchingService");
+            property=(PropFn)dlsym(iokit,"IORegistryEntryCreateCFProperty");
+            release=(ReleaseFn)dlsym(iokit,"IOObjectRelease");
+        }
+    }
+    if (!matching || !service || !property || !release) return NAN;
+    unsigned int battery=service(0,matching("AppleSmartBattery"));   // consumes the dictionary
+    if (!battery) return NAN;
+    CFTypeRef value=property(battery,CFSTR("Temperature"),kCFAllocatorDefault,0);
+    release(battery);
+    double celsius=NAN; int centi=0;
+    if (value && CFGetTypeID(value)==CFNumberGetTypeID() && CFNumberGetValue((CFNumberRef)value,kCFNumberIntType,&centi)) celsius=centi/100.0;
+    if (value) CFRelease(value);
+    return celsius;
+}
+static void TALogHeat(NSString *reason) {
+    static double lastCPU=-1, lastWall=0;
+    struct rusage usage; getrusage(RUSAGE_SELF,&usage);
+    double cpu=usage.ru_utime.tv_sec+usage.ru_utime.tv_usec/1e6+usage.ru_stime.tv_sec+usage.ru_stime.tv_usec/1e6;
+    double wall=NSProcessInfo.processInfo.systemUptime;
+    NSString *percent=lastCPU>=0 && wall>lastWall ? [NSString stringWithFormat:@"%.1f%%",(cpu-lastCPU)/(wall-lastWall)*100] : @"?";
+    lastCPU=cpu; lastWall=wall;
+    NSArray *states=@[@"nominal",@"fair",@"serious",@"critical"];
+    NSInteger thermal=NSProcessInfo.processInfo.thermalState;
+    UIDevice *device=UIDevice.currentDevice; device.batteryMonitoringEnabled=YES;
+    NSArray *charge=@[@"unknown",@"unplugged",@"charging",@"full"];
+    double celsius=TABatteryCelsius();
+    TALog(@"HEAT %@ thermal=%@ battery=%@ level=%.0f%% power=%@ cpu=%@ split=%d left=%@ right=%@ ratio=%.2f",reason,
+          thermal>=0 && thermal<(NSInteger)states.count ? (id)states[thermal] : (id)@(thermal),
+          isnan(celsius) ? @"?" : [NSString stringWithFormat:@"%.1fC",celsius],
+          device.batteryLevel*100,(NSUInteger)device.batteryState<charge.count ? (id)charge[device.batteryState] : (id)@(device.batteryState),
+          percent,running,slots[0].bundle ?: @"-",slots[1].bundle ?: @"-",splitRatio);
+}
+static void TAHeatTick(void) {
+    TALogHeat(@"tick");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAHeatTick(); });
+}
+static void TAStartHeatLog(void) {
+    static BOOL started;
+    if (started) return;
+    started=YES;
+    [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil
+        queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) { TALogHeat(@"change"); }];
+    TALogHeat(@"start");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAHeatTick(); });
+}
 static void TATick(void) {
     UIWindowScene *s = TADashboard();
     // Track playback and the display's shape. A lost or reshaped CarPlay
@@ -2909,6 +2971,6 @@ static void TAUpdateEdge(void) {
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
         dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallHost(); });
-        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TAStartHeatLog(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }
