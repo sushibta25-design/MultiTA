@@ -1,4 +1,4 @@
-// MultiTA 0.47.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.47.1 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.47.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.47.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -1310,6 +1310,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
             if (staged) [self finishPull:x/width];
             break;
         case UIGestureRecognizerStateBegan:
+            TALog(@"DOCK SWIPE start x=%.1f dockRight=%.1f current=%@",x,dockZoneRight,nativeForeground ?: @"-");
             break;
         default:
             if (staged) [self finishPull:0];
@@ -2842,7 +2843,10 @@ static void TAUpdateEdge(void) {
     // Never move or hide the zone under a finger: that would cancel the swipe.
     UIGestureRecognizerState state=dockSwipe.state;
     if (staged || state==UIGestureRecognizerStateBegan || state==UIGestureRecognizerStateChanged) { edgeWindow.hidden=NO; return; }
-    BOOL show=!running && !primeBundle && nativeForeground.length && records[nativeForeground];
+    // Available whenever no split is open; a swipe with no usable app open
+    // is rejected and logged (0.47.0 gated this on a captured foreground app,
+    // and on some head units the zone never appeared).
+    BOOL show=!running && !primeBundle;
     // The Dock changes with the open app: re-measure when the zone appears and
     // every 3s while shown. Hit-testing skips MultiTA's own windows.
     static NSTimeInterval measured;
@@ -2853,6 +2857,8 @@ static void TAUpdateEdge(void) {
         dockZoneRight=CGRectGetMaxX(zone);
         if (zone.size.height>=24) edgeWindow.frame=zone; else show=NO;
     }
+    if (edgeWindow.hidden==show)
+        TALog(@"DOCK ZONE %@ frame=%@ current=%@ captured=%d",show ? @"shown" : @"hidden",NSStringFromCGRect(edgeWindow.frame),nativeForeground ?: @"-",nativeForeground.length && records[nativeForeground]!=nil);
     edgeWindow.hidden=!show;
 }
 %hook DBApplicationSceneViewController
