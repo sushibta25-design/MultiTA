@@ -35,6 +35,8 @@ static void TALog(NSString *format, ...) {
 // reports, touch traces, multi-stage resize observations) cost CPU and log IO
 // in every CarPlay app. Off by default since 0.34.
 static const BOOL kTADiag=NO;
+// Ẩn thanh cuộn, bỏ ảnh bìa Now Playing, các hook chẩn đoán trong app: tắt.
+static const BOOL kTALegacyClientHooks=NO;
 static id TAValue(id o, NSString *key) {
     @try { return [o valueForKey:key]; } @catch (__unused NSException *e) { return nil; }
 }
@@ -2865,6 +2867,13 @@ static void TAUpdateEdge(void) {
             // fixed 61pt image-row buttons). Both check the bundle themselves.
             %init(TACompactHome);
             if (NSClassFromString(@"CPSImageRowCell")) { %init(TAImageRowExperiment); }
+            // Still off (Logos requires every group to have an %init; this flag
+            // keeps them disabled at runtime until they are re-enabled one by one).
+            if (kTALegacyClientHooks) {
+                %init(TAClient);
+                %init(TAScrollRail);
+                %init(TANowPlayingExperiment);
+            }
             dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); });
             return;
         }
