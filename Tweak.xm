@@ -2917,10 +2917,6 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 %end
 %end
 #import "TAKeyboard.h"
-// The per-pane side buttons this hid (0.10.21) no longer exist; the keyboard
-// window already sits above the split window and floatingActions is hidden.
-static void TAHideSideActions(void) {}
-
 // YouTube iPad layout experiment. YouTube picks its iPhone or iPad UI from
 // the device idiom at launch, so report the iPad idiom. 0.46.2 showed the
 // iPad UI ignores the CarPlay window's compact width and lays out the full
