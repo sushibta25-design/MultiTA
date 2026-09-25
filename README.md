@@ -1,6 +1,10 @@
-# MultiTA Beta 0.48.0
+# MultiTA Beta 0.48.1
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.48.1 — sửa vuốt Dock không ăn ở 0.48.0
+
+Log 0.48.0: bộ nhận vuốt đã gắn vào các cửa sổ Dashboard nhưng không lần nào bắt đầu. (1) Dò Dock thất bại vì DBLockOutWindow trả lời hit-test trên toàn màn hình, nên bề rộng Dock rơi về 60pt, trong khi ở 0.47.3 người dùng bắt đầu vuốt ở x≈43–88pt. (2) Nhận dạng cử chỉ gốc của CarPlay có thể giành mất cú vuốt. Sửa: bỏ qua DBLockOutWindow khi dò, cho cú vuốt chạy song song với cử chỉ của CarPlay, vùng mặc định 20% màn hình như bản thử đã vuốt được, log `DOCK SWIPE ignored …` khi một cú vuốt gần Dock bị bỏ qua.
 
 ## 0.48 — vuốt từ cả cột Dock, icon Dock vẫn bấm được
 

@@ -1,4 +1,4 @@
-// MultiTA 0.48.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.48.1 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -1324,7 +1324,17 @@ static UIButton *TAButton(NSString *title, SEL action) {
     CGPoint moved=[pan translationInView:view];
     CGPoint now=[view convertPoint:[pan locationInView:view] toCoordinateSpace:dashboard.coordinateSpace];
     CGFloat startX=now.x-moved.x;
-    return moved.x>0 && fabs(moved.x)>fabs(moved.y)*1.2 && startX<=dockZoneRight;
+    BOOL begin=moved.x>0 && fabs(moved.x)>fabs(moved.y)*1.2 && startX<=dockZoneRight;
+    if (!begin && startX<=dockZoneRight+40) {
+        static NSTimeInterval lastLog;
+        NSTimeInterval t=NSProcessInfo.processInfo.systemUptime;
+        if (t-lastLog>1) { lastLog=t; TALog(@"DOCK SWIPE ignored startX=%.1f moved=%@ dockRight=%.1f window=%@",startX,NSStringFromCGPoint(moved),dockZoneRight,NSStringFromClass(view.class)); }
+    }
+    return begin;
+}
+// CarPlay's own Dock/scroll recognisers must not starve the swipe.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gesture shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return [dockSwipes containsObject:(UIPanGestureRecognizer *)gesture];
 }
 - (BOOL)beginPullFromLeft {
     NSString *current=[nativeForeground copy];
@@ -2802,6 +2812,11 @@ static void TAHideSideActions(void) {}
 static BOOL TAOwnWindow(UIWindow *w) {
     return w==splitWindow || w==buttonWindow || w==TAKBWindow;
 }
+// DBLockOutWindow answers hit tests over the whole display (log 0.47.3/0.48.0)
+// although real touches reach the Dock below it; never probe through it.
+static BOOL TASkipProbeWindow(UIWindow *w) {
+    return w.hidden || w.alpha<0.01 || TAOwnWindow(w) || [NSStringFromClass(w.class) containsString:@"LockOut"];
+}
 static NSArray<UIWindow *> *TADockProbeWindows(UIWindowScene *s) {
     return [s.windows sortedArrayUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *c) {
         return a.windowLevel>c.windowLevel ? NSOrderedAscending : a.windowLevel<c.windowLevel ? NSOrderedDescending : NSOrderedSame;
@@ -2817,7 +2832,7 @@ static void TALogDockProbe(UIWindowScene *s) {
     TALog(@"DOCK PROBE display=%@",NSStringFromCGRect(b));
     for (CGFloat y=CGRectGetMinY(b)+6;y<CGRectGetMaxY(b);y+=12) {
         for (UIWindow *w in TADockProbeWindows(s)) {
-            if (w.hidden || w.alpha<0.01 || TAOwnWindow(w)) continue;
+            if (TASkipProbeWindow(w)) continue;
             UIView *hit=[w hitTest:[w convertPoint:CGPointMake(CGRectGetMinX(b)+20,y) fromCoordinateSpace:s.coordinateSpace] withEvent:nil];
             if (!hit) continue;
             NSMutableString *chain=[NSMutableString string];
@@ -2840,7 +2855,7 @@ static CGRect TAFindDockZone(UIWindowScene *s) {
         CGFloat probe=CGRectGetMinX(b)+probeX.doubleValue;
         for (CGFloat y=CGRectGetMinY(b)+6;y<CGRectGetMinY(b)+b.size.height*0.8;y+=3) {
             for (UIWindow *w in windows) {
-                if (w.hidden || w.alpha<0.01 || TAOwnWindow(w)) continue;
+                if (TASkipProbeWindow(w)) continue;
                 CGPoint point=[w convertPoint:CGPointMake(probe,y) fromCoordinateSpace:s.coordinateSpace];
                 UIView *hit=[w hitTest:point withEvent:nil];
                 for (UIView *v=hit;v && v!=w;v=v.superview) {
@@ -2861,7 +2876,7 @@ static CGRect TAFindDockZone(UIWindowScene *s) {
             }
         }
     }
-    CGRect fallback=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(44,round(b.size.width*0.14)),round(b.size.height*0.4));
+    CGRect fallback=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(44,round(b.size.width*0.2)),round(b.size.height*0.4));
     static BOOL loggedFallback;
     if (!loggedFallback) { loggedFallback=YES; TALog(@"DOCK ZONE fallback: no Dock icon found; zone=%@",NSStringFromCGRect(fallback)); }
     return fallback;
@@ -2888,8 +2903,8 @@ static void TAUpdateEdge(void) {
         UIGestureRecognizerState state=pan.state;
         if (state==UIGestureRecognizerStateBegan || state==UIGestureRecognizerStateChanged) return;
     }
-    // Dock width: from the first Dock icon when found, else ~14% of the display
-    // (the Dock's share on the test car's Home screen). Re-measured every 3s.
+    // Dock width: from the first Dock icon when found, else 20% of the display
+    // (the zone the 0.47.3 test swiped from successfully). Re-measured every 3s.
     static NSTimeInterval measured;
     NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
     if (!running && now-measured>=3) {
