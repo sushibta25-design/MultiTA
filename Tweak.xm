@@ -2649,6 +2649,8 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 }
 %end
 %end
+#import "TAKeyboard.h"
+
 // 0.46: the only code in CarPlayTemplateUIHost — Google Maps inset reclaim.
 %group TAInsetOnly
 %hook UIWindow
@@ -2854,6 +2856,14 @@ static void TAUpdateEdge(void) {
 %ctor {
     @autoreleasepool {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
+
+        // Shared keyboard: restore the last proven common-keyboard path.
+        if ([TAClientBundles() containsObject:process] &&
+            ![process isEqual:@"com.google.ios.youtube"] &&
+            ![process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+            dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallClients(); });
+            return;
+        }
         // YouTube is a full UIKit app bridged into CarPlay. It hung repeatedly
         // after being hosted; keep MultiTA code out of its process entirely.
         if ([process isEqual:@"com.google.ios.youtube"]) return;
@@ -2862,6 +2872,7 @@ static void TAUpdateEdge(void) {
         // are off. Apps draw in a pane exactly as CarPlay renders them.
         if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAInsetOnly);
+            dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallClients(); });
             dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); });
             return;
         }
@@ -2892,6 +2903,7 @@ static void TAUpdateEdge(void) {
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
+        dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallHost(); });
         dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }
