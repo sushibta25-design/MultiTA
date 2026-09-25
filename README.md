@@ -1,6 +1,10 @@
-# MultiTA Beta 0.46.0
+# MultiTA Beta 0.46.1
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.46.1 — app tự co vừa ô (hết lệch phải)
+
+Trong ô chia màn, app CarPlay (YouTube Music, Apple Maps, Vietmap) bị đẩy lệch sang phải và cắt mất phần bên phải, dù ở ô trái hay ô phải. Nguyên nhân: app vẫn chừa ~45pt bên trái cho Dock; 0.46 chỉ trả lại khoảng đó cho Google Maps. Giờ mọi app có mẹo layout (Apple Maps, Google Maps, YouTube Music, Vietmap) đều được trả lại khoảng đó nên nội dung lấp đầy ô. Log: TEMPLATE APPLY / TEMPLATE RESTORE.
 
 ## 0.46 — Google Maps trong ô, giữ YouTube khi kéo divider về cạnh
 
