@@ -1,4 +1,4 @@
-// MultiTA 0.39.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
+// MultiTA 0.40.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.39.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.40.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -73,6 +73,8 @@ static NSString *TABundle(id controller) {
 @property(nonatomic) BOOL restoreBackground;
 @property(nonatomic) BOOL attaching;
 @property(nonatomic) BOOL foregroundIssued;
+@property(nonatomic) BOOL userLaunched;   // opened by the user this session (launch source present)
+@property(nonatomic) BOOL noSurface;      // last attach produced no picture: relaunch via Dashboard
 @end
 @implementation TARecord
 @end
@@ -115,7 +117,7 @@ static NSTimeInterval openTime;
 // background an app that is shown in a pane is declined.
 static NSString *launchBundle;
 static NSInteger launchSlot;
-static NSTimeInterval launchGuardUntil;
+static NSTimeInterval launchGuardUntil, launchStart, launchSurfaceSince;
 static BOOL allowLaunchInSplit;
 static UIWindow *edgeWindow;
 static UIImageView *railIcon;
@@ -822,13 +824,13 @@ static UIButton *TAButton(NSString *title, SEL action) {
     if (!running || slot<0 || slot>1 || (!records[bundle] && !catalog[bundle])) return;
     if ([slots[slot].bundle isEqual:bundle]) { [self retryPane:slot]; return; }
     if ([slots[1-slot].bundle isEqual:bundle]) return;
-    if (!TADirectReady(records[bundle])) { [self prepare:bundle slot:slot]; return; }
+    if (!TADirectReady(records[bundle]) || records[bundle].noSurface) { [self prepare:bundle slot:slot]; return; }
     TAClearSlot(slot,@"replace"); [self attach:bundle slot:slot];
 }
 - (void)retryPane:(NSInteger)slot {
     if (!running || slot<0 || slot>1 || slots[slot].attaching) return;
     NSString *bundle=[slots[slot].bundle copy] ?: [retryTargets[slot] copy]; if (!bundle.length) return;
-    if (!TADirectReady(records[bundle])) { [self prepare:bundle slot:slot]; return; }
+    if (!TADirectReady(records[bundle]) || records[bundle].noSurface) { [self prepare:bundle slot:slot]; return; }
     TALog(@"MANUAL RETRY side=%ld bundle=%@",(long)slot,bundle);
     [self snapshot];
     TAClearSlot(slot,@"manual retry"); [self attach:bundle slot:slot];
@@ -1269,8 +1271,13 @@ static UIButton *TAButton(NSString *title, SEL action) {
                 TALog(@"EDGE PULL uses remembered pair %@ + %@",current,companion);
             }
             openBundle=nil; openKeep=nil;
-            if (!companion) for (NSString *bundle in [order reverseObjectEnumerator])
-                if (![bundle isEqual:current] && TADirectReady(records[bundle])) { companion=bundle; break; }
+            // Only apps the user actually opened this session and that last
+            // rendered fine. Apple Maps restored in the background at connect
+            // (no launch source) had a scene but never drew in a pane (0.39 log).
+            if (!companion) for (NSString *bundle in [order reverseObjectEnumerator]) {
+                TARecord *candidate=records[bundle];
+                if (![bundle isEqual:current] && candidate.userLaunched && !candidate.noSurface && TADirectReady(candidate)) { companion=bundle; break; }
+            }
             resumeBundles=nil; resumeCandidate=nil;
             staged=YES; pullCurrent=current; pullCompanion=companion;
             [self start];
@@ -1475,6 +1482,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     if (!running) return;
     NSString *target=[bundle copy];
     TALog(@"ATTACH FAILED side=%ld bundle=%@ reason=%@",(long)slot,target,reason);
+    if ([reason containsString:@"no hosted surface"]) records[target].noSurface=YES;
     TAClearSlot(slot,reason); retryTargets[slot]=target;
     [choose[slot] setTitle:@"Chưa hiển thị được\nChạm để thử lại" forState:UIControlStateNormal];
     choose[slot].hidden=NO; choose[slot].enabled=YES;
@@ -1493,7 +1501,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
     if (launchBundle) { TALog(@"LAUNCH IN PANE busy with %@",launchBundle); return; }
     TAClearSlot(slot,@"launch in pane");
     launchBundle=[bundle copy]; launchSlot=slot;
-    launchGuardUntil=NSProcessInfo.processInfo.systemUptime+8;
+    launchStart=NSProcessInfo.processInfo.systemUptime; launchSurfaceSince=0;
+    launchGuardUntil=launchStart+14;
     [choose[slot] setImage:TAAppIcon(bundle) forState:UIControlStateNormal];
     [choose[slot] setTitle:[NSString stringWithFormat:@"  Đang mở %@…",TAAppName(bundle)] forState:UIControlStateNormal];
     choose[slot].enabled=NO; choose[slot].adjustsImageWhenDisabled=NO; choose[slot].hidden=NO;
@@ -1508,7 +1517,24 @@ static UIButton *TAButton(NSString *title, SEL action) {
     if (!running || generation!=token || !launchBundle) return;
     NSString *bundle=launchBundle; NSInteger slot=launchSlot;
     TARecord *r=records[bundle];
-    BOOL ready=r && TADirectReady(r) && NSProcessInfo.processInfo.systemUptime-lastNativeTransition>=0.8;
+    NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+    // Attaching YouTube (non-template, bridged) ~1s after its cold launch
+    // froze CarPlay's main thread in every case (0.31–0.33 and 0.39 logs);
+    // attaching it ≥5s after launch never did. Template apps are fine at 0.8s.
+    BOOL templ=r && [[TAValue(r.controller,@"sceneID") componentsSeparatedByString:@":"] count]==3;
+    BOOL settledApp=YES;
+    if (r && !templ && ![bundle hasPrefix:@"com.apple."]) {
+        // Readiness signal + time cap: the app's own native picture (drawn by
+        // Dashboard behind the split window) must exist for ≥2s, or 6s must
+        // have passed since the launch request. Never before 2s.
+        NSInteger budget=240;
+        UIView *native=[r.controller isKindOfClass:UIViewController.class] ? ((UIViewController *)r.controller).viewIfLoaded : nil;
+        if (launchSurfaceSince<=0 && native && TAHasHostedSurface(native.layer,0,&budget)) {
+            launchSurfaceSince=now; TALog(@"LAUNCH IN PANE native picture seen %@ after %.1fs",bundle,now-launchStart);
+        }
+        settledApp=now-launchStart>=2 && ((launchSurfaceSince>0 && now-launchSurfaceSince>=2) || now-launchStart>=6);
+    }
+    BOOL ready=r && TADirectReady(r) && now-lastNativeTransition>=0.8 && settledApp;
     if (ready && !slots[slot]) {
         launchBundle=nil;
         TALog(@"LAUNCH IN PANE ready %@ attempt=%lu",bundle,(unsigned long)attempt);
@@ -1516,9 +1542,9 @@ static UIButton *TAButton(NSString *title, SEL action) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ launchGuardUntil=0; });
         return;
     }
-    if (attempt>=48) {
+    if (attempt>=64) {
         launchBundle=nil; launchGuardUntil=0;
-        [self failAttach:slot bundle:bundle reason:@"app did not start within 12s"]; return;
+        [self failAttach:slot bundle:bundle reason:@"app did not start within 16s"]; return;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(),^{ [self waitLaunch:attempt+1 generation:token]; });
 }
@@ -1636,7 +1662,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     NSInteger budget=240;
     BOOL surface=r.presentation && TAHasHostedSurface(r.presentation.layer,0,&budget);
     if (surface && ready) {
-        choose[slot].hidden=YES; r.attaching=NO; r.backgrounded=NO;
+        choose[slot].hidden=YES; r.attaching=NO; r.backgrounded=NO; r.noSurface=NO;
         // Non-template apps (YouTube via bridge) can come back from the
         // background with a frozen picture while audio keeps playing.
         if (![r.bundle hasPrefix:@"com.apple."] && [[TAValue(r.controller,@"sceneID") componentsSeparatedByString:@":"] count]==2) {
@@ -1704,6 +1730,7 @@ static void TACapture(id controller, id settings) {
                 pending.controller=controller;
             }
             if (launch || !pending.activation) pending.activation=[settings copy];
+            if (launch) pending.userLaunched=YES;
             records[bundle]=pending; return;
         }
     }
@@ -1715,6 +1742,7 @@ static void TACapture(id controller, id settings) {
         r=[TARecord new]; r.controller=controller; r.bundle=bundle;
     }
     if (launch || !r.activation) r.activation=[settings copy]; records[bundle]=r;
+    if (launch) r.userLaunched=YES;
     [order removeObject:bundle]; [order addObject:bundle];
     // Keep resumable/active apps pinned when trimming recently seen apps.
     while (order.count>24) {
