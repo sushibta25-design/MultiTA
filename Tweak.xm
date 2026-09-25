@@ -1,4 +1,4 @@
-// MultiTA 0.36.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
+// MultiTA 0.37.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.36.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.37.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -1031,6 +1031,13 @@ static UIButton *TAButton(NSString *title, SEL action) {
         discovered=found;
     }
     [names addObjectsFromArray:discovered ?: @[]];
+    // Device (0.36 log): DBDashboard has -_homeTapped:(id) — the Dock Home
+    // button action. Call it with a nil sender first.
+    SEL tapped=NSSelectorFromString(@"_homeTapped:");
+    if ([dash respondsToSelector:tapped]) {
+        @try { ((void(*)(id,SEL,id))objc_msgSend)(dash,tapped,nil); TALog(@"HOME via _homeTapped:"); return; }
+        @catch (NSException *e) { TALog(@"HOME _homeTapped: error %@",e.name); }
+    }
     for (NSString *name in names) {
         SEL sel=NSSelectorFromString(name);
         NSMethodSignature *sig=[dash methodSignatureForSelector:sel];
@@ -2502,9 +2509,14 @@ static void TAUpdateEdge(void) {
     // the screen (normal app switching destroys one app's scenes at a time).
     static NSTimeInterval lastDestroy; static NSString *lastDestroyBundle;
     NSTimeInterval destroyedAt=NSProcessInfo.processInfo.systemUptime;
-    if (bundle && lastDestroyBundle && ![bundle isEqual:lastDestroyBundle] && destroyedAt-lastDestroy<0.5)
-        TAInterruptionBegan(@"scenes of several apps destroyed");
-    lastDestroy=destroyedAt; lastDestroyBundle=[bundle copy];
+    // Every controller is told about every destroyed scene, so only count a
+    // destruction of this controller's own scene (current or owned by us).
+    BOOL own=scene && (scene==currentScene || scene==r.scene);
+    if (own) {
+        if (bundle && lastDestroyBundle && ![bundle isEqual:lastDestroyBundle] && destroyedAt-lastDestroy<0.5)
+            TAInterruptionBegan(@"scenes of several apps destroyed");
+        lastDestroy=destroyedAt; lastDestroyBundle=[bundle copy];
+    }
     NSUInteger token=generation;
     %orig;
     if (!affected) return;
@@ -2523,9 +2535,11 @@ static void TAUpdateEdge(void) {
 %ctor {
     @autoreleasepool {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
+        // YouTube is a full UIKit app bridged into CarPlay. It hung repeatedly
+        // after being hosted; keep MultiTA code out of its process entirely.
+        if ([process isEqual:@"com.google.ios.youtube"]) return;
         if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
-            if ([process isEqual:@"com.google.ios.youtube"]) dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"CLIENT LOADED youtube pid=%d",getpid()); TAStartResponsivenessProbe(); });
             if (NSClassFromString(@"_UIStaticScrollBar")) {
                 %init(TAScrollRail);
                 dispatch_async(dispatch_get_main_queue(), ^{ TAListenScrollBars(); });

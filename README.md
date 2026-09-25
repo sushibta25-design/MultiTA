@@ -1,6 +1,14 @@
-# MultiTA Beta 0.36.0
+# MultiTA Beta 0.37.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.37 — không nạp vào YouTube, sửa Home, sửa nhận diện gián đoạn
+
+Log 0.36: không còn MAIN STALL của CarPlay khi mở lại YouTube, nhưng YouTube vẫn đứng. Bỏ YouTube khỏi Filter và chặn trong %ctor: không còn hook nào chạy trong tiến trình YouTube (mất phần ẩn thanh cuộn 44pt của YouTube trong ô hẹp). Bộ đo treo trong YouTube của 0.36 không ghi được log vì YouTube bị sandbox — đã bỏ.
+
+Home: log 0.36 liệt kê DBDashboard có -_homeTapped:(id), -_handleHomeEvent:(id), -_handleReturnToHomeScreenEvent:(id). Nút Màn hình chính gọi -_homeTapped:nil (hành động của nút Home trên Dock).
+
+Nhận diện lùi xe: mỗi controller đều nhận thông báo cho mọi scene bị huỷ nên 0.36 báo nhầm "nhiều app bị huỷ". Giờ chỉ tính khi scene bị huỷ là scene của chính controller đó.
 
 ## 0.36 — màn rộng, YouTube, Home, lùi xe
 
