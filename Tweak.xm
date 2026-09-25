@@ -1,4 +1,4 @@
-// MultiTA 0.48.6 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.49.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.6] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -733,11 +733,120 @@ static void TAClearSlot(NSInteger slot, NSString *reason) {
     [choose[slot] setTitle:@"Chạm để chọn ứng dụng" forState:UIControlStateNormal];
     TALog(@"SLOT CLEAR side=%ld reason=%@",(long)slot,reason);
 }
+// Dock pull show: a mouse rides the divider toward a round green monster in
+// the other pane whose mouth opens wider (and body grows) as the divider
+// approaches; on release the mouse is swallowed, then the overlay fades and
+// the apps appear. About one second, nothing flashes. Drawn in code.
+static UIView *funView, *funMonster;
+static CAShapeLayer *funBody, *funTeeth, *funPupil;
+static UILabel *funMouse, *funMouseSay, *funMonsterSay;
+static UILabel *TAFunBubble(void) {
+    UILabel *l=[UILabel new];
+    l.font=[UIFont systemFontOfSize:11 weight:UIFontWeightBold]; l.textColor=UIColor.blackColor;
+    l.backgroundColor=[UIColor colorWithWhite:1 alpha:0.92]; l.textAlignment=NSTextAlignmentCenter;
+    l.layer.cornerRadius=8; l.clipsToBounds=YES; l.alpha=0;
+    return l;
+}
+static void TAFunSay(UILabel *bubble, NSString *text, CGPoint anchor) {
+    bubble.text=text;
+    CGSize size=CGSizeMake(ceil([text sizeWithAttributes:@{NSFontAttributeName:bubble.font}].width)+14,20);
+    bubble.bounds=(CGRect){CGPointZero,size}; bubble.center=anchor; bubble.alpha=text.length ? 1 : 0;
+}
+// Pac-Man style body facing left; open = half-angle of the mouth (radians).
+static void TAFunShape(CGFloat r, CGFloat open) {
+    CGPoint c=CGPointMake(r,r);
+    UIBezierPath *body=[UIBezierPath bezierPath];
+    [body moveToPoint:c];
+    [body addArcWithCenter:c radius:r startAngle:M_PI+open endAngle:M_PI-open clockwise:YES];
+    [body closePath];
+    funBody.path=body.CGPath;
+    UIBezierPath *teeth=[UIBezierPath bezierPath];
+    CGFloat size=MAX(4,r*0.18);
+    for (NSInteger lip=0;lip<2;lip++) {
+        CGFloat angle=lip==0 ? M_PI+open : M_PI-open, dir=lip==0 ? 1 : -1;
+        for (NSNumber *at in @[@0.55,@0.85]) {
+            CGFloat k=at.doubleValue*r;
+            CGPoint p=CGPointMake(c.x+k*cos(angle),c.y+k*sin(angle));
+            [teeth moveToPoint:CGPointMake(p.x-size/2,p.y)];
+            [teeth addLineToPoint:CGPointMake(p.x+size/2,p.y)];
+            [teeth addLineToPoint:CGPointMake(p.x,p.y+dir*size*1.2)];
+            [teeth closePath];
+        }
+    }
+    funTeeth.path=open>0.05 ? teeth.CGPath : NULL;
+}
+static void TAFunStart(void) {
+    UIView *root=splitWindow.rootViewController.view;
+    if (!root || funView) return;
+    funView=[[UIView alloc] initWithFrame:root.bounds]; funView.userInteractionEnabled=NO;
+    if (dividerView.superview==root) [root insertSubview:funView belowSubview:dividerView]; else [root addSubview:funView];
+    funMonster=[UIView new]; [funView addSubview:funMonster];
+    funBody=[CAShapeLayer layer];
+    funBody.fillColor=[UIColor colorWithRed:0.36 green:0.82 blue:0.32 alpha:1].CGColor;
+    funBody.strokeColor=[UIColor colorWithRed:0.12 green:0.4 blue:0.1 alpha:1].CGColor; funBody.lineWidth=2;
+    [funMonster.layer addSublayer:funBody];
+    funTeeth=[CAShapeLayer layer]; funTeeth.fillColor=UIColor.whiteColor.CGColor; [funMonster.layer addSublayer:funTeeth];
+    CAShapeLayer *eye=[CAShapeLayer layer]; eye.name=@"eye"; eye.fillColor=UIColor.whiteColor.CGColor; [funMonster.layer addSublayer:eye];
+    funPupil=[CAShapeLayer layer]; funPupil.fillColor=UIColor.blackColor.CGColor; [funMonster.layer addSublayer:funPupil];
+    CAShapeLayer *brow=[CAShapeLayer layer]; brow.name=@"brow"; brow.strokeColor=[UIColor colorWithRed:0.1 green:0.3 blue:0.08 alpha:1].CGColor;
+    brow.lineWidth=3; brow.lineCap=kCALineCapRound; [funMonster.layer addSublayer:brow];
+    funMouse=[UILabel new]; funMouse.text=@"🐭"; funMouse.font=[UIFont systemFontOfSize:30]; [funMouse sizeToFit];
+    [funView addSubview:funMouse];
+    funMouseSay=TAFunBubble(); funMonsterSay=TAFunBubble();
+    [funView addSubview:funMouseSay]; [funView addSubview:funMonsterSay];
+}
+// cx = divider centre; progress 0 at the Dock edge, 1 near the far limit.
+static void TAFunUpdate(void) {
+    if (!funView || !splitWindow) return;
+    CGSize size=funView.bounds.size;
+    CGFloat cx=dividerView.center.x, left=dockZoneRight, far=size.width*0.8;
+    CGFloat p=MIN(1,MAX(0,(cx-left)/MAX(1,far-left)));
+    CGFloat room=MAX(40,size.width-cx);
+    CGFloat r=MIN(room*0.34,size.height*0.26)*(0.75+0.35*p);
+    CGFloat mx=cx+MAX(r+18,room*0.5), my=size.height/2;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    funMonster.frame=CGRectMake(mx-r,my-r,2*r,2*r);
+    TAFunShape(r,0.12+0.62*p);
+    CAShapeLayer *eye=nil, *brow=nil;
+    for (CALayer *l in funMonster.layer.sublayers) { if ([l.name isEqual:@"eye"]) eye=(CAShapeLayer *)l; if ([l.name isEqual:@"brow"]) brow=(CAShapeLayer *)l; }
+    CGPoint e=CGPointMake(r*1.05,r*0.45); CGFloat er=MAX(4,r*0.2);
+    eye.path=[UIBezierPath bezierPathWithOvalInRect:CGRectMake(e.x-er,e.y-er,2*er,2*er)].CGPath;
+    CGFloat pr=er*0.5;   // pupil glances at the mouse
+    funPupil.path=[UIBezierPath bezierPathWithOvalInRect:CGRectMake(e.x-er*0.45-pr,e.y+er*0.1-pr,2*pr,2*pr)].CGPath;
+    UIBezierPath *b=[UIBezierPath bezierPath];
+    [b moveToPoint:CGPointMake(e.x-er*1.2,e.y-er*1.1)]; [b addLineToPoint:CGPointMake(e.x+er*1.1,e.y-er*1.7-p*er*0.6)];
+    brow.path=b.CGPath;
+    [CATransaction commit];
+    CGFloat shake=p>0.72 ? (CGFloat)(arc4random_uniform(5))-2 : 0;
+    funMouse.center=CGPointMake(cx-funMouse.bounds.size.width/2-6+shake,my+shake*0.6);
+    NSString *line=p<0.33 ? @"Ơ… đi đâu đây?" : p<0.72 ? @"Hình như có mùi…" : @"CỨU TÔI!!!";
+    TAFunSay(funMouseSay,line,CGPointMake(MAX(40,funMouse.center.x),my-34));
+    TAFunSay(funMonsterSay,p>0.45 ? @"Măm măm…" : @"",CGPointMake(mx,my-r-14));
+}
+static void TAFunEnd(BOOL eaten) {
+    UIView *view=funView; funView=nil;
+    if (!view) return;
+    if (!eaten) { [view removeFromSuperview]; return; }
+    CGRect m=funMonster.frame; CGFloat r=m.size.width/2;
+    CGPoint mouth=CGPointMake(CGRectGetMinX(m)+r*0.55,CGRectGetMidY(m));
+    UILabel *mouse=funMouse, *monsterSay=funMonsterSay;
+    funMouseSay.alpha=0;
+    [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
+        mouse.center=mouth; mouse.transform=CGAffineTransformMakeScale(0.3,0.3); mouse.alpha=0;
+    } completion:^(__unused BOOL finished) {
+        if (!funView) TAFunShape(r,0.01);   // chomp (drops the teeth), unless a new pull reuses the layers
+        TAFunSay(monsterSay,@"Măm! Ngon 😋",CGPointMake(CGRectGetMidX(m),CGRectGetMinY(m)-14));
+        [UIView animateWithDuration:0.3 delay:0.45 options:0 animations:^{ view.alpha=0; } completion:^(__unused BOOL f) {
+            [view removeFromSuperview];
+        }];
+    }];
+}
 static void TAStop(NSString *reason) {
     if (primeBundle) { primeBundle=nil; primeSelection=nil; primePrevious=nil; primeSawForeground=NO; ++generation; }
     resumeBundles=nil; resumeCandidate=nil;
     if (!running) return;
     running = NO; ++generation;
+    TAFunEnd(NO);
     for (NSInteger i=0;i<2;i++) { [appPickers[i] removeFromSuperview]; appPickers[i]=nil; pickerItems[i]=nil; pickerPages[i]=0; retryTargets[i]=nil; }
     TALog(@"STOP %@", reason);
     BOOL previous = ownCall; ownCall = YES;
@@ -1336,7 +1445,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
         case UIGestureRecognizerStateChanged:
             // Slide the divider out as soon as the finger nears the Dock edge.
             if (!staged && x>dockZoneRight-8 && ![self beginPullFromLeft]) { gesture.enabled=NO; gesture.enabled=YES; break; }
-            if (staged) TALayoutPull(x/width);
+            if (staged) { TALayoutPull(x/width); TAFunUpdate(); }
             break;
         case UIGestureRecognizerStateEnded:
             if (staged) [self finishPull:x/width];
@@ -1420,6 +1529,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     // otherwise the divider's own tap recognizers swallow handle taps.
     [splitWindow.rootViewController.view bringSubviewToFront:dividerView];
     [splitWindow.rootViewController.view bringSubviewToFront:floatingActions];
+    TAFunStart();
     TALog(@"DOCK PULL begin current=%@ companion=%@ dockRight=%.1f",current,companion,dockZoneRight);
     return YES;
 }
@@ -1433,6 +1543,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     CGFloat display=MAX(1,TADisplayWidth());
     BOOL cancel=fromLeft ? ratio<(dockZoneRight+kTAPullCancel*0.6)/display : ratio>1-kTAPullCancel/display;
     if (cancel) { TALog(@"PULL cancelled ratio=%.3f fromLeft=%d",ratio,fromLeft); TAStop(@"pull cancelled"); return; }
+    if (fromLeft) TAFunEnd(YES);
     ratio=TAClampRatio(ratio);
     if (fabs(ratio-0.5)<0.03) ratio=0.5;
     splitRatio=ratio;

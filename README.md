@@ -1,6 +1,10 @@
-# MultiTA Beta 0.48.6
+# MultiTA Beta 0.49.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.49 — chuột và quái vật khi vuốt từ Dock
+
+Khi vuốt từ Dock: con chuột 🐭 bám trên divider, ô bên kia có quái vật tròn màu xanh (kiểu Pac-Man, răng nanh, mắt liếc về phía chuột, lông mày dữ). Divider càng tiến lại, quái vật càng to và há miệng rộng. Chuột nói "Ơ… đi đâu đây?" → "Hình như có mùi…" → run và hét "CỨU TÔI!!!"; quái vật "Măm măm…". Thả tay để chia màn: chuột bị hút vào miệng, quái vật ngậm "chóp", nói "Măm! Ngon 😋" rồi mờ đi (~1 giây) và hai app hiện ra. Huỷ (thả sát Dock) thì biến mất ngay. Vẽ bằng code, không dùng ảnh.
 
 ## 0.48.6 — nút đổi bên sát ổ khoá, không che nút của ô
 
