@@ -2658,8 +2658,6 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 }
 %end
 %end
-#import "TAKeyboard.h"
-
 %group TAClient
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
@@ -2856,38 +2854,44 @@ static void TAUpdateEdge(void) {
 %ctor {
     @autoreleasepool {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
-
-        // Shared keyboard restored from the last proven keyboard build.
-        if ([TAClientBundles() containsObject:process] &&
-            ![process isEqual:@"com.google.ios.youtube"] &&
-            ![process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
-            dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallClients(); });
-            return;
-        }
-
+        // YouTube is a full UIKit app bridged into CarPlay. It hung repeatedly
+        // after being hosted; keep MultiTA code out of its process entirely.
         if ([process isEqual:@"com.google.ios.youtube"]) return;
-
+        // 0.44 stable base: all in-app layout experiments (45pt inset reclaim,
+        // tab-title/image-row compaction, scroll-rail hiding, Now Playing art)
+        // are off. Apps draw in a pane exactly as CarPlay renders them.
         if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAInsetOnly);
-            // Keep the current MultiTA client groups initialized exactly as on
-            // the last green baseline. Keyboard restoration must not bypass
-            // Logos group initialization.
-            %init(TACompactHome);
-            if (NSClassFromString(@"CPSImageRowCell")) { %init(TAImageRowExperiment); }
-            if (kTALegacyClientHooks) {
-                %init(TAClient);
-                %init(TAScrollRail);
-                %init(TANowPlayingExperiment);
-            }
-            dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallClients(); });
             dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); });
             return;
         }
-
+        if (![process isEqual:@"com.apple.CarPlayApp"]) return;
+        if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+            %init(TAClient);
+            if (NSClassFromString(@"_UIStaticScrollBar")) {
+                %init(TAScrollRail);
+                dispatch_async(dispatch_get_main_queue(), ^{ TAListenScrollBars(); });
+            }
+            if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+                %init(TACompactHome);
+                if (NSClassFromString(@"CPSImageRowCell")) {
+                    %init(TAImageRowExperiment);
+                }
+                Class cls=NSClassFromString(@"CPUINowPlayingView");
+                SEL selector=NSSelectorFromString(@"recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:");
+                Method method=class_getInstanceMethod(cls,selector);
+                const char *encoding=method ? method_getTypeEncoding(method) : NULL;
+                if (encoding && strcmp(encoding,"v96@0:8B16B20B24{CGRect={CGPoint=dd}{CGSize=dd}}28{CGRect={CGPoint=dd}{CGSize=dd}}60B92")==0) {
+                    %init(TANowPlayingExperiment);
+                    TALog(@"NATIVE LAYOUT HOOK enabled");
+                } else TALog(@"NATIVE LAYOUT HOOK skipped encoding=%s",encoding ?: "missing");
+                dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); TAListenSnapshots(); });
+            }
+            return;
+        }
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
-        dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallHost(); });
         dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }
