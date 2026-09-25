@@ -1,4 +1,4 @@
-// MultiTA 0.32.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, tap-count change mode.
+// MultiTA 0.33.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, tap-count change mode.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -24,7 +24,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.32.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.33.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -700,6 +700,7 @@ static void TASuspend(NSString *reason) {
 - (void)changeTap:(UIGestureRecognizer *)gesture;
 - (void)exitChangeMode;
 - (void)closeActionPanel:(void (^)(void))then;
+- (void)goHome;
 @end
 static TAControls *controls;
 static UIButton *TAButton(NSString *title, SEL action) {
@@ -894,100 +895,86 @@ static UIButton *TAButton(NSString *title, SEL action) {
 - (void)holdDock:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state==UIGestureRecognizerStateBegan) [self snapshot];
 }
+// Tác vụ page: greeting + two buttons (CarPlay Home, car = close).
 - (void)showActions {
     UIView *root=splitWindow.rootViewController.view;
     if (!running || !root || actionPanel || splitWindow.rootViewController.presentedViewController) return;
-    NSUInteger token=generation;
-    NSMutableArray *rows=[NSMutableArray new];
-    void (^add)(NSString *, BOOL, BOOL, void (^)(void)) = ^(NSString *title, BOOL destructive, BOOL enabled, void (^perform)(void)) {
-        [rows addObject:@{@"title":title,@"destructive":@(destructive),@"enabled":@(enabled),@"perform":[perform copy]}];
-    };
-    add(@"Đổi app trái",NO,YES,^{ [self changeLeft]; });
-    add(@"Đổi app phải",NO,YES,^{ [self changeRight]; });
-    add(@"Đổi trái ↔ phải",NO,slots[0].presentation && slots[1].presentation && !TAAttachPending(),^{ [self swapSides]; });
-    add(@"Cặp gần dùng",NO,!TAAttachPending(),^{ [self showPairs]; });
-    add(@"Tỉ lệ 7 : 3",NO,fabs(splitRatio-kTAMaxRatio)>0.005,^{ [self commitSplit:kTAMaxRatio]; });
-    add(@"Tỉ lệ 5 : 5",NO,fabs(splitRatio-0.5)>0.005,^{ [self commitSplit:0.5]; });
-    add(@"Tỉ lệ 3 : 7",NO,fabs(splitRatio-kTAMinRatio)>0.005,^{ [self commitSplit:kTAMinRatio]; });
-    for (NSInteger i=0;i<2;i++)
-        add(i==0 ? @"Tải lại ô trái" : @"Tải lại ô phải",NO,(slots[i].bundle || retryTargets[i]) && !slots[i].attaching,^{ [self retryPane:i]; });
-    add(@"Chọn lại hai app",NO,YES,^{ [self restartSplit]; });
-    add(@"Thu về CarPlay",NO,YES,^{ [self fold]; });
-    add(@"Lấy log",NO,YES,^{ [self snapshot]; });
-    add(@"Thoát chia màn",YES,YES,^{ [self stop]; });
-
     [self exitChangeMode];
     CGSize size=root.bounds.size;
-    // Dimmed backdrop: tapping outside the card closes the page.
     UIView *panel=[[UIView alloc] initWithFrame:root.bounds];
     panel.backgroundColor=[UIColor colorWithWhite:0 alpha:0.45]; panel.alpha=0;
     TABlockButton *backdrop=[TABlockButton buttonWithHandler:^{ [self closeActionPanel:nil]; }];
     backdrop.frame=panel.bounds; [panel addSubview:backdrop];
-    CGFloat cw=MIN(size.width-32,360), ch=size.height-12;
-    UIView *card=[[UIView alloc] initWithFrame:CGRectMake((size.width-cw)/2,6,cw,ch)];
-    card.layer.cornerRadius=18; card.clipsToBounds=YES;
+    CGFloat cw=MIN(size.width-32,380), ch=MIN(size.height-24,196);
+    UIView *card=[[UIView alloc] initWithFrame:CGRectMake((size.width-cw)/2,(size.height-ch)/2,cw,ch)];
+    card.layer.cornerRadius=22; card.clipsToBounds=YES;
     card.layer.borderWidth=0.5; card.layer.borderColor=[UIColor colorWithWhite:1 alpha:0.18].CGColor;
     UIVisualEffectView *blur=[[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterialDark]];
     blur.frame=card.bounds; [card addSubview:blur];
     [panel addSubview:card];
 
-    // Greeting: rounded heavy type filled with a cyan→orange gradient.
-    UILabel *greeting=[[UILabel alloc] initWithFrame:CGRectMake(0,0,cw,40)];
+    // Large greeting, rounded heavy type with a cyan→orange gradient fill.
+    CGFloat greetingHeight=ch*0.44;
+    UILabel *greeting=[[UILabel alloc] initWithFrame:CGRectMake(0,0,cw-24,greetingHeight)];
     greeting.text=@"Vạn dặm bình an!"; greeting.textAlignment=NSTextAlignmentCenter;
-    greeting.font=TARoundedFont(21,UIFontWeightHeavy);
+    greeting.font=TARoundedFont(38,UIFontWeightHeavy);
+    greeting.adjustsFontSizeToFitWidth=YES; greeting.minimumScaleFactor=0.6;
     [greeting setNeedsDisplay]; [greeting.layer displayIfNeeded];
     CAGradientLayer *gradient=[CAGradientLayer layer];
-    gradient.frame=CGRectMake(0,8,cw,40);
-    gradient.colors=@[(id)TACyan().CGColor,(id)[UIColor colorWithRed:0.55 green:0.75 blue:1 alpha:1].CGColor,(id)TAOrange().CGColor];
-    gradient.startPoint=CGPointMake(0.2,0.5); gradient.endPoint=CGPointMake(0.8,0.5);
+    gradient.frame=CGRectMake(12,10,cw-24,greetingHeight);
+    gradient.colors=@[(id)TACyan().CGColor,(id)[UIColor colorWithRed:0.62 green:0.8 blue:1 alpha:1].CGColor,(id)TAOrange().CGColor];
+    gradient.startPoint=CGPointMake(0.15,0.5); gradient.endPoint=CGPointMake(0.85,0.5);
     gradient.mask=greeting.layer;
     [card.layer addSublayer:gradient];
-    UIView *rule=[[UIView alloc] initWithFrame:CGRectMake(cw/2-28,50,56,2)];
-    rule.layer.cornerRadius=1; rule.backgroundColor=[UIColor colorWithWhite:1 alpha:0.18]; [card addSubview:rule];
+    UIView *rule=[[UIView alloc] initWithFrame:CGRectMake(cw/2-32,greetingHeight+14,64,3)];
+    rule.layer.cornerRadius=1.5; rule.backgroundColor=[UIColor colorWithWhite:1 alpha:0.18]; [card addSubview:rule];
 
-    // Scrollable action list.
-    CGFloat carHeight=50, listTop=56;
-    UIScrollView *list=[[UIScrollView alloc] initWithFrame:CGRectMake(10,listTop,cw-20,ch-listTop-carHeight-6)];
-    list.showsVerticalScrollIndicator=NO; list.delaysContentTouches=NO;
-    CGFloat y=0, rowHeight=40;
-    for (NSDictionary *row in rows) {
-        BOOL enabled=[row[@"enabled"] boolValue], destructive=[row[@"destructive"] boolValue];
-        void (^perform)(void)=row[@"perform"];
-        TABlockButton *button=[TABlockButton buttonWithHandler:^{
-            [self closeActionPanel:^{ if (running && generation==token) perform(); }];
-        }];
-        button.frame=CGRectMake(0,y,list.bounds.size.width,rowHeight-4);
-        button.layer.cornerRadius=11; button.backgroundColor=[UIColor colorWithWhite:1 alpha:destructive ? 0.10 : 0.06];
-        [button setTitle:row[@"title"] forState:UIControlStateNormal];
-        [button setTitleColor:destructive ? [UIColor colorWithRed:1 green:0.42 blue:0.38 alpha:1] : [UIColor colorWithWhite:0.96 alpha:1] forState:UIControlStateNormal];
-        button.titleLabel.font=TARoundedFont(15,destructive ? UIFontWeightBold : UIFontWeightSemibold);
-        button.enabled=enabled; button.alpha=enabled ? 1 : 0.35;
-        [list addSubview:button]; y+=rowHeight;
-    }
-    list.contentSize=CGSizeMake(list.bounds.size.width,y);
-    [card addSubview:list];
-
-    // Car button: closes this page (drives off to the right).
+    // Two round buttons side by side.
+    CGFloat side=MIN(64,ch-greetingHeight-44), gap=44;
+    CGFloat by=greetingHeight+14+(ch-greetingHeight-14-side)/2;
+    TABlockButton *(^makeButton)(NSString *, UIColor *, NSString *, void (^)(void))=^(NSString *symbol, UIColor *tint, NSString *label, void (^handler)(void)) {
+        TABlockButton *b=[TABlockButton buttonWithHandler:handler];
+        b.layer.cornerRadius=side/2; b.backgroundColor=[UIColor colorWithWhite:1 alpha:0.08];
+        b.layer.borderWidth=1; b.layer.borderColor=[tint colorWithAlphaComponent:0.55].CGColor;
+        [b setImage:[UIImage systemImageNamed:symbol withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:side*0.4 weight:UIImageSymbolWeightSemibold]] forState:UIControlStateNormal];
+        b.tintColor=tint; b.accessibilityLabel=label;
+        return b;
+    };
+    TABlockButton *home=makeButton(@"square.grid.2x2.fill",TAOrange(),@"Màn hình chính CarPlay",^{
+        [self closeActionPanel:^{ [self goHome]; }];
+    });
+    home.frame=CGRectMake(cw/2-gap/2-side,by,side,side); [card addSubview:home];
     __block __weak TABlockButton *weakCar=nil;
-    TABlockButton *car=[TABlockButton buttonWithHandler:^{
+    TABlockButton *car=makeButton(@"car.fill",TACyan(),@"Đóng",^{
         [UIView animateWithDuration:0.28 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
             weakCar.transform=CGAffineTransformMakeTranslation(cw,0);
         } completion:nil];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,180*NSEC_PER_MSEC),dispatch_get_main_queue(),^{ [self closeActionPanel:nil]; });
-    }];
-    car.frame=CGRectMake(cw/2-38,ch-carHeight,76,carHeight-8);
-    car.layer.cornerRadius=(carHeight-8)/2; car.backgroundColor=[UIColor colorWithWhite:1 alpha:0.08];
-    car.layer.borderWidth=0.5; car.layer.borderColor=[TACyan() colorWithAlphaComponent:0.5].CGColor;
-    [car setImage:[UIImage systemImageNamed:@"car.fill" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIImageSymbolWeightSemibold]] forState:UIControlStateNormal];
-    car.tintColor=TACyan(); car.accessibilityLabel=@"Đóng"; weakCar=car;
-    [card addSubview:car];
+    });
+    car.frame=CGRectMake(cw/2+gap/2,by,side,side); [card addSubview:car]; weakCar=car;
 
     [root addSubview:panel]; actionPanel=panel;
     card.transform=CGAffineTransformMakeScale(0.94,0.94);
     [UIView animateWithDuration:0.22 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0 options:0 animations:^{
         panel.alpha=1; card.transform=CGAffineTransformIdentity;
     } completion:nil];
-    TALog(@"ACTIONS open rows=%lu",(unsigned long)rows.count);
+    TALog(@"ACTIONS open");
+}
+// Home: keep the pair for resume (same as "Thu về CarPlay"), then ask the
+// Dashboard to show CarPlay Home if it exposes a known no-argument selector.
+- (void)goHome {
+    if (!running) return;
+    TARememberPair();
+    TASuspend(@"home");
+    id dash=nativeDashboard;
+    for (NSString *name in @[@"handleHomeButtonPress",@"_handleHomeButtonPress",@"homeButtonPressed",@"_homeButtonPressed",@"goHome",@"_goHome"]) {
+        SEL sel=NSSelectorFromString(name);
+        NSMethodSignature *sig=[dash methodSignatureForSelector:sel];
+        if (!sig || sig.numberOfArguments!=2 || strcmp(sig.methodReturnType,@encode(void))) continue;
+        @try { ((void(*)(id,SEL))objc_msgSend)(dash,sel); TALog(@"HOME via %@",name); return; }
+        @catch (NSException *e) { TALog(@"HOME error %@ %@",name,e.name); }
+    }
+    TALog(@"HOME no dashboard selector (owner=%@); split folded only",NSStringFromClass([dash class]));
 }
 - (void)closeActionPanel:(void (^)(void))then {
     UIView *panel=actionPanel; actionPanel=nil;
