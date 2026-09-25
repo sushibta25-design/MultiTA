@@ -1,4 +1,4 @@
-// MultiTA 0.38.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
+// MultiTA 0.39.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.38.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.39.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -109,6 +109,14 @@ static NSInteger pullCurrentSlot;
 static NSString *openBundle, *openKeep;
 static NSInteger openSlot;
 static NSTimeInterval openTime;
+// In-pane launch (0.39): an app with no live scene is launched by Dashboard
+// while the split stays up; the pane shows "Đang mở…" and adopts the app as
+// soon as its scene exists. During that short window Dashboard's attempt to
+// background an app that is shown in a pane is declined.
+static NSString *launchBundle;
+static NSInteger launchSlot;
+static NSTimeInterval launchGuardUntil;
+static BOOL allowLaunchInSplit;
 static UIWindow *edgeWindow;
 static UIImageView *railIcon;
 // Capsule handle (visual part fades after 3s; its touch area stays live).
@@ -371,7 +379,7 @@ static NSArray<NSString *> *TAPickerBundles(void) {
 }
 static BOOL TANativeLaunch(NSString *bundle) {
     // A Dashboard launch is never allowed while two hosted panes are active.
-    if (running) { TALog(@"PREPARE rejected native launch during split %@",bundle); return NO; }
+    if (running && !allowLaunchInSplit) { TALog(@"PREPARE rejected native launch during split %@",bundle); return NO; }
     id info=catalog[bundle]; Class launchClass=NSClassFromString(@"DBApplicationLaunchInfo");
     SEL init=NSSelectorFromString(@"initWithApplication:activationSettings:"), launch=NSSelectorFromString(@"_launchAppWithInfo:forURL:");
     id allocated=[launchClass alloc];
@@ -678,6 +686,7 @@ static void TAStop(NSString *reason) {
     staged = NO; pullCurrent = nil; pullCompanion = nil;
     lockVisual = nil; swapVisual = nil; chromeHold = NO; ++chromeToken; changeOverlays[0] = changeOverlays[1] = nil;
     lockTaps = 0; ++lockTapSerial; dragMoved = NO; actionPanel = nil;
+    launchBundle = nil; launchGuardUntil = 0;
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
     buttonWindow.hidden = YES;   // square launcher retired; edge pull is the entry
     TAUpdateEdge();
@@ -737,6 +746,7 @@ static void TASuspend(NSString *reason) {
 - (void)goHome;
 - (void)swapFromHandle;
 - (void)autoRejoin:(NSUInteger)attempt;
+- (void)waitLaunch:(NSUInteger)attempt generation:(NSUInteger)token;
 - (void)holdHandle:(UILongPressGestureRecognizer *)gesture;
 @end
 static TAControls *controls;
@@ -1475,21 +1485,42 @@ static UIButton *TAButton(NSString *title, SEL action) {
 // main thread blocked 16-58s -> watchdog restart. Instead: leave the split,
 // open the app full screen natively, and let the user pull the right edge
 // (edge pull pairs it with the most recently used other app).
+// 0.39: picking an app with no live scene keeps the split. Leaving the split
+// to open it (0.33–0.38) backgrounded the app in the other pane; YouTube
+// never redrew after coming back from the background (blank pane, audio on).
 - (void)prepare:(NSString *)bundle slot:(NSInteger)slot {
-    if (!running || slot<0 || slot>1 || primeBundle || !catalog[bundle]) return;
-    TARememberPair();
-    openBundle=[bundle copy]; openKeep=[slots[1-slot].bundle copy]; openSlot=slot;
-    openTime=NSProcessInfo.processInfo.systemUptime;
-    TAStop(@"open natively (no live scene)");
-    lastNativeTransition=NSProcessInfo.processInfo.systemUptime;
+    if (!running || staged || slot<0 || slot>1 || primeBundle || !catalog[bundle]) return;
+    if (launchBundle) { TALog(@"LAUNCH IN PANE busy with %@",launchBundle); return; }
+    TAClearSlot(slot,@"launch in pane");
+    launchBundle=[bundle copy]; launchSlot=slot;
+    launchGuardUntil=NSProcessInfo.processInfo.systemUptime+8;
+    [choose[slot] setImage:TAAppIcon(bundle) forState:UIControlStateNormal];
+    [choose[slot] setTitle:[NSString stringWithFormat:@"  Đang mở %@…",TAAppName(bundle)] forState:UIControlStateNormal];
+    choose[slot].enabled=NO; choose[slot].adjustsImageWhenDisabled=NO; choose[slot].hidden=NO;
     NSUInteger token=generation;
-    TALog(@"OPEN NATIVE bundle=%@ side=%ld",bundle,(long)slot);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (running || generation!=token) return;
-        BOOL ok=TANativeLaunch(bundle);
-        TALog(@"OPEN NATIVE launched=%d bundle=%@ keep=%@",ok,bundle,openKeep);
-        if (ok) [self autoRejoin:0];
-    });
+    lastNativeTransition=NSProcessInfo.processInfo.systemUptime;
+    allowLaunchInSplit=YES; BOOL ok=TANativeLaunch(bundle); allowLaunchInSplit=NO;
+    TALog(@"LAUNCH IN PANE bundle=%@ side=%ld requested=%d",bundle,(long)slot,ok);
+    if (!ok) { launchBundle=nil; launchGuardUntil=0; [self failAttach:slot bundle:bundle reason:@"launch request failed"]; return; }
+    [self waitLaunch:0 generation:token];
+}
+- (void)waitLaunch:(NSUInteger)attempt generation:(NSUInteger)token {
+    if (!running || generation!=token || !launchBundle) return;
+    NSString *bundle=launchBundle; NSInteger slot=launchSlot;
+    TARecord *r=records[bundle];
+    BOOL ready=r && TADirectReady(r) && NSProcessInfo.processInfo.systemUptime-lastNativeTransition>=0.8;
+    if (ready && !slots[slot]) {
+        launchBundle=nil;
+        TALog(@"LAUNCH IN PANE ready %@ attempt=%lu",bundle,(unsigned long)attempt);
+        [self attach:bundle slot:slot];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ launchGuardUntil=0; });
+        return;
+    }
+    if (attempt>=48) {
+        launchBundle=nil; launchGuardUntil=0;
+        [self failAttach:slot bundle:bundle reason:@"app did not start within 12s"]; return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(),^{ [self waitLaunch:attempt+1 generation:token]; });
 }
 // Rebuild the pair once the newly opened app has settled natively. Only for
 // template apps: auto-rebuilding right after a YouTube (non-template) launch
@@ -2521,6 +2552,7 @@ static void TAUpdateEdge(void) {
     TARecord *foregroundRecord=records[bundle ?: @""];
     if (foregroundRecord.controller==self) foregroundRecord.backgrounded=NO;
     if (external && !running && bundle) { nativeForeground=bundle; dispatch_async(dispatch_get_main_queue(), ^{ TAUpdateEdge(); }); }
+    if (external && running && bundle && [bundle isEqual:launchBundle]) nativeForeground=bundle;
     if (external && bundle && [hostedBundles containsObject:bundle]) TAKickVideo(bundle,@"native foreground after split");
     if (external && interruptionStart>0) {
         NSString *b=[bundle copy];
@@ -2539,12 +2571,21 @@ static void TAUpdateEdge(void) {
             BOOL occupied=slots[0].controller==strongController || slots[1].controller==strongController || [slots[0].bundle isEqual:lateBundle] || [slots[1].bundle isEqual:lateBundle];
             if (running && !TAAttachPending() && !occupied && lateBundle && (activation[@"DBActivationSettingLaunchSource"] || [TAClientBundles() containsObject:lateBundle])) TALog(@"NATIVE LAUNCH settled retain split bundle=%@",lateBundle);
             TACapture(strongController,activation);
-            if (running && lateBundle && activation[@"DBActivationSettingLaunchSource"]) [controls offerNative:lateBundle];
+            if (running && lateBundle && activation[@"DBActivationSettingLaunchSource"] && ![lateBundle isEqual:launchBundle] && ![slots[0].bundle isEqual:lateBundle] && ![slots[1].bundle isEqual:lateBundle]) [controls offerNative:lateBundle];
         });
     }
 }
 - (void)backgroundSceneWithCompletion:(id)completion {
     TARecord *r=records[TABundle(self) ?: @""];
+    if (!ownCall && running && NSProcessInfo.processInfo.systemUptime<launchGuardUntil && r && r.controller==self && (r==slots[0] || r==slots[1])) {
+        // Dashboard switches its own "current app" to the one being launched
+        // into the other pane. Keep this pane's app running; it is backgrounded
+        // properly when the split ends (restoreBackground).
+        r.restoreBackground=YES;
+        TALog(@"BACKGROUND DECLINED during in-pane launch bundle=%@",r.bundle);
+        if (completion) ((void(^)(BOOL))completion)(YES);
+        return;
+    }
     BOOL owned=!ownCall && running && r && r.controller==self && (r==slots[0] || r==slots[1]);
     NSUInteger token=generation, serial=r.resizeSerial;
     if (r.controller==self) r.backgrounded=YES;
