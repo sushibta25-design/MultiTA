@@ -1,6 +1,12 @@
-# MultiTA Beta 0.33.1
+# MultiTA Beta 0.34.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.34 — nhẹ hơn, mũi tên đổi trái ↔ phải trên tay nắm
+
+Hiệu năng: tắt toàn bộ chẩn đoán kế thừa từ TAduo (kTADiag=NO): dump cây view/constraint mỗi lần màn hình template xuất hiện, báo cáo kích thước CLIENT sau mỗi lần layout cửa sổ, ghi vết chạm trong app, quan sát resize 3 mốc 0.25/1/3s. Bỏ mọi UIVisualEffectView (kính mờ) — tay nắm, thẻ Tác vụ, biểu tượng đổi app, nút bảng chọn — thay bằng nền tối đặc bán trong suốt; kính mờ đè lên bản đồ phải vẽ lại mỗi khung hình. Quét tìm Dock chỉ 5 giây/lần khi chưa tìm thấy (trước đây mỗi giây).
+
+Đổi vị trí: nút tròn mũi tên hai chiều (arrow.left.arrow.right, cyan) nằm ngay trên tay nắm, cùng tự ẩn sau 3 giây nhưng vẫn chạm được khi ẩn. Chạm = đổi app trái ↔ phải (mỗi app giữ nguyên độ rộng, không resize), mờ đi khi chưa đủ hai app. Log: SWAP tap.
 
 ## 0.33.1 — tránh treo khi chọn app chưa mở (YouTube)
 

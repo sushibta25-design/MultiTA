@@ -1,4 +1,4 @@
-// MultiTA 0.33.1 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, tap-count change mode.
+// MultiTA 0.34.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -24,12 +24,16 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.33.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.34.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
     });
 }
+// Heavy TAduo-era diagnostics (view-tree/constraint dumps, per-layout client
+// reports, touch traces, multi-stage resize observations) cost CPU and log IO
+// in every CarPlay app. Off by default since 0.34.
+static const BOOL kTADiag=NO;
 static id TAValue(id o, NSString *key) {
     @try { return [o valueForKey:key]; } @catch (__unused NSException *e) { return nil; }
 }
@@ -93,7 +97,8 @@ static NSString *pullCurrent, *pullCompanion, *nativeForeground;
 static UIWindow *edgeWindow;
 static UIImageView *railIcon;
 // Capsule handle (visual part fades after 3s; its touch area stays live).
-static UIView *lockVisual;
+static UIView *lockVisual, *swapVisual;
+static const CGFloat kTASwapArea=46;   // top part of the handle container
 static NSUInteger chromeToken;
 static BOOL chromeHold;
 // Change mode: double/triple tap on the handle shows a change badge on both panes.
@@ -185,7 +190,7 @@ static void TATransact(TARecord *r, NSUInteger token, NSUInteger serial, NSUInte
                     TAInvokeVoid(r.presentation, @"_updateFrameAndTransform");
                     [r.presentation setNeedsLayout];
                 } @catch (NSException *e) { TALog(@"REFRESH ERROR %@", e.name); }
-                TAObserve(r, token, serial, @"after-transaction");
+                if (kTADiag) TAObserve(r, token, serial, @"after-transaction");
             });
         } @catch (NSException *e) { TALog(@"RESIZE ERROR %@ %@", r.bundle, e.name); }
     };
@@ -208,7 +213,7 @@ static void TAResize(TARecord *r, CGSize size) {
     TASetLayoutTarget(r.bundle, size);
     NSUInteger token = generation, serial = ++r.resizeSerial;
     TATransact(r, token, serial, 0);
-    for (NSNumber *delay in @[@0.25, @1.0, @3.0]) {
+    for (NSNumber *delay in kTADiag ? @[@0.25, @1.0, @3.0] : @[]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             TAObserve(r, token, serial, [NSString stringWithFormat:@"after-%@s", delay]);
         });
@@ -407,13 +412,14 @@ static void TAShowChrome(void) {
     NSUInteger token=++chromeToken;
     [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionBeginFromCurrentState|UIViewAnimationOptionAllowUserInteraction animations:^{
         lockVisual.alpha=1; dividerGrip.alpha=1;
+        swapVisual.alpha=(slots[0].presentation && slots[1].presentation) ? 1 : 0.35;
     } completion:nil];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),dispatch_get_main_queue(),^{
         if (!running || chromeHold || token!=chromeToken) return;
         // Only the visuals fade. Hit areas remain active (alpha of the
         // touch containers is untouched), so a hidden handle still works.
         [UIView animateWithDuration:0.35 delay:0 options:UIViewAnimationOptionAllowUserInteraction animations:^{
-            lockVisual.alpha=0; if (!staged) dividerGrip.alpha=0;
+            lockVisual.alpha=0; swapVisual.alpha=0; if (!staged) dividerGrip.alpha=0;
         } completion:nil];
     });
 }
@@ -461,8 +467,7 @@ static UIButton *TAGlassButton(NSString *symbol, CGFloat point, CGRect frame, SE
     UIButton *b=[UIButton buttonWithType:UIButtonTypeCustom];
     b.frame=frame; b.layer.cornerRadius=MIN(frame.size.width,frame.size.height)/2; b.clipsToBounds=YES;
     b.layer.borderWidth=0.5; b.layer.borderColor=[UIColor colorWithWhite:1 alpha:0.22].CGColor;
-    UIVisualEffectView *blur=[[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialDark]];
-    blur.frame=b.bounds; blur.userInteractionEnabled=NO; [b addSubview:blur];
+    b.backgroundColor=[UIColor colorWithWhite:0.16 alpha:0.92];
     UIImage *image=[UIImage systemImageNamed:symbol withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:point weight:UIImageSymbolWeightBold]];
     [b setImage:image forState:UIControlStateNormal]; b.tintColor=UIColor.whiteColor;
     [b bringSubviewToFront:b.imageView];
@@ -642,7 +647,7 @@ static void TAStop(NSString *reason) {
     ownCall = previous;
     dividerView = nil; dividerGrip = nil; railIcon = nil; dragCovers[0] = dragCovers[1] = nil;
     staged = NO; pullCurrent = nil; pullCompanion = nil;
-    lockVisual = nil; chromeHold = NO; ++chromeToken; changeOverlays[0] = changeOverlays[1] = nil;
+    lockVisual = nil; swapVisual = nil; chromeHold = NO; ++chromeToken; changeOverlays[0] = changeOverlays[1] = nil;
     lockTaps = 0; ++lockTapSerial; dragMoved = NO; actionPanel = nil;
     splitWindow.hidden = YES; splitWindow = nil; floatingActions = nil;
     buttonWindow.hidden = YES;   // square launcher retired; edge pull is the entry
@@ -701,6 +706,7 @@ static void TASuspend(NSString *reason) {
 - (void)exitChangeMode;
 - (void)closeActionPanel:(void (^)(void))then;
 - (void)goHome;
+- (void)swapFromHandle;
 @end
 static TAControls *controls;
 static UIButton *TAButton(NSString *title, SEL action) {
@@ -867,23 +873,35 @@ static UIButton *TAButton(NSString *title, SEL action) {
     railIcon.layer.cornerRadius = 10; railIcon.clipsToBounds = YES; railIcon.alpha = 0; railIcon.userInteractionEnabled = NO;
     [dividerView addSubview:railIcon];
 
-    // Touch container: 56x88 transparent, larger than the visible capsule.
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-28,MAX(4,(bounds.size.height-88)/2),56,88)];
+    // Touch container: 56 wide; top 46pt = swap button, below = 88pt capsule
+    // area. The capsule stays vertically centred on the display.
+    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-28,MAX(0,MAX(4,(bounds.size.height-88)/2)-kTASwapArea),56,88+kTASwapArea)];
     floatingActions.backgroundColor=UIColor.clearColor;
     floatingActions.isAccessibilityElement=YES;
     floatingActions.accessibilityLabel=@"Tay nắm chia màn: chạm mở tác vụ, chạm hai lần để đổi app, kéo để đổi tỉ lệ";
     // Visible part: 22x60 dark frosted capsule with hairline and three dots.
-    lockVisual=[[UIView alloc] initWithFrame:CGRectMake(17,14,22,60)];
+    lockVisual=[[UIView alloc] initWithFrame:CGRectMake(17,14+kTASwapArea,22,60)];
     lockVisual.userInteractionEnabled=NO; lockVisual.layer.cornerRadius=11; lockVisual.clipsToBounds=YES;
     lockVisual.layer.borderWidth=0.5; lockVisual.layer.borderColor=[UIColor colorWithWhite:1 alpha:0.28].CGColor;
-    UIVisualEffectView *blur=[[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
-    blur.frame=lockVisual.bounds; [lockVisual addSubview:blur];
-    UIView *tint=[[UIView alloc] initWithFrame:lockVisual.bounds]; tint.backgroundColor=[UIColor colorWithWhite:0.08 alpha:0.55]; [lockVisual addSubview:tint];
+    lockVisual.backgroundColor=[UIColor colorWithWhite:0.1 alpha:0.82];
     for (NSInteger d=0;d<3;d++) {
         UIView *dot=[[UIView alloc] initWithFrame:CGRectMake(8.5,19+d*9,5,5)];
         dot.backgroundColor=[UIColor colorWithWhite:1 alpha:0.9]; dot.layer.cornerRadius=2.5; [lockVisual addSubview:dot];
     }
-    [floatingActions addSubview:lockVisual]; [root addSubview:floatingActions];
+    [floatingActions addSubview:lockVisual];
+    // Two-way arrow above the capsule: swap left ↔ right. The button keeps
+    // alpha 1 (so it stays tappable); only its visual fades with the handle.
+    TABlockButton *swap=[TABlockButton buttonWithHandler:^{ [controls swapFromHandle]; }];
+    swap.frame=CGRectMake(6,2,44,kTASwapArea-4); swap.accessibilityLabel=@"Đổi trái ↔ phải";
+    swapVisual=[[UIView alloc] initWithFrame:CGRectMake(6,4,32,32)];
+    swapVisual.userInteractionEnabled=NO; swapVisual.layer.cornerRadius=16;
+    swapVisual.backgroundColor=[UIColor colorWithWhite:0.1 alpha:0.82];
+    swapVisual.layer.borderWidth=0.5; swapVisual.layer.borderColor=[UIColor colorWithWhite:1 alpha:0.28].CGColor;
+    UIImageView *arrows=[[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.left.arrow.right" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightBold]]];
+    arrows.tintColor=TACyan(); arrows.contentMode=UIViewContentModeCenter; arrows.frame=swapVisual.bounds;
+    [swapVisual addSubview:arrows]; [swap addSubview:swapVisual];
+    [floatingActions addSubview:swap];
+    [root addSubview:floatingActions];
     // Tap = menu, double (or triple) tap = change mode, drag = move divider.
     [floatingActions addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:controls action:@selector(lockTap:)]];
     [floatingActions addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dragDivider:)]];
@@ -909,8 +927,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     UIView *card=[[UIView alloc] initWithFrame:CGRectMake((size.width-cw)/2,(size.height-ch)/2,cw,ch)];
     card.layer.cornerRadius=22; card.clipsToBounds=YES;
     card.layer.borderWidth=0.5; card.layer.borderColor=[UIColor colorWithWhite:1 alpha:0.18].CGColor;
-    UIVisualEffectView *blur=[[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterialDark]];
-    blur.frame=card.bounds; [card addSubview:blur];
+    card.backgroundColor=[UIColor colorWithWhite:0.1 alpha:0.96];
     [panel addSubview:card];
 
     // Large greeting, rounded heavy type with a cyan→orange gradient fill.
@@ -975,6 +992,18 @@ static UIButton *TAButton(NSString *title, SEL action) {
         @catch (NSException *e) { TALog(@"HOME error %@ %@",name,e.name); }
     }
     TALog(@"HOME no dashboard selector (owner=%@); split folded only",NSStringFromClass([dash class]));
+}
+- (void)swapFromHandle {
+    if (!running || staged) return;
+    if (actionPanel) { [self closeActionPanel:nil]; return; }
+    TAShowChrome();
+    [self exitChangeMode];
+    BOOL ready=slots[0].presentation && slots[1].presentation && !TAAttachPending();
+    TALog(@"SWAP tap ready=%d",ready);
+    if (!ready) return;
+    [UIView transitionWithView:splitWindow.rootViewController.view duration:0.25 options:UIViewAnimationOptionTransitionCrossDissolve|UIViewAnimationOptionAllowUserInteraction animations:^{
+        [self swapSides];
+    } completion:nil];
 }
 - (void)closeActionPanel:(void (^)(void))then {
     UIView *panel=actionPanel; actionPanel=nil;
@@ -1111,7 +1140,10 @@ static UIButton *TAButton(NSString *title, SEL action) {
                 // Finger barely moved: this was a tap, not a drag.
                 dividerGrip.backgroundColor=[UIColor colorWithWhite:1 alpha:0.35];
                 for (NSInteger i=0;i<2;i++) appPickers[i].hidden=NO;
-                if (gesture.view==floatingActions) [self registerLockTap];
+                if (gesture.view==floatingActions) {
+                    if ([gesture locationInView:floatingActions].y<kTASwapArea) [self swapFromHandle];
+                    else [self registerLockTap];
+                }
                 break;
             }
             if (projected>=kTACollapse) { [self collapseTo:0]; break; }
@@ -1261,8 +1293,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
         UIView *badge=[[UIView alloc] initWithFrame:CGRectMake(0,0,96,96)];
         badge.userInteractionEnabled=NO; badge.layer.cornerRadius=24; badge.clipsToBounds=YES;
         badge.layer.borderWidth=0.5; badge.layer.borderColor=[UIColor colorWithWhite:1 alpha:0.25].CGColor;
-        UIVisualEffectView *blur=[[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialDark]];
-        blur.frame=badge.bounds; [badge addSubview:blur];
+        badge.backgroundColor=[UIColor colorWithWhite:0.1 alpha:0.9];
         UIImageView *icon=[[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.triangle.2.circlepath" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:30 weight:UIImageSymbolWeightSemibold]]];
         icon.tintColor=TACyan(); icon.contentMode=UIViewContentModeCenter; icon.frame=CGRectMake(0,12,96,46); [badge addSubview:icon];
         UILabel *label=[[UILabel alloc] initWithFrame:CGRectMake(0,60,96,22)];
@@ -1575,7 +1606,9 @@ static void TATick(void) {
     }
     if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
     UIView *dock=nil;
-    if (!running) for (UIWindow *window in s.windows) {
+    static NSUInteger dockScan;
+    BOOL scan=!running && (mountedDock.window ? NO : (dockScan++%5==0));
+    if (scan) for (UIWindow *window in s.windows) {
         if (window==splitWindow || window==buttonWindow) continue;
         dock=TAFindDock(window,0); if (dock) break;
     }
@@ -1886,7 +1919,7 @@ static void TATemplateLayout(UIWindow *w) {
         if (currentActive) {
             TALog(@"TEMPLATE AFTER %@ safe=%@ traits=%ld/%ld", currentBundle, NSStringFromUIEdgeInsets(root.view.safeAreaInsets),
                   (long)root.traitCollection.horizontalSizeClass, (long)root.traitCollection.verticalSizeClass);
-            NSUInteger evidence = 60; TALayoutEvidence(root.view, currentBundle, 0, &evidence);
+            if (kTADiag) { NSUInteger evidence = 60; TALayoutEvidence(root.view, currentBundle, 0, &evidence); }
         }
     });
 }
@@ -1901,6 +1934,7 @@ static void TAListenTemplateTargets(void) {
                 if (![scene isKindOfClass:UIWindowScene.class]) continue;
                 for (UIWindow *w in ((UIWindowScene *)scene).windows) {
                     TATemplateLayout(w);
+                    if (!kTADiag) continue;
                     if (![w.windowScene.session.persistentIdentifier hasSuffix:[@":" stringByAppendingString:bundle]]) continue;
                     __weak UIWindow *weakWindow=w;
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(), ^{
@@ -1924,6 +1958,7 @@ static void TASendSize(NSString *bundle, NSString *kind, CGSize size) {
     if (notify_set_state(token, packed) == NOTIFY_STATUS_OK) notify_post(name.UTF8String);
 }
 static void TAListenClients(void) {
+    if (!kTADiag) return;
     for (NSString *bundle in TAClientBundles()) for (NSString *kind in @[@"scene", @"window", @"root"]) {
         int token;
         uint32_t status = notify_register_dispatch(TAChannel(bundle, kind).UTF8String, &token, dispatch_get_main_queue(), ^(int delivered) {
@@ -1940,6 +1975,7 @@ static void TAListenClients(void) {
     }
 }
 static void TAClientObserve(UIWindow *w) {
+    if (!kTADiag) return;
     if (![NSThread isMainThread]) return;
     UIWindowScene *ws = w.windowScene; if (!ws) return;
     NSString *sid = ws.session.persistentIdentifier ?: @"", *role = ws.session.role ?: @"";
@@ -2062,6 +2098,7 @@ static void TAVisibleTransition(UIViewController *vc) {
     if (!active && ![NSStringFromClass(vc.class) isEqual:@"CPSNowPlayingViewController"]) return;
     // One native layout invalidation per appearance. No font/frame edits.
     NSUInteger budget = 100; if (active) TAInvalidateTree(vc.viewIfLoaded, 0, &budget);
+    if (!kTADiag) return;
     __weak UIWindow *weakWindow = w;
     __weak UIViewController *weakController = vc;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400*NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
@@ -2088,6 +2125,7 @@ static void TAListenSnapshots(void) {
 // Record only bounded gesture summaries in targeted CarPlay client windows.
 // No gesture delegates, event replacement or coordinate remapping.
 static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
+    if (!kTADiag) return;
     if (event.type!=UIEventTypeTouches || !NSThread.isMainThread) return;
     NSString *bundle=nil; if (!TAInputTarget(window,&bundle)) return;
     static char touchKey, countKey;
