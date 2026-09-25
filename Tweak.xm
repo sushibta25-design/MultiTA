@@ -1,4 +1,4 @@
-// MultiTA 0.48.2 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.48.3 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.2] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.3] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -2836,7 +2836,10 @@ static void TAUpdateEdge(void) {
         dockTopWindow=[[UIWindow alloc] initWithWindowScene:s];
         dockTopWindow.windowLevel=UIWindowLevelAlert+200;
         dockTopWindow.rootViewController=[UIViewController new];
-        dockTopWindow.rootViewController.view.backgroundColor=UIColor.clearColor;
+        // Not fully clear: the system skips a window with no visible content
+        // when routing touches (clear zones in 0.47.0/0.47.1/0.48.2 got no
+        // touch; the red 0.47.3 test zone and the old 0.02-alpha handle did).
+        dockTopWindow.rootViewController.view.backgroundColor=[UIColor colorWithWhite:0 alpha:0.02];
         UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dockPull:)];
         pan.maximumNumberOfTouches=1; pan.delegate=controls;
         [dockTopWindow.rootViewController.view addGestureRecognizer:pan]; [dockSwipes addObject:pan];

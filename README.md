@@ -1,6 +1,10 @@
-# MultiTA Beta 0.48.2
+# MultiTA Beta 0.48.3
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.48.3 — vùng vuốt không còn trong suốt hoàn toàn
+
+Log 0.48.2: vùng vuốt nằm trên cùng (`top=UIWindow(level 2200)`) nhưng không nhận cú chạm nào. Các vùng trong suốt 100% (0.47.0, 0.47.1, 0.48.2) đều không nhận chạm; vùng tô đỏ 0.47.3 và tay nắm cũ (alpha 0.02) thì nhận — hệ thống bỏ qua cửa sổ không có nội dung khi định tuyến cú chạm. Nền vùng vuốt giờ là đen alpha 0.02 (không nhìn thấy).
 
 ## 0.48.2 — vùng vuốt riêng ở đầu Dock, nằm trên overlay khác
 
