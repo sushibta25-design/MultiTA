@@ -1,4 +1,4 @@
-// MultiTA 0.47.3 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.48.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.47.3] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -120,10 +120,10 @@ static NSString *launchBundle;
 static NSInteger launchSlot;
 static NSTimeInterval launchGuardUntil, launchStart, launchSurfaceSince;
 static BOOL allowLaunchInSplit;
-static UIWindow *edgeWindow;       // Dock swipe zone (0.47; was the right-edge handle)
 static BOOL pullFromLeft;          // current pull started in the Dock and moves right
 static BOOL layoutMirror;
 static CGFloat dockZoneRight;      // right edge of the CarPlay Dock, in display points
+static NSHashTable<UIPanGestureRecognizer *> *dockSwipes;   // one per Dashboard window
 static UIImageView *railIcon;
 // Capsule handle (visual part fades after 3s; its touch area stays live).
 static UIView *lockVisual, *swapVisual;
@@ -731,7 +731,7 @@ static void TASuspend(NSString *reason) {
     TALog(@"SESSION SAVED left=%@ right=%@",selection[0],selection[1]);
     buttonWindow.hidden=YES;
 }
-@interface TAControls : NSObject
+@interface TAControls : NSObject <UIGestureRecognizerDelegate>
 - (void)start;
 - (void)enter;
 - (void)selectTile:(TAAppTile *)tile;
@@ -1295,27 +1295,36 @@ static UIButton *TAButton(NSString *title, SEL action) {
 // the Dock, the divider slides out and follows it. The new app takes the
 // left pane (next to the Dock), the app already open takes the right pane.
 - (void)dockPull:(UIPanGestureRecognizer *)gesture {
-    CGFloat x=[gesture locationInView:edgeWindow].x+edgeWindow.frame.origin.x;
+    UIView *view=gesture.view;
+    CGFloat x=[view convertPoint:[gesture locationInView:view] toCoordinateSpace:dashboard.coordinateSpace].x;
     CGFloat width=MAX(1,splitWindow ? splitWindow.bounds.size.width : TADisplayWidth());
     switch (gesture.state) {
-        case UIGestureRecognizerStateChanged: {
-            if (staged) { TALayoutPull(x/width); break; }
-            CGPoint moved=[gesture translationInView:edgeWindow];
-            if (fabs(moved.y)>12 && fabs(moved.y)>fabs(moved.x)) { gesture.enabled=NO; gesture.enabled=YES; break; }
-            if (moved.x>0 && x>dockZoneRight+4 && ![self beginPullFromLeft]) { gesture.enabled=NO; gesture.enabled=YES; break; }
-            if (staged) TALayoutPull(x/width);
-            break;
-        }
-        case UIGestureRecognizerStateEnded:
-            if (staged) [self finishPull:x/width];
-            break;
         case UIGestureRecognizerStateBegan:
             TALog(@"DOCK SWIPE start x=%.1f dockRight=%.1f current=%@",x,dockZoneRight,nativeForeground ?: @"-");
+            // fall through: the finger may already be past the Dock
+        case UIGestureRecognizerStateChanged:
+            if (!staged && x>dockZoneRight+4 && ![self beginPullFromLeft]) { gesture.enabled=NO; gesture.enabled=YES; break; }
+            if (staged) TALayoutPull(x/width);
+            break;
+        case UIGestureRecognizerStateEnded:
+            if (staged) [self finishPull:x/width];
             break;
         default:
             if (staged) [self finishPull:0];
             break;
     }
+}
+// Only a rightward, mostly horizontal swipe that started inside the Dock and
+// only while no split is open. Anything else stays a normal Dock touch.
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    if (![dockSwipes containsObject:(UIPanGestureRecognizer *)gesture]) return YES;
+    if (running || primeBundle || !dashboard) return NO;
+    UIPanGestureRecognizer *pan=(UIPanGestureRecognizer *)gesture;
+    UIView *view=pan.view;
+    CGPoint moved=[pan translationInView:view];
+    CGPoint now=[view convertPoint:[pan locationInView:view] toCoordinateSpace:dashboard.coordinateSpace];
+    CGFloat startX=now.x-moved.x;
+    return moved.x>0 && fabs(moved.x)>fabs(moved.y)*1.2 && startX<=dockZoneRight;
 }
 - (BOOL)beginPullFromLeft {
     NSString *current=[nativeForeground copy];
@@ -2105,7 +2114,7 @@ static void TATick(void) {
         TAStop(@"display changed"); buttonWindow.hidden = YES; buttonWindow = nil;
         TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil;
         [records removeAllObjects]; [order removeAllObjects]; dashboard = s;
-        nativeForeground=nil; edgeWindow.hidden=YES; edgeWindow=nil; [TANativeSizes removeAllObjects];
+        nativeForeground=nil; [TANativeSizes removeAllObjects];
         TALog(@"DISPLAY %@", s.session.persistentIdentifier);
     }
     if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
@@ -2791,13 +2800,8 @@ static void TAHideSideActions(void) {}
 // search found nothing on some head units). The zone covers the Dock from
 // the top (clock, signal, Wi-Fi) down to just above that icon.
 static BOOL TAOwnWindow(UIWindow *w) {
-    return w==edgeWindow || w==splitWindow || w==buttonWindow || w==TAKBWindow;
+    return w==splitWindow || w==buttonWindow || w==TAKBWindow;
 }
-static UIPanGestureRecognizer *dockSwipe;
-// Test build: a large, tinted zone over the whole Dock column to confirm the
-// swipe works on the car before narrowing it to the empty area under Wi-Fi.
-// Dock icons cannot be tapped while this is on.
-static const BOOL kTADockZoneTest=YES;
 static NSArray<UIWindow *> *TADockProbeWindows(UIWindowScene *s) {
     return [s.windows sortedArrayUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *c) {
         return a.windowLevel>c.windowLevel ? NSOrderedAscending : a.windowLevel<c.windowLevel ? NSOrderedDescending : NSOrderedSame;
@@ -2857,51 +2861,45 @@ static CGRect TAFindDockZone(UIWindowScene *s) {
             }
         }
     }
-    CGRect fallback=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(44,round(b.size.width*0.12)),round(b.size.height*0.4));
+    CGRect fallback=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(44,round(b.size.width*0.14)),round(b.size.height*0.4));
     static BOOL loggedFallback;
     if (!loggedFallback) { loggedFallback=YES; TALog(@"DOCK ZONE fallback: no Dock icon found; zone=%@",NSStringFromCGRect(fallback)); }
     return fallback;
 }
-// Show the Dock swipe zone only while a captured app is open natively.
+// The Dock swipe lives on CarPlay's own Dashboard windows (no overlay), so a
+// tap still reaches the Dock icons; only a rightward swipe that starts in the
+// Dock is taken (see -gestureRecognizerShouldBegin:), and it cancels the tap.
 static void TAUpdateEdge(void) {
     UIWindowScene *s=dashboard;
-    if (!s) { edgeWindow.hidden=YES; return; }
-    if (!edgeWindow || edgeWindow.windowScene!=s) {
-        edgeWindow.hidden=YES;
-        edgeWindow=[[UIWindow alloc] initWithWindowScene:s];
-        edgeWindow.windowLevel=UIWindowLevelAlert+75;
-        edgeWindow.rootViewController=[UIViewController new];
-        UIView *root=edgeWindow.rootViewController.view;
-        root.backgroundColor=kTADockZoneTest ? [UIColor colorWithRed:1 green:0 blue:0 alpha:0.28] : UIColor.clearColor;
-        dockSwipe=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dockPull:)];
-        dockSwipe.maximumNumberOfTouches=1;
-        [root addGestureRecognizer:dockSwipe];
-        root.accessibilityLabel=@"Vuốt sang phải để chia màn";
+    if (!s) return;
+    if (!dockSwipes) dockSwipes=[NSHashTable weakObjectsHashTable];
+    for (UIWindow *w in s.windows) {
+        if (TAOwnWindow(w)) continue;
+        BOOL installed=NO;
+        for (UIGestureRecognizer *g in w.gestureRecognizers) if ([dockSwipes containsObject:(UIPanGestureRecognizer *)g]) { installed=YES; break; }
+        if (installed) continue;
+        UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dockPull:)];
+        pan.maximumNumberOfTouches=1; pan.delegate=controls;
+        pan.delaysTouchesEnded=NO;   // Dock taps are not held back while the swipe decides
+        [w addGestureRecognizer:pan]; [dockSwipes addObject:pan];
+        TALog(@"DOCK SWIPE installed window=%@ level=%.0f",NSStringFromClass(w.class),w.windowLevel);
     }
-    // Never move or hide the zone under a finger: that would cancel the swipe.
-    UIGestureRecognizerState state=dockSwipe.state;
-    if (staged || state==UIGestureRecognizerStateBegan || state==UIGestureRecognizerStateChanged) { edgeWindow.hidden=NO; return; }
-    // Available whenever no split is open; a swipe with no usable app open
-    // is rejected and logged (0.47.0 gated this on a captured foreground app,
-    // and on some head units the zone never appeared).
-    BOOL show=!running && !primeBundle;
-    // The Dock changes with the open app: re-measure when the zone appears and
-    // every 3s while shown. Hit-testing skips MultiTA's own windows.
+    for (UIPanGestureRecognizer *pan in dockSwipes) {
+        UIGestureRecognizerState state=pan.state;
+        if (state==UIGestureRecognizerStateBegan || state==UIGestureRecognizerStateChanged) return;
+    }
+    // Dock width: from the first Dock icon when found, else ~14% of the display
+    // (the Dock's share on the test car's Home screen). Re-measured every 3s.
     static NSTimeInterval measured;
     NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
-    if (show && (edgeWindow.hidden || now-measured>=3)) {
+    if (!running && now-measured>=3) {
         measured=now;
         CGRect zone=TAFindDockZone(s);
-        if (kTADockZoneTest) {
-            CGRect b=s.coordinateSpace.bounds;
-            zone=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(CGRectGetWidth(zone),round(b.size.width*0.2)),b.size.height);
-        }
-        dockZoneRight=CGRectGetMaxX(zone);
-        if (zone.size.height>=24) edgeWindow.frame=zone; else show=NO;
+        CGRect b=s.coordinateSpace.bounds;
+        CGFloat right=CGRectGetMaxX(zone)-CGRectGetMinX(b);
+        if (fabs(right-dockZoneRight)>0.5) TALog(@"DOCK ZONE right=%.1f display=%@",right,NSStringFromCGRect(b));
+        dockZoneRight=right;
     }
-    if (edgeWindow.hidden==show)
-        TALog(@"DOCK ZONE %@ frame=%@ current=%@ captured=%d",show ? @"shown" : @"hidden",NSStringFromCGRect(edgeWindow.frame),nativeForeground ?: @"-",nativeForeground.length && records[nativeForeground]!=nil);
-    edgeWindow.hidden=!show;
 }
 %hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
