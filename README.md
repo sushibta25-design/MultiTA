@@ -1,6 +1,14 @@
-# MultiTA Beta 0.32.0
+# MultiTA Beta 0.33.1
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.33.1 — tránh treo khi chọn app chưa mở (YouTube)
+
+Log thiết bị cho thấy 3/3 lần: chọn YouTube khi nó chưa có scene sống → PREPARE (mở native) → dựng lại cặp ngay → luồng chính CarPlayApp bị chặn 16–58s → watchdog khởi động lại. Chọn YouTube qua kéo cạnh thì không lỗi. Bỏ việc tự dựng lại cặp sau khi mở native: chọn một app chưa có scene sống sẽ thoát chia màn và mở app đó toàn màn; muốn chia thì kéo cạnh phải (ghép với app dùng gần nhất). Loại com.apple.InCallService (giao diện cuộc gọi) khỏi danh sách chọn. Log: OPEN NATIVE.
+
+## 0.33 — trang Tác vụ tối giản
+
+Trang Tác vụ chỉ còn dòng "Vạn dặm bình an!" cỡ lớn (38pt, tự thu nếu thiếu chỗ) và hai nút tròn: biểu tượng Màn hình chính CarPlay (cam) và ô tô (cyan). Màn hình chính: thu chia màn (giữ cặp app để mở lại) rồi thử gọi selector Home của DBDashboard nếu có; log HOME via … hoặc HOME no dashboard selector. Ô tô: đóng trang. Bỏ danh sách tác vụ; đổi app bằng chạm hai lần tay nắm, đổi tỉ lệ/thoát bằng kéo divider.
 
 ## 0.32 — ưu tiên app dẫn đường/giải trí, giao diện chọn app và trang Tác vụ mới
 

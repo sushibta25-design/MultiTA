@@ -1,4 +1,4 @@
-// MultiTA 0.33.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, tap-count change mode.
+// MultiTA 0.33.1 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, tap-count change mode.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -24,7 +24,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.33.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.33.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -40,7 +40,7 @@ static BOOL TASelectableBundle(NSString *bundle) {
     NSString *key=bundle.lowercaseString;
     if ([key hasPrefix:@"com.apple.carplay"]) return NO;
     return ![@[@"com.apple.springboard", @"com.apple.backboardd",
-               @"com.apple.home", @"com.apple.siri", @"com.apple.siriviewservice"] containsObject:key];
+               @"com.apple.home", @"com.apple.siri", @"com.apple.siriviewservice", @"com.apple.incallservice"] containsObject:key];
 }
 static NSString *TABundle(id controller) {
     NSString *sid = TAValue(controller, @"sceneID");
@@ -1343,22 +1343,23 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [choose[slot] setTitle:@"Chưa hiển thị được\nChạm để thử lại" forState:UIControlStateNormal];
     choose[slot].hidden=NO; choose[slot].enabled=YES;
 }
+// An app without a live CarPlay scene is NOT auto-rebuilt into the split any
+// more. Device logs (0.31.2, 0.32, 0.33) show the same sequence three times:
+// PREPARE of com.google.ios.youtube -> immediate pair rebuild -> CarPlayApp
+// main thread blocked 16-58s -> watchdog restart. Instead: leave the split,
+// open the app full screen natively, and let the user pull the right edge
+// (edge pull pairs it with the most recently used other app).
 - (void)prepare:(NSString *)bundle slot:(NSInteger)slot {
     if (!running || slot<0 || slot>1 || primeBundle || !catalog[bundle]) return;
-    NSArray *previous=@[slots[0].bundle ?: @"",slots[1].bundle ?: @""];
-    NSMutableArray *selection=[previous mutableCopy]; selection[slot]=bundle;
-    // Release/restore owned presentations before asking Dashboard to switch.
-    TAStop(@"prepare new app outside split");
-    primeBundle=[bundle copy]; primeSelection=[selection copy]; primePrevious=previous;
-    primeSawForeground=NO; NSUInteger token=generation;
+    TARememberPair();
+    TAStop(@"open natively (no live scene)");
     lastNativeTransition=NSProcessInfo.processInfo.systemUptime;
-    TALog(@"PREPARE BEGIN bundle=%@ side=%ld",bundle,(long)slot);
+    NSUInteger token=generation;
+    TALog(@"OPEN NATIVE bundle=%@ side=%ld",bundle,(long)slot);
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (running || generation!=token || ![primeBundle isEqual:bundle]) return;
-        if (!TANativeLaunch(bundle)) {
-            [self waitPreparation:bundle slot:slot generation:token attempt:40]; return;
-        }
-        [self waitPreparation:bundle slot:slot generation:token attempt:0];
+        if (running || generation!=token) return;
+        BOOL ok=TANativeLaunch(bundle);
+        TALog(@"OPEN NATIVE launched=%d bundle=%@",ok,bundle);
     });
 }
 - (void)waitPreparation:(NSString *)bundle slot:(NSInteger)slot generation:(NSUInteger)token attempt:(NSUInteger)attempt {
