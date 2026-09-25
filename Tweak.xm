@@ -124,6 +124,7 @@ static BOOL pullFromLeft;          // current pull started in the Dock and moves
 static BOOL layoutMirror;
 static CGFloat dockZoneRight;      // right edge of the CarPlay Dock, in display points
 static NSHashTable<UIPanGestureRecognizer *> *dockSwipes;   // one per Dashboard window
+static UIWindow *dockTopWindow;   // clear swipe zone over the top of the Dock (clock/Wi-Fi), above the icons
 static UIImageView *railIcon;
 // Capsule handle (visual part fades after 3s; its touch area stays live).
 static UIView *lockVisual, *swapVisual;
@@ -2810,7 +2811,7 @@ static void TAHideSideActions(void) {}
 // search found nothing on some head units). The zone covers the Dock from
 // the top (clock, signal, Wi-Fi) down to just above that icon.
 static BOOL TAOwnWindow(UIWindow *w) {
-    return w==splitWindow || w==buttonWindow || w==TAKBWindow;
+    return w==splitWindow || w==buttonWindow || w==TAKBWindow || w==dockTopWindow;
 }
 // DBLockOutWindow answers hit tests over the whole display (log 0.47.3/0.48.0)
 // although real touches reach the Dock below it; never probe through it.
@@ -2886,8 +2887,20 @@ static CGRect TAFindDockZone(UIWindowScene *s) {
 // Dock is taken (see -gestureRecognizerShouldBegin:), and it cancels the tap.
 static void TAUpdateEdge(void) {
     UIWindowScene *s=dashboard;
-    if (!s) return;
+    if (!s) { dockTopWindow.hidden=YES; return; }
     if (!dockSwipes) dockSwipes=[NSHashTable weakObjectsHashTable];
+    // Backup that is known to work on the car (0.47.3): a clear window over the
+    // top of the Dock, from the clock down to just above the first icon.
+    if (!dockTopWindow || dockTopWindow.windowScene!=s) {
+        dockTopWindow.hidden=YES;
+        dockTopWindow=[[UIWindow alloc] initWithWindowScene:s];
+        dockTopWindow.windowLevel=UIWindowLevelAlert+75;
+        dockTopWindow.rootViewController=[UIViewController new];
+        dockTopWindow.rootViewController.view.backgroundColor=UIColor.clearColor;
+        UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dockPull:)];
+        pan.maximumNumberOfTouches=1; pan.delegate=controls;
+        [dockTopWindow.rootViewController.view addGestureRecognizer:pan]; [dockSwipes addObject:pan];
+    }
     for (UIWindow *w in s.windows) {
         if (TAOwnWindow(w)) continue;
         BOOL installed=NO;
@@ -2899,22 +2912,28 @@ static void TAUpdateEdge(void) {
         [w addGestureRecognizer:pan]; [dockSwipes addObject:pan];
         TALog(@"DOCK SWIPE installed window=%@ level=%.0f",NSStringFromClass(w.class),w.windowLevel);
     }
+    // Never move or hide a zone under a finger: that would cancel the swipe.
     for (UIPanGestureRecognizer *pan in dockSwipes) {
         UIGestureRecognizerState state=pan.state;
         if (state==UIGestureRecognizerStateBegan || state==UIGestureRecognizerStateChanged) return;
     }
-    // Dock width: from the first Dock icon when found, else 20% of the display
+    if (running || primeBundle) { dockTopWindow.hidden=YES; return; }
+    // Dock width from the first Dock icon when found, else 20% of the display
     // (the zone the 0.47.3 test swiped from successfully). Re-measured every 3s.
     static NSTimeInterval measured;
     NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
-    if (!running && now-measured>=3) {
+    if (now-measured>=3 || dockTopWindow.hidden) {
         measured=now;
         CGRect zone=TAFindDockZone(s);
         CGRect b=s.coordinateSpace.bounds;
         CGFloat right=CGRectGetMaxX(zone)-CGRectGetMinX(b);
-        if (fabs(right-dockZoneRight)>0.5) TALog(@"DOCK ZONE right=%.1f display=%@",right,NSStringFromCGRect(b));
+        // Top zone ends above the first icon; unmeasured, keep to the top 25%.
+        CGFloat height=MIN(zone.size.height,round(b.size.height*0.25));
+        if (fabs(right-dockZoneRight)>0.5) TALog(@"DOCK ZONE right=%.1f top=%.1f display=%@",right,height,NSStringFromCGRect(b));
         dockZoneRight=right;
+        dockTopWindow.frame=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),right,height);
     }
+    dockTopWindow.hidden=dockTopWindow.frame.size.height<24;
 }
 %hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
