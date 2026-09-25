@@ -1,4 +1,4 @@
-// MultiTA 0.47.2 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.47.3 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.47.2] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.47.3] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -2794,6 +2794,10 @@ static BOOL TAOwnWindow(UIWindow *w) {
     return w==edgeWindow || w==splitWindow || w==buttonWindow || w==TAKBWindow;
 }
 static UIPanGestureRecognizer *dockSwipe;
+// Test build: a large, tinted zone over the whole Dock column to confirm the
+// swipe works on the car before narrowing it to the empty area under Wi-Fi.
+// Dock icons cannot be tapped while this is on.
+static const BOOL kTADockZoneTest=YES;
 static NSArray<UIWindow *> *TADockProbeWindows(UIWindowScene *s) {
     return [s.windows sortedArrayUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *c) {
         return a.windowLevel>c.windowLevel ? NSOrderedAscending : a.windowLevel<c.windowLevel ? NSOrderedDescending : NSOrderedSame;
@@ -2867,7 +2871,8 @@ static void TAUpdateEdge(void) {
         edgeWindow=[[UIWindow alloc] initWithWindowScene:s];
         edgeWindow.windowLevel=UIWindowLevelAlert+75;
         edgeWindow.rootViewController=[UIViewController new];
-        UIView *root=edgeWindow.rootViewController.view; root.backgroundColor=UIColor.clearColor;
+        UIView *root=edgeWindow.rootViewController.view;
+        root.backgroundColor=kTADockZoneTest ? [UIColor colorWithRed:1 green:0 blue:0 alpha:0.28] : UIColor.clearColor;
         dockSwipe=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dockPull:)];
         dockSwipe.maximumNumberOfTouches=1;
         [root addGestureRecognizer:dockSwipe];
@@ -2887,6 +2892,10 @@ static void TAUpdateEdge(void) {
     if (show && (edgeWindow.hidden || now-measured>=3)) {
         measured=now;
         CGRect zone=TAFindDockZone(s);
+        if (kTADockZoneTest) {
+            CGRect b=s.coordinateSpace.bounds;
+            zone=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(CGRectGetWidth(zone),round(b.size.width*0.2)),b.size.height);
+        }
         dockZoneRight=CGRectGetMaxX(zone);
         if (zone.size.height>=24) edgeWindow.frame=zone; else show=NO;
     }
