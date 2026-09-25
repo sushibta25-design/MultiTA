@@ -2652,6 +2652,9 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 %end
 %end
 #import "TAKeyboard.h"
+// The per-pane side buttons this hid (0.10.21) no longer exist; the keyboard
+// window already sits above the split window and floatingActions is hidden.
+static void TAHideSideActions(void) {}
 
 // 0.46.1: the only code in CarPlayTemplateUIHost — pane inset reclaim.
 %group TAInsetOnly
