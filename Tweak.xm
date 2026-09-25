@@ -1,4 +1,4 @@
-// MultiTA 0.44.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.45.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.44.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.45.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -1557,11 +1557,19 @@ static UIButton *TAButton(NSString *title, SEL action) {
         TALog(@"LAUNCH IN PANE queued %@ (busy with %@)",queued,launchBundle);
         [choose[slot] setTitle:[NSString stringWithFormat:@"  Chờ mở %@…",TAAppName(queued)] forState:UIControlStateNormal];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,600*NSEC_PER_MSEC),dispatch_get_main_queue(),^{
-            if (running && generation==token && !slots[slot]) [self prepare:queued slot:slot];
+            if (running && generation==token && ![slots[slot].bundle isEqual:queued]) [self prepare:queued slot:slot];
         });
         return;
     }
-    TAClearSlot(slot,@"launch in pane");
+    // Keep the current app in the pane (covered) until the new one is ready.
+    // Every launch-in-pane hang (0.39 Apple Maps→YouTube, 0.43 YouTube Music→
+    // Zalo, 0.44 Vietmap→YouTube) followed Dashboard backgrounding the app we
+    // had just released from that pane; every launch where Dashboard's
+    // background request hit an app still in a pane (and was declined) was fine.
+    if (slots[slot] && !slots[slot].attaching) {
+        TALog(@"LAUNCH IN PANE keeps %@ until %@ is ready",slots[slot].bundle,bundle);
+        [panes[slot] bringSubviewToFront:choose[slot]];
+    } else TAClearSlot(slot,@"launch in pane");
     launchBundle=[bundle copy]; launchSlot=slot;
     launchStart=NSProcessInfo.processInfo.systemUptime; launchSurfaceSince=0;
     launchGuardUntil=launchStart+14;
@@ -1637,6 +1645,13 @@ static UIButton *TAButton(NSString *title, SEL action) {
         settledApp=now-launchStart>=floor && ((launchSurfaceSince>0 && now-launchSurfaceSince>=hold) || now-launchStart>=cap);
     }
     BOOL ready=r && TADirectReady(r) && now-lastNativeTransition>=0.8 && settledApp;
+    if (ready && slots[slot] && ![slots[slot].bundle isEqual:bundle]) {
+        // Now release the previous app (it is backgrounded by us, afterwards).
+        TAClearSlot(slot,@"replaced after launch");
+        [choose[slot] setImage:TAAppIcon(bundle) forState:UIControlStateNormal];
+        [choose[slot] setTitle:[NSString stringWithFormat:@"  Đang mở %@…",TAAppName(bundle)] forState:UIControlStateNormal];
+        choose[slot].enabled=NO;
+    }
     if (ready && !slots[slot]) {
         launchBundle=nil;
         TALog(@"LAUNCH IN PANE ready %@ attempt=%lu",bundle,(unsigned long)attempt);
