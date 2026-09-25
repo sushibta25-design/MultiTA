@@ -1,4 +1,4 @@
-// MultiTA 0.40.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
+// MultiTA 0.41.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.40.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.41.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -764,7 +764,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
     for (NSInteger i=0;i<2;i++) {
         NSString *bundle=selection[i];
         if (!bundle.length) continue;
-        if (records[bundle] || catalog[bundle]) [self attach:bundle slot:i];
+        if (records[bundle] && !records[bundle].backgrounded && TADirectReady(records[bundle])) [self attach:bundle slot:i];
+        else if (records[bundle] || catalog[bundle]) [self prepare:bundle slot:i];
         else TALog(@"RESUME missing slot=%ld bundle=%@",(long)i,bundle);
     }
 }
@@ -824,13 +825,18 @@ static UIButton *TAButton(NSString *title, SEL action) {
     if (!running || slot<0 || slot>1 || (!records[bundle] && !catalog[bundle])) return;
     if ([slots[slot].bundle isEqual:bundle]) { [self retryPane:slot]; return; }
     if ([slots[1-slot].bundle isEqual:bundle]) return;
-    if (!TADirectReady(records[bundle]) || records[bundle].noSurface) { [self prepare:bundle slot:slot]; return; }
+    // 0.41: only an app that is on screen natively right now is adopted
+    // directly. Pulling a backgrounded scene forward ourselves left the pane
+    // showing only the wallpaper (YouTube, YouTube Music; 0.40 log); asking
+    // Dashboard to open it inside the pane works for every app.
+    TARecord *existing=records[bundle];
+    if (!TADirectReady(existing) || existing.noSurface || existing.backgrounded) { [self prepare:bundle slot:slot]; return; }
     TAClearSlot(slot,@"replace"); [self attach:bundle slot:slot];
 }
 - (void)retryPane:(NSInteger)slot {
     if (!running || slot<0 || slot>1 || slots[slot].attaching) return;
     NSString *bundle=[slots[slot].bundle copy] ?: [retryTargets[slot] copy]; if (!bundle.length) return;
-    if (!TADirectReady(records[bundle]) || records[bundle].noSurface) { [self prepare:bundle slot:slot]; return; }
+    if (!TADirectReady(records[bundle]) || records[bundle].noSurface || records[bundle].backgrounded) { [self prepare:bundle slot:slot]; return; }
     TALog(@"MANUAL RETRY side=%ld bundle=%@",(long)slot,bundle);
     [self snapshot];
     TAClearSlot(slot,@"manual retry"); [self attach:bundle slot:slot];
@@ -1497,8 +1503,24 @@ static UIButton *TAButton(NSString *title, SEL action) {
 // to open it (0.33–0.38) backgrounded the app in the other pane; YouTube
 // never redrew after coming back from the background (blank pane, audio on).
 - (void)prepare:(NSString *)bundle slot:(NSInteger)slot {
-    if (!running || staged || slot<0 || slot>1 || primeBundle || !catalog[bundle]) return;
-    if (launchBundle) { TALog(@"LAUNCH IN PANE busy with %@",launchBundle); return; }
+    if (!running || staged || slot<0 || slot>1 || primeBundle) return;
+    if (!catalog[bundle]) {
+        // Not launchable through Dashboard (no catalog entry): fall back to
+        // adopting its live scene if there is one.
+        if (TADirectReady(records[bundle])) { TAClearSlot(slot,@"no catalog entry"); [self attach:bundle slot:slot]; }
+        else [self failAttach:slot bundle:bundle reason:@"not launchable"];
+        return;
+    }
+    if (launchBundle) {
+        // One Dashboard launch at a time; queue this one.
+        NSString *queued=[bundle copy]; NSUInteger token=generation;
+        TALog(@"LAUNCH IN PANE queued %@ (busy with %@)",queued,launchBundle);
+        [choose[slot] setTitle:[NSString stringWithFormat:@"  Chờ mở %@…",TAAppName(queued)] forState:UIControlStateNormal];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,600*NSEC_PER_MSEC),dispatch_get_main_queue(),^{
+            if (running && generation==token && !slots[slot]) [self prepare:queued slot:slot];
+        });
+        return;
+    }
     TAClearSlot(slot,@"launch in pane");
     launchBundle=[bundle copy]; launchSlot=slot;
     launchStart=NSProcessInfo.processInfo.systemUptime; launchSurfaceSince=0;
