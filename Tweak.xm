@@ -1,4 +1,4 @@
-// MultiTA 0.47.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.46.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.47.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.46.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -35,8 +35,6 @@ static void TALog(NSString *format, ...) {
 // reports, touch traces, multi-stage resize observations) cost CPU and log IO
 // in every CarPlay app. Off by default since 0.34.
 static const BOOL kTADiag=NO;
-// Ẩn thanh cuộn, bỏ ảnh bìa Now Playing, các hook chẩn đoán trong app: tắt.
-static const BOOL kTALegacyClientHooks=NO;
 static id TAValue(id o, NSString *key) {
     @try { return [o valueForKey:key]; } @catch (__unused NSException *e) { return nil; }
 }
@@ -2301,9 +2299,9 @@ static void TATemplateLayout(UIWindow *w) {
     UIViewController *root = w.rootViewController;
     if (!root.viewIfLoaded || ![NSStringFromClass(root.class) isEqual:@"CARTemplateUIApplicationSceneViewController"]) return;
     NSString *bundle = nil; BOOL active = TATemplateTarget(w, &bundle);
-    // 0.46 re-enabled this for Google Maps; 0.47 for every template app in
-    // TAClientBundles (TATemplateTarget already limits it to those). A 177pt
-    // pane minus the 45pt Dock inset left YouTube Music 132pt: blue screen.
+    // 0.46: re-enabled for Google Maps only (its map viewport keeps a 45pt
+    // leading inset meant for the Dock, which is not beside a pane).
+    if (active && ![bundle isEqual:@"com.google.Maps"]) active = NO;
     NSValue *saved = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
     if (!active && !saved) return;
     NSString *stamp = active ? NSStringFromCGRect(w.windowScene.coordinateSpace.bounds) : @"restore";
@@ -2313,6 +2311,7 @@ static void TATemplateLayout(UIWindow *w) {
         objc_setAssociatedObject(root, &TALayoutQueuedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (w.rootViewController != root || !root.viewIfLoaded) return;
         NSString *currentBundle = nil; BOOL currentActive = TATemplateTarget(w, &currentBundle);
+        if (currentActive && ![currentBundle isEqual:@"com.google.Maps"]) currentActive = NO;
         NSValue *original = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
         if (!currentActive && !original) return;
         UIEdgeInsets before = root.view.safeAreaInsets;
@@ -2659,8 +2658,6 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 }
 %end
 %end
-#import "TAKeyboard.h"
-
 %group TAClient
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
@@ -2857,16 +2854,6 @@ static void TAUpdateEdge(void) {
 %ctor {
     @autoreleasepool {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
-
-        // Shared keyboard client for apps that own a CarPlay text responder.
-        // Keep YouTube excluded by the stable 0.47 rule.
-        if ([TAClientBundles() containsObject:process] &&
-            ![process isEqual:@"com.google.ios.youtube"] &&
-            ![process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
-            dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallClients(); });
-            return;
-        }
-
         // YouTube is a full UIKit app bridged into CarPlay. It hung repeatedly
         // after being hosted; keep MultiTA code out of its process entirely.
         if ([process isEqual:@"com.google.ios.youtube"]) return;
@@ -2875,28 +2862,36 @@ static void TAUpdateEdge(void) {
         // are off. Apps draw in a pane exactly as CarPlay renders them.
         if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAInsetOnly);
-            dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallClients(); });
-            // 0.47: YouTube Music narrow-pane fixes back on (tab titles, the
-            // fixed 61pt image-row buttons). Both check the bundle themselves.
-            %init(TACompactHome);
-            if (NSClassFromString(@"CPSImageRowCell")) { %init(TAImageRowExperiment); }
-            // Still off (Logos requires every group to have an %init; this flag
-            // keeps them disabled at runtime until they are re-enabled one by one).
-            if (kTALegacyClientHooks) {
-                %init(TAClient);
-                %init(TAScrollRail);
-                %init(TANowPlayingExperiment);
-            }
             dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); });
             return;
         }
-        // (Former per-app client branch removed: unreachable since 0.44, and
-        // Logos rejects a second %init of the groups now used above.)
-        (void)&TAListenScrollBars; (void)&TAListenSnapshots;   // kept for later re-enable; silence unused warnings
+        if (![process isEqual:@"com.apple.CarPlayApp"]) return;
+        if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+            %init(TAClient);
+            if (NSClassFromString(@"_UIStaticScrollBar")) {
+                %init(TAScrollRail);
+                dispatch_async(dispatch_get_main_queue(), ^{ TAListenScrollBars(); });
+            }
+            if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+                %init(TACompactHome);
+                if (NSClassFromString(@"CPSImageRowCell")) {
+                    %init(TAImageRowExperiment);
+                }
+                Class cls=NSClassFromString(@"CPUINowPlayingView");
+                SEL selector=NSSelectorFromString(@"recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:");
+                Method method=class_getInstanceMethod(cls,selector);
+                const char *encoding=method ? method_getTypeEncoding(method) : NULL;
+                if (encoding && strcmp(encoding,"v96@0:8B16B20B24{CGRect={CGPoint=dd}{CGSize=dd}}28{CGRect={CGPoint=dd}{CGSize=dd}}60B92")==0) {
+                    %init(TANowPlayingExperiment);
+                    TALog(@"NATIVE LAYOUT HOOK enabled");
+                } else TALog(@"NATIVE LAYOUT HOOK skipped encoding=%s",encoding ?: "missing");
+                dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); TAListenSnapshots(); });
+            }
+            return;
+        }
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
-        dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallHost(); });
         dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }
