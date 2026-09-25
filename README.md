@@ -1,6 +1,10 @@
-# MultiTA Beta 0.48.5
+# MultiTA Beta 0.48.6
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.48.6 — nút đổi bên sát ổ khoá, không che nút của ô
+
+Ảnh 0.48.5: khung tay nắm phóng to che nút ">" sang trang của bảng chọn bên trái, và nút đổi bên cách xa ổ khoá. Giờ nút đổi bên nằm ngay trên ổ khoá (ổ khoá 22×44, trước 22×60), cả cụm căn giữa màn; chỉ đúng hai nút (±4pt) nhận chạm, khoảng trống quanh chúng thuộc về ô bên dưới. Khi hiện, cụm to tối đa 2 lần nhưng chừa 48pt trên và dưới cho nút của ô (≈1,56 lần trên màn cao 240pt).
 
 ## 0.48.5 — vuốt từ Home, tay nắm to khi hiện
 

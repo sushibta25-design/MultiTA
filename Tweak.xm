@@ -1,4 +1,4 @@
-// MultiTA 0.48.5 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.48.6 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.5] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.6] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -463,17 +463,19 @@ static UIImage *TAAppIcon(NSString *bundle) {
     if (image) cache[bundle]=image;
     return image;
 }
-// While shown, the lock handle and the swap button are drawn and hit-tested
-// at up to 2x (bounded by the display height: ~1.73x on a 240pt display)
-// so they are easy to hit while driving; once faded they return to 1x, so
-// the invisible hit area does not cover the apps.
+// Swap button stacked directly on the lock handle, centred on the display.
+static const CGFloat kTALockHeight=44;
+#define kTAHandleHeight (kTASwapArea+2+kTALockHeight)
+// While shown, the swap button and lock handle are drawn and hit-tested at
+// up to 2x, keeping the top and bottom 48pt free for the panes' own controls
+// (picker close/next buttons): ~1.56x on a 240pt display. Once faded they
+// return to 1x. Only the two controls take touches (TAHandleView).
 static void TASetHandleBig(BOOL big) {
     if (!floatingActions || !splitWindow) return;
-    CGFloat height=splitWindow.bounds.size.height, base=88+kTASwapArea;
-    CGFloat scale=big ? MAX(1,MIN(2,(height-8)/base)) : 1;
-    CGFloat restY=MAX(0,MAX(4,(height-88)/2)-kTASwapArea)+base/2;
+    CGFloat height=splitWindow.bounds.size.height;
+    CGFloat scale=big ? MAX(1,MIN(2,(height-96)/kTAHandleHeight)) : 1;
     floatingActions.transform=CGAffineTransformMakeScale(scale,scale);
-    floatingActions.center=CGPointMake(floatingActions.center.x,big ? height/2 : restY);
+    floatingActions.center=CGPointMake(floatingActions.center.x,height/2);
 }
 static void TAShowChrome(void) {
     if (!running || !floatingActions) return;
@@ -496,6 +498,17 @@ static void TAShowChrome(void) {
     });
 }
 static void TARevealActions(void) { TAShowChrome(); }
+// Touch container of the swap button + lock handle: only the two controls
+// (plus 4pt) take touches, so the space around them reaches the panes.
+@interface TAHandleView : UIView
+@end
+@implementation TAHandleView
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    for (UIView *v in self.subviews)
+        if (!v.hidden && CGRectContainsPoint(CGRectInset(v.frame,-4,-4),point)) return YES;
+    return NO;
+}
+@end
 @interface TASplitWindow : UIWindow
 @end
 @implementation TASplitWindow
@@ -972,19 +985,19 @@ static UIButton *TAButton(NSString *title, SEL action) {
     railIcon.layer.cornerRadius = 10; railIcon.clipsToBounds = YES; railIcon.alpha = 0; railIcon.userInteractionEnabled = NO;
     [dividerView addSubview:railIcon];
 
-    // Touch container: 56 wide; top 46pt = swap button, below = 88pt capsule
-    // area. The capsule stays vertically centred on the display.
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-28,MAX(0,MAX(4,(bounds.size.height-88)/2)-kTASwapArea),56,88+kTASwapArea)];
+    // Touch container: 56 wide; top 46pt = swap button, directly below it the
+    // 44pt lock capsule; the stack is centred on the display.
+    floatingActions = [[TAHandleView alloc] initWithFrame:CGRectMake(half-28,round((bounds.size.height-kTAHandleHeight)/2),56,kTAHandleHeight)];
     floatingActions.backgroundColor=UIColor.clearColor;
     floatingActions.isAccessibilityElement=YES;
     floatingActions.accessibilityLabel=@"Tay nắm chia màn: chạm mở tác vụ, chạm hai lần để đổi app, kéo để đổi tỉ lệ";
-    // Visible part: 22x60 dark frosted capsule with hairline and three dots.
-    lockVisual=[[UIView alloc] initWithFrame:CGRectMake(17,14+kTASwapArea,22,60)];
+    // Visible part: 22x44 dark capsule with hairline and three dots.
+    lockVisual=[[UIView alloc] initWithFrame:CGRectMake(17,kTASwapArea+2,22,kTALockHeight)];
     lockVisual.userInteractionEnabled=NO; lockVisual.layer.cornerRadius=11; lockVisual.clipsToBounds=YES;
     lockVisual.layer.borderWidth=0.5; lockVisual.layer.borderColor=[UIColor colorWithWhite:1 alpha:0.28].CGColor;
     lockVisual.backgroundColor=[UIColor colorWithWhite:0.1 alpha:0.82];
     for (NSInteger d=0;d<3;d++) {
-        UIView *dot=[[UIView alloc] initWithFrame:CGRectMake(8.5,19+d*9,5,5)];
+        UIView *dot=[[UIView alloc] initWithFrame:CGRectMake(8.5,11+d*9,5,5)];
         dot.backgroundColor=[UIColor colorWithWhite:1 alpha:0.9]; dot.layer.cornerRadius=2.5; [lockVisual addSubview:dot];
     }
     [floatingActions addSubview:lockVisual];
