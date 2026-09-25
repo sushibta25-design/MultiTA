@@ -1,10 +1,10 @@
-# MultiTA Beta 0.49.1
+# MultiTA Beta 0.49.2
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
 
 ## 0.49.1 — chỉnh chuột và lời thoại
 
-Chuột cách divider 22pt (trước 6pt); bong bóng lời của chuột kết thúc cách divider 16pt, không đè lên thanh chia; chữ bong bóng 13pt (trước 11pt). Bỏ chữ "Chọn ứng dụng" trong lúc vuốt; ô trống vẫn hiện "Chạm để chọn ứng dụng" sau khi thả tay.
+Chuột cách divider 22pt (trước 6pt); bong bóng lời của chuột kết thúc cách divider 16pt, không đè lên thanh chia; chữ bong bóng 13pt (trước 11pt). Bỏ chữ "Chọn ứng dụng" trong lúc vuốt (0.49.2: bỏ cả icon app nằm sau quái vật); ô trống vẫn hiện "Chạm để chọn ứng dụng" sau khi thả tay.
 
 ## 0.49 — chuột và quái vật khi vuốt từ Dock
 

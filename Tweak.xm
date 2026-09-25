@@ -1,4 +1,4 @@
-// MultiTA 0.49.1 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.49.2 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.2] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -1523,11 +1523,11 @@ static UIButton *TAButton(NSString *title, SEL action) {
     railIcon.image=companion ? TAAppIcon(companion) : [UIImage systemImageNamed:@"plus.square.on.square"];
     railIcon.tintColor=UIColor.lightGrayColor;
     for (NSInteger i=0;i<2;i++) {
-        NSString *bundle=i==pullCurrentSlot ? current : companion;
-        // No "Chọn ứng dụng" while the mouse-and-monster show runs; the
+        // Neither the "Chọn ứng dụng" prompt nor the app icon while the
+        // mouse-and-monster show runs (the icon sat behind the monster); the
         // empty-pane prompt returns in -finishPull: if the pane stays empty.
         [choose[i] setTitle:@"" forState:UIControlStateNormal];
-        [choose[i] setImage:bundle ? TAAppIcon(bundle) : nil forState:UIControlStateNormal];
+        [choose[i] setImage:nil forState:UIControlStateNormal];
         choose[i].enabled=NO; choose[i].adjustsImageWhenDisabled=NO;
     }
     // Rail above the panes, but the handle must stay above the rail:
