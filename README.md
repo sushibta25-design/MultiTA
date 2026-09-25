@@ -1,6 +1,12 @@
-# MultiTA Beta 0.46.0
+# MultiTA Beta 0.47.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.47 — YouTube Music màn xanh trong ô hẹp
+
+Log 0.46: không treo; Google Maps, Apple Maps, YouTube vào ô bình thường. YouTube Music vào ô trái rộng 177pt thì chỉ hiện nền xanh. Từ 0.44 mẹo trả lại 45pt bên trái bị tắt cho mọi app trừ Google Maps, nên YouTube Music chỉ còn ~132pt để vẽ; cùng lúc sửa hàng ảnh (4 nút cố định 61pt) và rút gọn chữ tab — vốn viết riêng cho YouTube Music ô hẹp — cũng tắt.
+
+Bật lại bước 2: trả lại 45pt cho mọi app template trong danh sách (Apple Maps, Google Maps, YouTube Music, Vietmap) và hai sửa riêng của YouTube Music (tab, hàng ảnh). Vẫn tắt: ẩn thanh cuộn, bỏ ảnh bìa Now Playing, mọi code trong tiến trình YouTube.
 
 ## 0.46 — Google Maps trong ô, giữ YouTube khi kéo divider về cạnh
 

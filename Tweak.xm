@@ -1,4 +1,4 @@
-// MultiTA 0.46.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.47.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.46.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.47.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -2299,9 +2299,9 @@ static void TATemplateLayout(UIWindow *w) {
     UIViewController *root = w.rootViewController;
     if (!root.viewIfLoaded || ![NSStringFromClass(root.class) isEqual:@"CARTemplateUIApplicationSceneViewController"]) return;
     NSString *bundle = nil; BOOL active = TATemplateTarget(w, &bundle);
-    // 0.46: re-enabled for Google Maps only (its map viewport keeps a 45pt
-    // leading inset meant for the Dock, which is not beside a pane).
-    if (active && ![bundle isEqual:@"com.google.Maps"]) active = NO;
+    // 0.46 re-enabled this for Google Maps; 0.47 for every template app in
+    // TAClientBundles (TATemplateTarget already limits it to those). A 177pt
+    // pane minus the 45pt Dock inset left YouTube Music 132pt: blue screen.
     NSValue *saved = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
     if (!active && !saved) return;
     NSString *stamp = active ? NSStringFromCGRect(w.windowScene.coordinateSpace.bounds) : @"restore";
@@ -2311,7 +2311,6 @@ static void TATemplateLayout(UIWindow *w) {
         objc_setAssociatedObject(root, &TALayoutQueuedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (w.rootViewController != root || !root.viewIfLoaded) return;
         NSString *currentBundle = nil; BOOL currentActive = TATemplateTarget(w, &currentBundle);
-        if (currentActive && ![currentBundle isEqual:@"com.google.Maps"]) currentActive = NO;
         NSValue *original = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
         if (!currentActive && !original) return;
         UIEdgeInsets before = root.view.safeAreaInsets;
@@ -2862,6 +2861,10 @@ static void TAUpdateEdge(void) {
         // are off. Apps draw in a pane exactly as CarPlay renders them.
         if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAInsetOnly);
+            // 0.47: YouTube Music narrow-pane fixes back on (tab titles, the
+            // fixed 61pt image-row buttons). Both check the bundle themselves.
+            %init(TACompactHome);
+            if (NSClassFromString(@"CPSImageRowCell")) { %init(TAImageRowExperiment); }
             dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); });
             return;
         }
