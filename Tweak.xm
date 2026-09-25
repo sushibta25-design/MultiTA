@@ -1,4 +1,4 @@
-// MultiTA 0.48.1 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.48.2 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.2] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -123,7 +123,7 @@ static BOOL allowLaunchInSplit;
 static BOOL pullFromLeft;          // current pull started in the Dock and moves right
 static BOOL layoutMirror;
 static CGFloat dockZoneRight;      // right edge of the CarPlay Dock, in display points
-static NSHashTable<UIPanGestureRecognizer *> *dockSwipes;   // one per Dashboard window
+static NSHashTable<UIPanGestureRecognizer *> *dockSwipes;   // the Dock swipe recogniser(s)
 static UIWindow *dockTopWindow;   // clear swipe zone over the top of the Dock (clock/Wi-Fi), above the icons
 static UIImageView *railIcon;
 // Capsule handle (visual part fades after 3s; its touch area stays live).
@@ -2806,134 +2806,59 @@ static void TAHideSideActions(void) {}
     if (!running && self==mountedDock && !dockAdjusting) TAInstallDock(self);
 }
 %end
-// Locate the first Dock icon by hit-testing down the left edge of the
-// display, so the swipe zone needs no Dock class name (the class-based Dock
-// search found nothing on some head units). The zone covers the Dock from
-// the top (clock, signal, Wi-Fi) down to just above that icon.
-static BOOL TAOwnWindow(UIWindow *w) {
-    return w==splitWindow || w==buttonWindow || w==TAKBWindow || w==dockTopWindow;
-}
-// DBLockOutWindow answers hit tests over the whole display (log 0.47.3/0.48.0)
-// although real touches reach the Dock below it; never probe through it.
-static BOOL TASkipProbeWindow(UIWindow *w) {
-    return w.hidden || w.alpha<0.01 || TAOwnWindow(w) || [NSStringFromClass(w.class) containsString:@"LockOut"];
-}
 static NSArray<UIWindow *> *TADockProbeWindows(UIWindowScene *s) {
     return [s.windows sortedArrayUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *c) {
         return a.windowLevel>c.windowLevel ? NSOrderedAscending : a.windowLevel<c.windowLevel ? NSOrderedDescending : NSOrderedSame;
     }];
 }
-// One-time record of what sits along the left edge (window, hit view and two
-// ancestors every 12pt), so a missed Dock can be matched from a single log.
-static void TALogDockProbe(UIWindowScene *s) {
-    static __weak UIWindowScene *logged;
-    if (logged==s) return;
-    logged=s;
-    CGRect b=s.coordinateSpace.bounds;
-    TALog(@"DOCK PROBE display=%@",NSStringFromCGRect(b));
-    for (CGFloat y=CGRectGetMinY(b)+6;y<CGRectGetMaxY(b);y+=12) {
-        for (UIWindow *w in TADockProbeWindows(s)) {
-            if (TASkipProbeWindow(w)) continue;
-            UIView *hit=[w hitTest:[w convertPoint:CGPointMake(CGRectGetMinX(b)+20,y) fromCoordinateSpace:s.coordinateSpace] withEvent:nil];
-            if (!hit) continue;
-            NSMutableString *chain=[NSMutableString string];
-            NSUInteger depth=0;
-            for (UIView *v=hit;v && v!=w && depth<3;v=v.superview,depth++)
-                [chain appendFormat:@" %@%@%@",NSStringFromClass(v.class),NSStringFromCGRect([v convertRect:v.bounds toCoordinateSpace:s.coordinateSpace]),
-                    [v isKindOfClass:UIControl.class] || v.gestureRecognizers.count ? @"*" : @""];
-            TALog(@"DOCK PROBE y=%.0f window=%@%@",y,NSStringFromClass(w.class),chain);
-            break;
-        }
+// Which window would take a touch at this display point (highest level
+// first, as UIKit delivers it). Logged once per zone so an overlay stealing
+// the swipe shows up in the log.
+static NSString *TATopWindowAt(UIWindowScene *s, CGPoint p) {
+    for (UIWindow *w in TADockProbeWindows(s)) {
+        if (w.hidden || w.alpha<0.01) continue;
+        if ([w hitTest:[w convertPoint:p fromCoordinateSpace:s.coordinateSpace] withEvent:nil])
+            return [NSString stringWithFormat:@"%@(level %.0f)",NSStringFromClass(w.class),w.windowLevel];
     }
+    return @"none";
 }
-static CGRect TAFindDockZone(UIWindowScene *s) {
-    CGRect b=s.coordinateSpace.bounds;
-    TALogDockProbe(s);
-    NSArray<UIWindow *> *windows=TADockProbeWindows(s);
-    CGFloat limit=MAX(96,round(b.size.width*0.16));   // largest plausible Dock icon
-    // Probe several x positions: the Dock is wider than 44pt on large screens.
-    for (NSNumber *probeX in @[@12,@20,@30,@42]) {
-        CGFloat probe=CGRectGetMinX(b)+probeX.doubleValue;
-        for (CGFloat y=CGRectGetMinY(b)+6;y<CGRectGetMinY(b)+b.size.height*0.8;y+=3) {
-            for (UIWindow *w in windows) {
-                if (TASkipProbeWindow(w)) continue;
-                CGPoint point=[w convertPoint:CGPointMake(probe,y) fromCoordinateSpace:s.coordinateSpace];
-                UIView *hit=[w hitTest:point withEvent:nil];
-                for (UIView *v=hit;v && v!=w;v=v.superview) {
-                    CGRect f=[v convertRect:v.bounds toCoordinateSpace:s.coordinateSpace];
-                    BOOL iconSized=f.size.width>=28 && f.size.width<=limit && f.size.height>=28 && f.size.height<=limit*1.4;
-                    NSString *name=NSStringFromClass(v.class);
-                    BOOL iconLike=[v isKindOfClass:UIControl.class] || [name containsString:@"Icon"] || [name containsString:@"Button"] || v.gestureRecognizers.count>0;
-                    if (iconSized && iconLike && CGRectGetMinY(f)>CGRectGetMinY(b)+20) {
-                        CGFloat right=MIN(round(b.size.width*0.2),MAX(40,round(CGRectGetMaxX(f)+CGRectGetMinX(f)-2*CGRectGetMinX(b))));
-                        CGFloat bottom=CGRectGetMinY(f)-4;
-                        CGRect zone=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),right,MAX(0,bottom-CGRectGetMinY(b)));
-                        static NSString *lastFound;
-                        NSString *found=[NSString stringWithFormat:@"%@ %@",name,NSStringFromCGRect(f)];
-                        if (![found isEqual:lastFound]) { lastFound=found; TALog(@"DOCK ZONE icon=%@ zone=%@",found,NSStringFromCGRect(zone)); }
-                        return zone;
-                    }
-                }
-            }
-        }
-    }
-    CGRect fallback=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(44,round(b.size.width*0.2)),round(b.size.height*0.4));
-    static BOOL loggedFallback;
-    if (!loggedFallback) { loggedFallback=YES; TALog(@"DOCK ZONE fallback: no Dock icon found; zone=%@",NSStringFromCGRect(fallback)); }
-    return fallback;
-}
-// The Dock swipe lives on CarPlay's own Dashboard windows (no overlay), so a
-// tap still reaches the Dock icons; only a rightward swipe that starts in the
-// Dock is taken (see -gestureRecognizerShouldBegin:), and it cancels the tap.
+// The Dock is drawn outside CarPlayApp's own view tree (log 0.48.1: probing
+// every Dashboard window finds no Dock view), so only a MultiTA window can
+// receive a touch there. A clear window over the top of the Dock (clock,
+// signal, Wi-Fi, down to just above the first icon) takes the swipe; it sits
+// above other tweaks' overlays (a CTWindow at level 2100 was seen).
 static void TAUpdateEdge(void) {
     UIWindowScene *s=dashboard;
     if (!s) { dockTopWindow.hidden=YES; return; }
     if (!dockSwipes) dockSwipes=[NSHashTable weakObjectsHashTable];
-    // Backup that is known to work on the car (0.47.3): a clear window over the
-    // top of the Dock, from the clock down to just above the first icon.
     if (!dockTopWindow || dockTopWindow.windowScene!=s) {
         dockTopWindow.hidden=YES;
         dockTopWindow=[[UIWindow alloc] initWithWindowScene:s];
-        dockTopWindow.windowLevel=UIWindowLevelAlert+75;
+        dockTopWindow.windowLevel=UIWindowLevelAlert+200;
         dockTopWindow.rootViewController=[UIViewController new];
         dockTopWindow.rootViewController.view.backgroundColor=UIColor.clearColor;
         UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dockPull:)];
         pan.maximumNumberOfTouches=1; pan.delegate=controls;
         [dockTopWindow.rootViewController.view addGestureRecognizer:pan]; [dockSwipes addObject:pan];
     }
-    for (UIWindow *w in s.windows) {
-        if (TAOwnWindow(w)) continue;
-        BOOL installed=NO;
-        for (UIGestureRecognizer *g in w.gestureRecognizers) if ([dockSwipes containsObject:(UIPanGestureRecognizer *)g]) { installed=YES; break; }
-        if (installed) continue;
-        UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dockPull:)];
-        pan.maximumNumberOfTouches=1; pan.delegate=controls;
-        pan.delaysTouchesEnded=NO;   // Dock taps are not held back while the swipe decides
-        [w addGestureRecognizer:pan]; [dockSwipes addObject:pan];
-        TALog(@"DOCK SWIPE installed window=%@ level=%.0f",NSStringFromClass(w.class),w.windowLevel);
-    }
-    // Never move or hide a zone under a finger: that would cancel the swipe.
+    // Never move or hide the zone under a finger: that would cancel the swipe.
     for (UIPanGestureRecognizer *pan in dockSwipes) {
         UIGestureRecognizerState state=pan.state;
         if (state==UIGestureRecognizerStateBegan || state==UIGestureRecognizerStateChanged) return;
     }
     if (running || primeBundle) { dockTopWindow.hidden=YES; return; }
-    // Dock width from the first Dock icon when found, else 20% of the display
-    // (the zone the 0.47.3 test swiped from successfully). Re-measured every 3s.
-    static NSTimeInterval measured;
-    NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
-    if (now-measured>=3 || dockTopWindow.hidden) {
-        measured=now;
-        CGRect zone=TAFindDockZone(s);
-        CGRect b=s.coordinateSpace.bounds;
-        CGFloat right=CGRectGetMaxX(zone)-CGRectGetMinX(b);
-        // Top zone ends above the first icon; unmeasured, keep to the top 25%.
-        CGFloat height=MIN(zone.size.height,round(b.size.height*0.25));
-        if (fabs(right-dockZoneRight)>0.5) TALog(@"DOCK ZONE right=%.1f top=%.1f display=%@",right,height,NSStringFromCGRect(b));
-        dockZoneRight=right;
-        dockTopWindow.frame=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),right,height);
+    // Test car (426x240): the Dock is ~14% of the width; the clock/Wi-Fi block
+    // ends at ~19% and the first Dock icon starts at ~30% of the height.
+    CGRect b=s.coordinateSpace.bounds;
+    CGRect zone=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(44,round(b.size.width*0.14)),round(b.size.height*0.28));
+    if (!CGRectEqualToRect(dockTopWindow.frame,zone)) {
+        dockTopWindow.frame=zone;
+        dockZoneRight=CGRectGetMaxX(zone)-CGRectGetMinX(b);
+        dockTopWindow.hidden=NO;
+        TALog(@"DOCK ZONE %@ top=%@ display=%@",NSStringFromCGRect(zone),
+              TATopWindowAt(s,CGPointMake(CGRectGetMidX(zone),CGRectGetMidY(zone))),NSStringFromCGRect(b));
     }
-    dockTopWindow.hidden=dockTopWindow.frame.size.height<24;
+    dockTopWindow.hidden=NO;
 }
 %hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
