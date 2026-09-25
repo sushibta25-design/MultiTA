@@ -1,4 +1,4 @@
-// MultiTA 0.35.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
+// MultiTA 0.36.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -6,6 +6,7 @@
 #import <notify.h>
 #import <objc/runtime.h>
 #import <fcntl.h>
+#import <dlfcn.h>
 #import <unistd.h>
 
 static void TALog(NSString *format, ...) {
@@ -24,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.35.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.36.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -84,7 +85,14 @@ static UIWindow *splitWindow, *buttonWindow;
 static UIView *floatingActions;
 // Resizable split. splitRatio = divider centre / display width, kept for the
 // SpringBoard lifetime so Fold/Home resume with the same proportions.
-static const CGFloat kTAMinRatio=0.30, kTAMaxRatio=0.70;
+// Limits are defined in points so every display feels the same. The small
+// wired unit (426pt wide) keeps exactly 30/70; a wide wireless unit (640pt)
+// gets 20/80, i.e. the same 128pt minimum pane instead of a 192pt one.
+static const CGFloat kTAMinPane=128, kTACollapseEdge=60, kTAPullCancel=72;
+static CGFloat TADisplayWidth(void);
+static CGFloat TAMinRatioFor(CGFloat w) { return MIN(0.30,MAX(0.18,kTAMinPane/MAX(1,w))); }
+#define kTAMinRatio (TAMinRatioFor(TADisplayWidth()))
+#define kTAMaxRatio (1-TAMinRatioFor(TADisplayWidth()))
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static UIView *dividerView, *dividerGrip;
 static UIView *dragCovers[2];
@@ -113,7 +121,7 @@ static BOOL dragMoved;
 // Hold ≥1s on the divider/handle opens the Tác vụ page (greeting card).
 static NSUInteger holdSerial;
 static BOOL holdFired;
-static const CGFloat kTADragSlop=12;
+static const CGFloat kTADragSlop=9;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSArray<NSString *> *resumeBundles;
@@ -555,13 +563,18 @@ static void TADumpDock(void) {
 }
 @end
 static CGFloat TADividerWidth(CGFloat width) { return MAX(16,2*round(width*0.015)); }
+static CGFloat TADisplayWidth(void) {
+    if (splitWindow) return splitWindow.bounds.size.width;
+    return dashboard ? dashboard.coordinateSpace.bounds.size.width : 426;
+}
 static CGFloat TAClampRatio(CGFloat r) { return MIN(kTAMaxRatio,MAX(kTAMinRatio,r)); }
 // UIScrollView-style resistance past the 30/70 limits: the divider keeps
 // following the finger a little, then springs back to the limit on release.
 static CGFloat TARubber(CGFloat over, CGFloat limit) { return (1.0-1.0/(over*0.55/limit+1.0))*limit; }
 // Past 30/70 the divider still follows at ~55% speed so it can be pulled
 // toward an edge; releasing beyond kTACollapse closes the split.
-static const CGFloat kTACollapse=0.88;
+// Collapse when the smaller pane would be under ~60pt (0.86 on 426pt, 0.91 on 640pt).
+#define kTACollapse (MAX(kTAMaxRatio+0.05,1-kTACollapseEdge/MAX(1,TADisplayWidth())))
 static CGFloat TAVisualRatio(CGFloat raw) {
     if (raw<kTAMinRatio) return MAX(0.03,kTAMinRatio-(kTAMinRatio-raw)*0.55);
     if (raw>kTAMaxRatio) return MIN(0.97,kTAMaxRatio+(raw-kTAMaxRatio)*0.55);
@@ -996,7 +1009,29 @@ static UIButton *TAButton(NSString *title, SEL action) {
     TARememberPair();
     TASuspend(@"home");
     id dash=nativeDashboard;
-    for (NSString *name in @[@"handleHomeButtonPress",@"_handleHomeButtonPress",@"homeButtonPressed",@"_homeButtonPressed",@"goHome",@"_goHome"]) {
+    // Candidates: known names first, then no-argument void methods of the
+    // Dashboard class whose name says "home" + an action word (logged once).
+    NSMutableArray *names=[@[@"handleHomeButtonPress",@"_handleHomeButtonPress",@"homeButtonPressed",@"_homeButtonPressed",@"goHome",@"_goHome"] mutableCopy];
+    static NSArray *discovered;
+    if (!discovered && dash) {
+        NSMutableArray *found=[NSMutableArray new];
+        for (Class c=[dash class]; c && c!=NSObject.class; c=class_getSuperclass(c)) {
+            unsigned int count=0; Method *methods=class_copyMethodList(c,&count);
+            for (unsigned int i=0;i<count;i++) {
+                NSString *name=NSStringFromSelector(method_getName(methods[i]));
+                NSString *lower=name.lowercaseString;
+                if (![lower containsString:@"home"]) continue;
+                TALog(@"HOME candidate %@ %s",name,method_getTypeEncoding(methods[i]));
+                if ([name containsString:@":"]) continue;
+                if ([lower containsString:@"go"] || [lower containsString:@"show"] || [lower containsString:@"open"] || [lower containsString:@"press"] || [lower containsString:@"tap"] || [lower containsString:@"handle"] || [lower containsString:@"return"])
+                    [found addObject:name];
+            }
+            free(methods);
+        }
+        discovered=found;
+    }
+    [names addObjectsFromArray:discovered ?: @[]];
+    for (NSString *name in names) {
         SEL sel=NSSelectorFromString(name);
         NSMethodSignature *sig=[dash methodSignatureForSelector:sel];
         if (!sig || sig.numberOfArguments!=2 || strcmp(sig.methodReturnType,@encode(void))) continue;
@@ -1244,7 +1279,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
     NSString *current=[pullCurrent copy], *companion=[pullCompanion copy];
     staged=NO; pullCurrent=nil; pullCompanion=nil;
     // Released near the edge: nothing was attached, just remove the overlay.
-    if (ratio>0.8) { TALog(@"EDGE PULL cancelled ratio=%.3f",ratio); TAStop(@"edge pull cancelled"); return; }
+    // Cancel only if the finger travelled less than ~72pt from the right edge.
+    if (ratio>1-kTAPullCancel/MAX(1,TADisplayWidth())) { TALog(@"EDGE PULL cancelled ratio=%.3f",ratio); TAStop(@"edge pull cancelled"); return; }
     ratio=TAClampRatio(ratio);
     if (fabs(ratio-0.5)<0.03) ratio=0.5;
     splitRatio=ratio;
@@ -1280,7 +1316,12 @@ static UIButton *TAButton(NSString *title, SEL action) {
         if (slots[winner]) slots[winner].restoreBackground=NO;
         TARememberPair();
         TAStop(@"collapse");
-        if (keep.length && ![keep isEqual:nativeForeground]) {
+        // 6/6 host stalls followed a native foreground of a non-template app
+        // (YouTube via bridge) whose scene had been resized in the split.
+        // Only template/Apple apps are relaunched automatically.
+        BOOL safeRelaunch=[keep hasPrefix:@"com.apple."] || [[TAValue(records[keep].controller,@"sceneID") componentsSeparatedByString:@":"] count]==3;
+        if (keep.length && !safeRelaunch) TALog(@"COLLAPSE skip native relaunch %@ (non-template)",keep);
+        if (keep.length && safeRelaunch && ![keep isEqual:nativeForeground]) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (running || primeBundle) return;
                 BOOL ok=TANativeLaunch(keep);
@@ -1601,6 +1642,58 @@ static void TACapture(id controller, id settings) {
     if (resumeBundles && (launch || [TAClientBundles() containsObject:bundle])) resumeCandidate=bundle;
     TALog(@"CAPTURE %@ sid=%@ launchSource=%d",bundle,sid,launch);
 }
+// MediaRemote (loaded lazily). Used only to resume playback after the head
+// unit borrows the screen (reverse camera) — the same "play" a steering-wheel
+// button sends. Nothing is sent unless audio/video was playing just before.
+typedef void (*TAMRIsPlayingFn)(dispatch_queue_t, void (^)(Boolean));
+typedef Boolean (*TAMRSendFn)(uint32_t, CFDictionaryRef);
+static TAMRIsPlayingFn TAMRIsPlaying;
+static TAMRSendFn TAMRSend;
+static NSTimeInterval lastPlayingSeen, interruptionStart;
+static BOOL interruptionWasPlaying;
+static void TALoadMediaRemote(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h=dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote",RTLD_LAZY);
+        if (!h) { TALog(@"MEDIA remote unavailable"); return; }
+        TAMRIsPlaying=(TAMRIsPlayingFn)dlsym(h,"MRMediaRemoteGetNowPlayingApplicationIsPlaying");
+        TAMRSend=(TAMRSendFn)dlsym(h,"MRMediaRemoteSendCommand");
+        TALog(@"MEDIA remote isPlaying=%d send=%d",TAMRIsPlaying!=NULL,TAMRSend!=NULL);
+    });
+}
+static void TAPollPlaying(void) {
+    if (!TAMRIsPlaying) return;
+    TAMRIsPlaying(dispatch_get_main_queue(), ^(Boolean playing) {
+        if (playing) lastPlayingSeen=NSProcessInfo.processInfo.systemUptime;
+    });
+}
+static void TAInterruptionBegan(NSString *why) {
+    NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+    if (interruptionStart>0 && now-interruptionStart<300) return;
+    interruptionStart=now;
+    interruptionWasPlaying=lastPlayingSeen>0 && now-lastPlayingSeen<3.5;
+    TALog(@"INTERRUPTION begin reason=%@ wasPlaying=%d",why,interruptionWasPlaying);
+}
+static void TAInterruptionEnded(NSString *why) {
+    if (interruptionStart<=0) return;
+    NSTimeInterval now=NSProcessInfo.processInfo.systemUptime, duration=now-interruptionStart;
+    BOOL wasPlaying=interruptionWasPlaying;
+    interruptionStart=0; interruptionWasPlaying=NO;
+    TALog(@"INTERRUPTION end reason=%@ after=%.1fs wasPlaying=%d",why,duration,wasPlaying);
+    if (!wasPlaying || duration>300 || !TAMRSend) return;
+    // Give the app time to recreate its scene, then press Play once; check
+    // again and press once more if still silent.
+    for (NSNumber *delay in @[@2.5,@5.0]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay.doubleValue*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            if (!TAMRIsPlaying) { TAMRSend(0,NULL); TALog(@"RESUME play sent (blind)"); return; }
+            TAMRIsPlaying(dispatch_get_main_queue(), ^(Boolean playing) {
+                if (playing) return;
+                Boolean ok=TAMRSend(0,NULL);   // kMRPlay
+                TALog(@"RESUME play sent ok=%d at=%.1fs",ok,delay.doubleValue);
+            });
+        });
+    }
+}
 static void TAStartResponsivenessProbe(void) {
     static dispatch_source_t timer;
     if (timer) return;
@@ -1628,6 +1721,20 @@ static void TAStartResponsivenessProbe(void) {
 }
 static void TATick(void) {
     UIWindowScene *s = TADashboard();
+    // Track playback and the display's shape. A lost or reshaped CarPlay
+    // display (reverse camera, head unit taking the screen) is an interruption;
+    // getting the usual shape back ends it.
+    TAPollPlaying();
+    static CGSize usual;
+    static __weak UIWindowScene *seenScene;
+    CGSize now=s ? s.coordinateSpace.bounds.size : CGSizeZero;
+    // A different display object: same shape = the screen came back; other
+    // shape = a different head unit, which becomes the new reference.
+    if (s && s!=seenScene) { seenScene=s; if (!CGSizeEqualToSize(now,usual) && interruptionStart<=0) usual=now; }
+    if (s && usual.width<=0) usual=now;
+    if (!s || !CGSizeEqualToSize(now,usual)) {
+        if (usual.width>0) TAInterruptionBegan(s ? [NSString stringWithFormat:@"display %@",NSStringFromCGSize(now)] : @"display gone");
+    } else if (interruptionStart>0) TAInterruptionEnded(@"display back");
     if (s != dashboard) {
         TAStop(@"display changed"); buttonWindow.hidden = YES; buttonWindow = nil;
         TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil;
@@ -1754,200 +1861,6 @@ static void TAListenScrollBars(void) {
         });
     }
 }
-
-// ---- Shared split keyboard -------------------------------------------------
-// One full-width keyboard is owned by CarPlay.app. Split client processes keep
-// their real first responder, suppress the pane-sized native keyboard, and
-// receive text commands through a tiny Darwin-notify + plist IPC channel.
-static NSString *const kTAKeyboardPayload=@"/var/mobile/Library/Preferences/com.sushibta.multita.keyboard.plist";
-static NSString *const kTAKeyboardFocusNotify=@"com.sushibta.multita.keyboard.focus";
-static NSString *const kTAKeyboardCommandNotify=@"com.sushibta.multita.keyboard.command";
-static __weak id TAKeyboardResponder=nil;
-static UIWindow *TAKeyboardWindow=nil;
-static NSString *TAKeyboardBundle=nil;
-static BOOL TAKeyboardSymbols=NO, TAKeyboardShift=NO;
-static NSUInteger TAKeyboardSequence=0;
-
-static void TAKeyboardWrite(NSDictionary *payload) {
-    if (!payload) return;
-    NSMutableDictionary *p=[payload mutableCopy];
-    p[@"seq"]=@(++TAKeyboardSequence);
-    [p writeToFile:kTAKeyboardPayload atomically:YES];
-}
-static NSDictionary *TAKeyboardRead(void) {
-    NSDictionary *p=[NSDictionary dictionaryWithContentsOfFile:kTAKeyboardPayload];
-    return [p isKindOfClass:NSDictionary.class] ? p : nil;
-}
-static NSString *TAKeyboardFocusedBundle(void) {
-    NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
-    if ([bundle isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (![scene isKindOfClass:UIWindowScene.class]) continue;
-            NSString *sid=scene.session.persistentIdentifier ?: @"";
-            NSArray *parts=[sid componentsSeparatedByString:@":"];
-            if (parts.count==3 && [parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"]) return parts.lastObject;
-        }
-    }
-    return bundle;
-}
-static UISearchBar *TAKeyboardSearchBar(UIView *view) {
-    for (UIView *v=view;v;v=v.superview) if ([v isKindOfClass:UISearchBar.class]) return (UISearchBar *)v;
-    return nil;
-}
-static void TAKeyboardDirectCancel(id responder) {
-    UIView *view=[responder isKindOfClass:UIView.class] ? responder : nil;
-    UISearchBar *bar=TAKeyboardSearchBar(view);
-    if (bar) {
-        bar.text=@"";
-        id delegate=bar.delegate;
-        if ([delegate respondsToSelector:@selector(searchBarCancelButtonClicked:)])
-            [delegate searchBarCancelButtonClicked:bar];
-        [bar resignFirstResponder];
-        return;
-    }
-    if ([responder respondsToSelector:@selector(resignFirstResponder)]) [responder resignFirstResponder];
-}
-static void TAKeyboardClientFocus(id responder) {
-    UIWindow *w=[responder isKindOfClass:UIView.class] ? ((UIView *)responder).window : nil;
-    NSString *bundle=nil;
-    if (!TAInputTarget(w,&bundle)) return;
-    TAKeyboardResponder=responder;
-    TAKeyboardWrite(@{@"type":@"focus",@"bundle":bundle ?: TAKeyboardFocusedBundle() ?: @""});
-    notify_post(kTAKeyboardFocusNotify.UTF8String);
-}
-static void TAKeyboardClientBlur(id responder) {
-    if (TAKeyboardResponder!=responder) return;
-    NSString *bundle=TAKeyboardFocusedBundle() ?: @"";
-    TAKeyboardResponder=nil;
-    TAKeyboardWrite(@{@"type":@"blur",@"bundle":bundle});
-    notify_post(kTAKeyboardFocusNotify.UTF8String);
-}
-static void TAKeyboardApplyCommand(void) {
-    NSDictionary *p=TAKeyboardRead();
-    NSString *bundle=p[@"bundle"], *mine=TAKeyboardFocusedBundle();
-    if (!TAKeyboardResponder || ![bundle isKindOfClass:NSString.class] || ![bundle isEqual:mine]) return;
-    NSString *op=p[@"op"], *value=p[@"text"];
-    id r=TAKeyboardResponder;
-    if ([op isEqual:@"insert"] && [value isKindOfClass:NSString.class] && [r respondsToSelector:@selector(insertText:)]) {
-        [r insertText:value];
-    } else if ([op isEqual:@"delete"] && [r respondsToSelector:@selector(deleteBackward)]) {
-        [r deleteBackward];
-    } else if ([op isEqual:@"return"]) {
-        if ([r respondsToSelector:@selector(insertText:)]) [r insertText:@"\n"];
-        [r resignFirstResponder];
-    } else if ([op isEqual:@"cancel"]) {
-        TAKeyboardDirectCancel(r);
-        TAKeyboardResponder=nil;
-    }
-}
-static void TAKeyboardListenClient(void) {
-    int token=0;
-    notify_register_dispatch(kTAKeyboardCommandNotify.UTF8String,&token,dispatch_get_main_queue(),^(__unused int delivered){
-        TAKeyboardApplyCommand();
-    });
-}
-static void TAKeyboardSend(NSString *op, NSString *text) {
-    if (!TAKeyboardBundle.length) return;
-    NSMutableDictionary *p=[@{@"type":@"command",@"bundle":TAKeyboardBundle,@"op":op ?: @""} mutableCopy];
-    if (text) p[@"text"]=text;
-    TAKeyboardWrite(p);
-    notify_post(kTAKeyboardCommandNotify.UTF8String);
-}
-static UIButton *TAKeyboardKey(NSString *title, NSInteger tag) {
-    UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem];
-    b.tag=tag; [b setTitle:title forState:UIControlStateNormal];
-    [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    b.titleLabel.font=[UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    b.backgroundColor=[UIColor colorWithWhite:0.20 alpha:1];
-    b.layer.cornerRadius=6; b.clipsToBounds=YES;
-    return b;
-}
-@interface TAKeyboardTarget : NSObject
-- (void)key:(UIButton *)sender;
-@end
-static TAKeyboardTarget *TAKeyboardControls=nil;
-static void TAKeyboardRender(void);
-@implementation TAKeyboardTarget
-- (void)key:(UIButton *)sender {
-    NSString *t=[sender titleForState:UIControlStateNormal] ?: @"";
-    if (sender.tag==900) { TAKeyboardSymbols=!TAKeyboardSymbols; TAKeyboardShift=NO; TAKeyboardRender(); return; }
-    if (sender.tag==901) { TAKeyboardShift=!TAKeyboardShift; TAKeyboardRender(); return; }
-    if (sender.tag==902) { TAKeyboardSend(@"delete",nil); return; }
-    if (sender.tag==903) { TAKeyboardSend(@"insert",@" "); return; }
-    if (sender.tag==904) { TAKeyboardSend(@"return",nil); TAKeyboardWindow.hidden=YES; return; }
-    if (sender.tag==905) { TAKeyboardSend(@"cancel",nil); TAKeyboardWindow.hidden=YES; return; }
-    if (sender.tag==906) { return; } // VI indicator; text path stays Unicode-safe.
-    if (TAKeyboardShift) t=t.uppercaseString;
-    TAKeyboardSend(@"insert",t);
-    if (TAKeyboardShift) { TAKeyboardShift=NO; TAKeyboardRender(); }
-}
-@end
-static void TAKeyboardRender(void) {
-    UIView *root=TAKeyboardWindow.rootViewController.view;
-    if (!root) return;
-    [root.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
-    root.backgroundColor=[UIColor colorWithWhite:0.035 alpha:0.985];
-    CGSize z=root.bounds.size;
-    CGFloat pad=5, top=4, rowGap=4, rows=5;
-    CGFloat rh=(z.height-top*2-rowGap*(rows-1))/rows;
-    NSArray *layout=TAKeyboardSymbols ?
-        @[@[@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"0"],
-          @[@"!",@"@",@"#",@"$",@"%",@"^",@"&",@"*",@"(",@")"],
-          @[@"-",@"/",@":",@";",@"(",@")",@"₫",@"&",@"@",@"\""],
-          @[@"#+=",@",",@".",@"?",@"!",@"'",@"⌫"],
-          @[@"VI",@"Hủy",@"Dấu cách",@"Tìm"]] :
-        @[@[@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"0"],
-          @[@"q",@"w",@"e",@"r",@"t",@"y",@"u",@"i",@"o",@"p"],
-          @[@"a",@"s",@"d",@"f",@"g",@"h",@"j",@"k",@"l"],
-          @[@"⇧",@"z",@"x",@"c",@"v",@"b",@"n",@"m",@"⌫"],
-          @[@"#+=",@"VI",@"Hủy",@"Dấu cách",@"Tìm"]];
-    for (NSUInteger r=0;r<layout.count;r++) {
-        NSArray *keys=layout[r]; CGFloat y=top+r*(rh+rowGap);
-        CGFloat units=0;
-        for (NSString *k in keys) units += [k isEqual:@"Dấu cách"] ? 3.0 : ([k isEqual:@"Hủy"]||[k isEqual:@"Tìm"] ? 1.45 : 1.0);
-        CGFloat available=z.width-pad*2-pad*(keys.count-1), unit=available/units, x=pad;
-        for (NSString *k in keys) {
-            CGFloat mult=[k isEqual:@"Dấu cách"] ? 3.0 : ([k isEqual:@"Hủy"]||[k isEqual:@"Tìm"] ? 1.45 : 1.0);
-            NSInteger tag=0;
-            if ([k isEqual:@"#+="]) tag=900; else if ([k isEqual:@"⇧"]) tag=901; else if ([k isEqual:@"⌫"]) tag=902;
-            else if ([k isEqual:@"Dấu cách"]) tag=903; else if ([k isEqual:@"Tìm"]) tag=904;
-            else if ([k isEqual:@"Hủy"]) tag=905; else if ([k isEqual:@"VI"]) tag=906;
-            UIButton *b=TAKeyboardKey(k,tag); b.frame=CGRectMake(x,y,unit*mult,rh);
-            if (tag==905) b.backgroundColor=[UIColor colorWithRed:0.42 green:0.10 blue:0.10 alpha:1];
-            if (tag==904) b.backgroundColor=TACyan();
-            if (tag==900 || tag==906) b.backgroundColor=[UIColor colorWithWhite:0.12 alpha:1];
-            [b addTarget:TAKeyboardControls action:@selector(key:) forControlEvents:UIControlEventTouchUpInside];
-            [root addSubview:b]; x+=unit*mult+pad;
-        }
-    }
-}
-static void TAKeyboardShowForBundle(NSString *bundle) {
-    if (!running || !dashboard || !bundle.length) return;
-    BOOL selected=[slots[0].bundle isEqual:bundle] || [slots[1].bundle isEqual:bundle];
-    if (!selected) return;
-    TAKeyboardBundle=[bundle copy];
-    if (!TAKeyboardControls) TAKeyboardControls=[TAKeyboardTarget new];
-    if (!TAKeyboardWindow || TAKeyboardWindow.windowScene!=dashboard) {
-        TAKeyboardWindow=[[UIWindow alloc] initWithWindowScene:dashboard];
-        TAKeyboardWindow.windowLevel=UIWindowLevelAlert+140;
-        TAKeyboardWindow.rootViewController=[UIViewController new];
-    }
-    TAKeyboardWindow.frame=dashboard.coordinateSpace.bounds;
-    TAKeyboardWindow.hidden=NO;
-    TAKeyboardRender();
-    TALog(@"KEYBOARD show bundle=%@",bundle);
-}
-static void TAKeyboardListenHost(void) {
-    int token=0;
-    notify_register_dispatch(kTAKeyboardFocusNotify.UTF8String,&token,dispatch_get_main_queue(),^(__unused int delivered){
-        NSDictionary *p=TAKeyboardRead();
-        NSString *type=p[@"type"], *bundle=p[@"bundle"];
-        if ([type isEqual:@"focus"]) TAKeyboardShowForBundle(bundle);
-        else if ([type isEqual:@"blur"] && [bundle isEqual:TAKeyboardBundle]) TAKeyboardWindow.hidden=YES;
-    });
-}
-
-
 // Change only native tab item titles. UIKit still owns all button geometry.
 static NSHashTable<UITabBar *> *TACompactTabBars;
 static char TATabTitleKey, TATabBusyKey;
@@ -2451,42 +2364,6 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 %end
 %end
 %group TAClient
-%hook UITextField
-- (BOOL)becomeFirstResponder {
-    NSString *bundle=nil; BOOL split=TAInputTarget(self.window,&bundle);
-    if (split) {
-        UIView *blank=[[UIView alloc] initWithFrame:CGRectMake(0,0,1,1)];
-        blank.backgroundColor=UIColor.clearColor;
-        self.inputView=blank;
-    }
-    BOOL ok=%orig;
-    if (ok && split) { [self reloadInputViews]; TAKeyboardClientFocus(self); }
-    return ok;
-}
-- (BOOL)resignFirstResponder {
-    BOOL ok=%orig;
-    if (ok) TAKeyboardClientBlur(self);
-    return ok;
-}
-%end
-%hook UITextView
-- (BOOL)becomeFirstResponder {
-    NSString *bundle=nil; BOOL split=TAInputTarget(self.window,&bundle);
-    if (split) {
-        UIView *blank=[[UIView alloc] initWithFrame:CGRectMake(0,0,1,1)];
-        blank.backgroundColor=UIColor.clearColor;
-        self.inputView=blank;
-    }
-    BOOL ok=%orig;
-    if (ok && split) { [self reloadInputViews]; TAKeyboardClientFocus(self); }
-    return ok;
-}
-- (BOOL)resignFirstResponder {
-    BOOL ok=%orig;
-    if (ok) TAKeyboardClientBlur(self);
-    return ok;
-}
-%end
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
@@ -2544,8 +2421,9 @@ static void TAUpdateEdge(void) {
     }
     CGRect b=s.coordinateSpace.bounds;
     // Starts below the top-right fallback launcher.
-    edgeWindow.frame=CGRectMake(CGRectGetMaxX(b)-16,CGRectGetMinY(b)+8,16,MAX(40,b.size.height-16));
-    [edgeWindow.rootViewController.view viewWithTag:2828].frame=CGRectMake(16-5-3,(edgeWindow.bounds.size.height-44)/2,5,44);
+    CGFloat strip=round(MAX(16,b.size.width*0.028));   // 16pt on 426, 18pt on 640
+    edgeWindow.frame=CGRectMake(CGRectGetMaxX(b)-strip,CGRectGetMinY(b)+8,strip,MAX(40,b.size.height-16));
+    [edgeWindow.rootViewController.view viewWithTag:2828].frame=CGRectMake(strip-5-3,(edgeWindow.bounds.size.height-44)/2,5,44);
     BOOL show=staged || (!running && !primeBundle && nativeForeground.length && records[nativeForeground]);
     edgeWindow.hidden=!show;
 }
@@ -2565,6 +2443,10 @@ static void TAUpdateEdge(void) {
     TARecord *foregroundRecord=records[bundle ?: @""];
     if (foregroundRecord.controller==self) foregroundRecord.backgrounded=NO;
     if (external && !running && bundle) { nativeForeground=bundle; dispatch_async(dispatch_get_main_queue(), ^{ TAUpdateEdge(); }); }
+    if (external && interruptionStart>0) {
+        NSString *b=[bundle copy];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAInterruptionEnded([@"foreground " stringByAppendingString:b ?: @"?"]); });
+    }
     // Retry once after native foreground has established its scene ID. No
     // fabricated callback or repeated foreground requests.
     if (external && [settings isKindOfClass:NSDictionary.class]) {
@@ -2616,6 +2498,13 @@ static void TAUpdateEdge(void) {
     id currentScene=TAValue(self,@"scene");
     BOOL affected=r && r.controller==self && scene && r.scene==scene;
     TALog(@"SCENE DESTROY bundle=%@ destroyed=%p current=%p owned=%p affected=%d pending=%d",bundle,scene,currentScene,r.scene,affected,r.attaching);
+    // Scenes of two different apps destroyed within 0.5s = the head unit took
+    // the screen (normal app switching destroys one app's scenes at a time).
+    static NSTimeInterval lastDestroy; static NSString *lastDestroyBundle;
+    NSTimeInterval destroyedAt=NSProcessInfo.processInfo.systemUptime;
+    if (bundle && lastDestroyBundle && ![bundle isEqual:lastDestroyBundle] && destroyedAt-lastDestroy<0.5)
+        TAInterruptionBegan(@"scenes of several apps destroyed");
+    lastDestroy=destroyedAt; lastDestroyBundle=[bundle copy];
     NSUInteger token=generation;
     %orig;
     if (!affected) return;
@@ -2636,7 +2525,7 @@ static void TAUpdateEdge(void) {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
         if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
-            TAKeyboardListenClient();
+            if ([process isEqual:@"com.google.ios.youtube"]) dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"CLIENT LOADED youtube pid=%d",getpid()); TAStartResponsivenessProbe(); });
             if (NSClassFromString(@"_UIStaticScrollBar")) {
                 %init(TAScrollRail);
                 dispatch_async(dispatch_get_main_queue(), ^{ TAListenScrollBars(); });
@@ -2661,7 +2550,6 @@ static void TAUpdateEdge(void) {
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
-        TAKeyboardListenHost();
-        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }

@@ -1,6 +1,16 @@
-# MultiTA Beta 0.35.0
+# MultiTA Beta 0.36.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.36 — màn rộng, YouTube, Home, lùi xe
+
+Màn rộng (CarPlay không dây 640pt): giới hạn tính theo điểm thay vì phần trăm cố định. Ô nhỏ nhất 128pt (màn 426pt giữ đúng 30/70, màn 640pt thành 20/80). Thoát chia màn khi ô nhỏ còn dưới ~60pt; kéo cạnh bị huỷ khi kéo chưa tới ~72pt (trước đây là 20% màn = 128pt trên màn rộng). Dải kéo cạnh 16–18pt theo độ rộng màn. Ngưỡng bắt đầu kéo 9pt (trước 12pt).
+
+YouTube: không tự mở lại toàn màn một app không phải template (YouTube qua cầu nối) sau khi kéo divider về cạnh; log COLLAPSE skip native relaunch. Tiến trình YouTube có bộ đo treo riêng (CLIENT LOADED youtube, MAIN STALL pid=<youtube>) để phân biệt YouTube treo hay CarPlay treo.
+
+Home: ghi một lần các phương thức "home" của DBDashboard (HOME candidate) và thử các phương thức không tham số có tên kiểu go/show/open/press/tap/handle/return + home.
+
+Lùi xe: log 0.35 cho thấy camera lùi làm iOS huỷ cửa sổ của nhiều app cùng lúc và đổi hình dạng màn. Tweak theo dõi trạng thái phát (MediaRemote) mỗi giây; khi màn CarPlay mất/đổi hình dạng hoặc cửa sổ của ≥2 app bị huỷ trong 0.5s, ghi lại có đang phát không; khi màn trở lại (hoặc app lên lại), nếu trước đó đang phát mà giờ im thì gửi lệnh Phát sau 2.5s, kiểm tra lại và gửi thêm lần nữa ở 5s. Không làm gì nếu trước đó không phát hoặc gián đoạn quá 5 phút. Log: INTERRUPTION begin/end, RESUME play sent.
 
 ## 0.35 — giữ 1 giây để mở trang Tác vụ
 
