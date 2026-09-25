@@ -1,6 +1,12 @@
-# MultiTA Beta 0.46.2
+# MultiTA Beta 0.46.3
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.46.3 — YouTube: cột theo độ rộng ô, hủy tìm kiếm
+
+Log 0.46.2: YouTube đã nhận giao diện iPad (`device=pad trait=pad`) nhưng cửa sổ CarPlay luôn là `hClass=compact` mà YouTube vẫn vẽ lưới 3 cột tí hon của iPad ngang: nó đọc size class từ chỗ khác (màn hình/cửa sổ điện thoại). Giờ mọi truy vấn `horizontalSizeClass` trong YouTube đều trả lời theo độ rộng ô CarPlay khi đang kết nối CarPlay: dưới `TA_YOUTUBE_REGULAR_WIDTH` (250pt) là compact (1 cột), từ 250pt là regular (lưới). Log `YOUTUBE TRAITS` thêm hướng màn hình và size class/hướng/độ rộng cửa sổ điện thoại.
+
+Hủy tìm kiếm bằng nút × trên bàn phím chung: nhận thêm nút quay lại (Quay lại/Back/Đóng…) cùng hàng với ô nhập; YouTube được duyệt cây view sâu hơn (2000 view); nếu vẫn không thấy thì với YouTube pop màn tìm kiếm khỏi navigation controller (log `KEYBOARD CANCEL route=pop`). Khi hủy thất bại, log liệt kê các nút cùng hàng và chuỗi view controller để chọn đúng nút ở bản sau.
 
 ## 0.46.2 — YouTube giao diện iPad trong ô (thử nghiệm)
 

@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.46.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.46.3] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -2652,34 +2652,68 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 #import "TAKeyboard.h"
 
 // YouTube iPad layout experiment. YouTube picks its iPhone or iPad UI from
-// the device idiom at launch; the iPad UI then sizes its feed grid from the
-// window width (1 column narrow, 2+ wide), so a resized split pane reflows
-// like iPad Split View. This is process-wide: YouTube on the phone screen
-// also gets the iPad UI. Set to 0 to turn it off.
+// the device idiom at launch, so report the iPad idiom. 0.46.2 showed the
+// iPad UI ignores the CarPlay window's compact width and lays out the full
+// landscape grid (3 tiny columns): it reads the size class from elsewhere
+// (main screen / phone window, landscape = regular). 0.46.3 therefore
+// answers every horizontalSizeClass query from the CarPlay pane width while
+// a CarPlay scene is connected: compact below TA_YOUTUBE_REGULAR_WIDTH pt
+// (1 column), regular at or above it (grid). Process-wide: YouTube on the
+// phone screen also gets the iPad UI. Set TA_YOUTUBE_IPAD to 0 to turn off.
 #define TA_YOUTUBE_IPAD 1
+#define TA_YOUTUBE_REGULAR_WIDTH 250
+static CGFloat TAYouTubeCarWidth; // cached on the main thread by the trait timer; 0 = no CarPlay scene
 %group TAYouTubeIPad
 %hook UIDevice
 - (UIUserInterfaceIdiom)userInterfaceIdiom { return UIUserInterfaceIdiomPad; }
 %end
+%hook UITraitCollection
+- (UIUserInterfaceSizeClass)horizontalSizeClass {
+    CGFloat w=TAYouTubeCarWidth;
+    if (w<=0) return %orig;
+    return w>=TA_YOUTUBE_REGULAR_WIDTH ? UIUserInterfaceSizeClassRegular : UIUserInterfaceSizeClassCompact;
+}
+%end
 %end
 // YouTube's sandbox cannot write MultiTA's log, so it publishes what its
-// CarPlay window sees through notify state and CarPlay.app logs it.
+// windows see through 64 bits of notify state and CarPlay.app logs it:
+// 63..60 device idiom+1, 59..56 car trait idiom+1, 55..54 car hClass,
+// 53..52 car vClass, 51..49 car orientation, 47..46 phone hClass (native,
+// %orig), 45..43 phone orientation, 42..35 phone width/8, 31..16 car width,
+// 15..0 car height.
 static NSString *const kTAYouTubeTraits=@"com.sushibta.multita.youtube-traits";
-static uint64_t TAYouTubePackTraits(void) {
+static UIWindowScene *TAYouTubeScene(BOOL car) {
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        UIWindowScene *ws=(UIWindowScene *)scene;
-        if (![ws.session.persistentIdentifier hasPrefix:@"Car["]) continue;
-        UITraitCollection *t=ws.traitCollection; CGSize size=ws.coordinateSpace.bounds.size;
-        uint64_t device=((uint64_t)(UIDevice.currentDevice.userInterfaceIdiom+1)&0xff)<<56;
-        uint64_t trait=((uint64_t)(t.userInterfaceIdiom+1)&0xff)<<48;
-        uint64_t classes=(((uint64_t)t.horizontalSizeClass&0xf)<<44)|(((uint64_t)t.verticalSizeClass&0xf)<<40);
-        return device|trait|classes|(((uint64_t)MIN(MAX(size.width,0),65535))<<16)|(uint64_t)MIN(MAX(size.height,0),65535);
+        BOOL isCar=[scene.session.persistentIdentifier hasPrefix:@"Car["] || [scene.session.role containsString:@"CarPlay"];
+        if (isCar==car) return (UIWindowScene *)scene;
     }
-    return 0;
+    return nil;
+}
+static uint64_t TAYouTubePackTraits(void) {
+    UIWindowScene *carScene=TAYouTubeScene(YES);
+    if (!carScene) return 0;
+    UITraitCollection *t=carScene.traitCollection; CGSize size=carScene.coordinateSpace.bounds.size;
+    uint64_t p=((uint64_t)(UIDevice.currentDevice.userInterfaceIdiom+1)&0xf)<<60;
+    p|=((uint64_t)(t.userInterfaceIdiom+1)&0xf)<<56;
+    p|=((uint64_t)t.horizontalSizeClass&3)<<54; p|=((uint64_t)t.verticalSizeClass&3)<<52;
+    p|=((uint64_t)carScene.interfaceOrientation&7)<<49;
+    UIWindowScene *phone=TAYouTubeScene(NO);
+    if (phone) {
+        // The hook answers from the pane; report what UIKit computed natively.
+        CGFloat saved=TAYouTubeCarWidth; TAYouTubeCarWidth=0;
+        p|=((uint64_t)phone.traitCollection.horizontalSizeClass&3)<<46;
+        TAYouTubeCarWidth=saved;
+        p|=((uint64_t)phone.interfaceOrientation&7)<<43;
+        p|=((uint64_t)MIN(MAX(phone.coordinateSpace.bounds.size.width/8,0),255))<<35;
+    }
+    p|=((uint64_t)MIN(MAX(size.width,0),65535))<<16; p|=(uint64_t)MIN(MAX(size.height,0),65535);
+    return p;
 }
 static void TAYouTubeReportTraits(void) {
     static int token=-1; static uint64_t last;
+    UIWindowScene *carScene=TAYouTubeScene(YES);
+    TAYouTubeCarWidth=carScene ? carScene.coordinateSpace.bounds.size.width : 0;
     if (token<0 && notify_register_check(kTAYouTubeTraits.UTF8String,&token)!=NOTIFY_STATUS_OK) return;
     uint64_t packed=TAYouTubePackTraits();
     if (!packed || packed==last) return;
@@ -2689,20 +2723,21 @@ static void TAYouTubeReportTraits(void) {
 static void TAYouTubeStartTraitReports(void) {
     static dispatch_source_t timer;
     timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
-    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,0),1*NSEC_PER_SEC,200*NSEC_PER_MSEC);
+    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,0),300*NSEC_PER_MSEC,100*NSEC_PER_MSEC);
     dispatch_source_set_event_handler(timer,^{ TAYouTubeReportTraits(); }); dispatch_resume(timer);
 }
 static void TAListenYouTubeTraits(void) {
     int token;
     notify_register_dispatch(kTAYouTubeTraits.UTF8String,&token,dispatch_get_main_queue(),^(int t) {
         uint64_t p=0; if (notify_get_state(t,&p)!=NOTIFY_STATUS_OK || !p) return;
-        NSArray *idioms=@[@"unspecified",@"phone",@"pad",@"tv",@"carPlay",@"?",@"mac"];
-        NSArray *classes=@[@"unspecified",@"compact",@"regular"];
-        NSUInteger d=(NSUInteger)((p>>56)&0xff),i=(NSUInteger)((p>>48)&0xff),h=(NSUInteger)((p>>44)&0xf),v=(NSUInteger)((p>>40)&0xf);
-        TALog(@"YOUTUBE TRAITS device=%@ trait=%@ hClass=%@ vClass=%@ size=%llux%llu",
+        NSArray *idioms=@[@"none",@"unspecified",@"phone",@"pad",@"tv",@"carPlay",@"?",@"mac"];
+        NSArray *classes=@[@"unspecified",@"compact",@"regular",@"?"];
+        NSArray *orients=@[@"unknown",@"portrait",@"upsideDown",@"landscapeLeft",@"landscapeRight",@"?",@"?",@"?"];
+        NSUInteger d=(NSUInteger)((p>>60)&0xf),i=(NSUInteger)((p>>56)&0xf);
+        TALog(@"YOUTUBE TRAITS device=%@ trait=%@ hClass=%@ vClass=%@ orient=%@ size=%llux%llu | phone hClass=%@ orient=%@ width=%llu",
               d<idioms.count ? idioms[d] : @(d), i<idioms.count ? idioms[i] : @(i),
-              h<classes.count ? classes[h] : @(h), v<classes.count ? classes[v] : @(v),
-              (p>>16)&0xffff, p&0xffff);
+              classes[(p>>54)&3], classes[(p>>52)&3], orients[(p>>49)&7], (p>>16)&0xffff, p&0xffff,
+              classes[(p>>46)&3], orients[(p>>43)&7], ((p>>35)&0xff)*8);
     });
 }
 

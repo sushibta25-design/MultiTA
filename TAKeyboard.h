@@ -77,7 +77,24 @@ static UIView *TAKBFindInput(UIView *view, NSInteger *budget) {
 }
 static BOOL TAKBCancelTitle(NSString *title) {
     NSString *normalized=[[title stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
-    return [@[@"hủy",@"huỷ",@"cancel"] containsObject:normalized ?: @""];
+    if ([@[@"hủy",@"huỷ",@"cancel"] containsObject:normalized ?: @""]) return YES;
+    // YouTube's search screen has no Cancel: its back arrow (same row as the
+    // field) leaves the search. Only whole labels, never "back to top" etc.
+    return [@[@"quay lại",@"trở lại",@"trở về",@"back",@"navigate back",@"đóng",@"close"] containsObject:normalized ?: @""];
+}
+static BOOL TAKBIsYouTube(void) { return [NSBundle.mainBundle.bundleIdentifier isEqual:@"com.google.ios.youtube"]; }
+// On a failed cancel, list the labelled controls sharing the input's row so
+// the log shows which button the next build should target.
+static void TAKBDescribeRow(UIView *view, UIView *input, CGRect inputRect, NSUInteger depth, NSInteger *budget, NSMutableArray<NSString *> *out) {
+    if (!view || depth>14 || --*budget<0 || view.hidden || out.count>=8) return;
+    if ([view isKindOfClass:UIControl.class] && ![view isDescendantOfView:input]) {
+        CGRect rect=[view convertRect:view.bounds toView:input.window];
+        NSString *title=[view isKindOfClass:UIButton.class] ? ((UIButton *)view).currentTitle : nil;
+        NSString *label=title.length ? title : (view.accessibilityLabel.length ? view.accessibilityLabel : view.accessibilityIdentifier);
+        if (fabs(CGRectGetMidY(rect)-CGRectGetMidY(inputRect))<=MAX(32,inputRect.size.height))
+            [out addObject:[NSString stringWithFormat:@"%@(%@,%@,%d)",NSStringFromClass(view.class),label ?: @"-",NSStringFromCGRect(rect),(int)((UIControl *)view).allControlEvents]];
+    }
+    for (UIView *child in view.subviews) TAKBDescribeRow(child,input,inputRect,depth+1,budget,out);
 }
 static void TAKBFindCancel(UIView *view, UIView *input, CGRect inputRect, NSUInteger depth,
                          NSInteger *budget, NSMutableArray<UIControl *> *matches) {
@@ -117,11 +134,27 @@ static BOOL TAKBCancelSearch(UIView *input) {
         }
     }
     if (!scope) scope=input.superview;
-    NSMutableArray<UIControl *> *matches=[NSMutableArray new]; NSInteger budget=350;
+    // YouTube's search view tree is far larger than a CarPlay template's.
+    NSMutableArray<UIControl *> *matches=[NSMutableArray new]; NSInteger budget=TAKBIsYouTube() ? 2000 : 350;
     CGRect inputRect=[input convertRect:input.bounds toView:input.window];
     TAKBFindCancel(scope,input,inputRect,0,&budget,matches);
     if (matches.count!=1 || budget<0) {
-        TALog(@"KEYBOARD CANCEL unavailable input=%@ scope=%@ matches=%lu",NSStringFromClass(input.class),NSStringFromClass(scope.class),(unsigned long)matches.count);
+        NSMutableArray<NSString *> *row=[NSMutableArray new]; NSInteger describe=2000;
+        TAKBDescribeRow(scope,input,inputRect,0,&describe,row);
+        NSMutableArray<NSString *> *chain=[NSMutableArray new];
+        for (UIResponder *r=input.nextResponder;r && chain.count<6;r=r.nextResponder)
+            if ([r isKindOfClass:UIViewController.class]) [chain addObject:NSStringFromClass(r.class)];
+        TALog(@"KEYBOARD CANCEL unavailable input=%@ scope=%@ matches=%lu budget=%ld row=%@ controllers=%@",NSStringFromClass(input.class),NSStringFromClass(scope.class),(unsigned long)matches.count,(long)budget,[row componentsJoinedByString:@" "],[chain componentsJoinedByString:@">"]);
+        // YouTube only: leave a pushed search screen the way its back arrow would.
+        if (TAKBIsYouTube()) {
+            for (UIResponder *r=input.nextResponder;r;r=r.nextResponder) {
+                if (![r isKindOfClass:UINavigationController.class]) continue;
+                UINavigationController *nav=(UINavigationController *)r;
+                if (nav.viewControllers.count<2) break;
+                [input resignFirstResponder]; [nav popViewControllerAnimated:YES];
+                TALog(@"KEYBOARD CANCEL route=pop nav=%@",NSStringFromClass(nav.class)); return YES;
+            }
+        }
         return NO;
     }
     UIControl *cancel=matches.firstObject;
