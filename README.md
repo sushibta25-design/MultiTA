@@ -1,6 +1,20 @@
-# MultiTA Beta 0.44.0
+# MultiTA Beta 0.46.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.46 — Google Maps trong ô, giữ YouTube khi kéo divider về cạnh
+
+Log 0.45: đổi app liên tục ở một ô không còn treo. Hai lỗi hiển thị Google Maps:
+
+1. Trong ô, bản đồ Google Maps lệch/thừa ~45pt bên trái (khoảng chừa cho Dock, 0.44 đã tắt mẹo xử lý). Bật lại DUY NHẤT mẹo trả lại 45pt đó và chỉ cho Google Maps: MultiTA lại nạp vào CarPlayTemplateUIHost nhưng chỉ với một hook UIWindow.layoutSubviews; các thí nghiệm khác vẫn tắt. Filter thêm com.apple.CarPlayTemplateUIHost.
+
+2. Kéo divider về cạnh để giữ YouTube (bên trái) thì CarPlay lại hiện Google Maps toàn màn, vì 0.37+ bỏ qua việc mở lại YouTube. Giờ YouTube được mở native TRƯỚC khi rời chia màn (hai ô vẫn giữ app, yêu cầu đưa app bên kia xuống nền bị từ chối), 1.5s sau mới rời chia màn — đúng thứ tự an toàn tìm được ở 0.45. Log: COLLAPSE native launch before release.
+
+## 0.45 — giữ app cũ trong ô cho tới khi app mới sẵn sàng
+
+Log 0.44: Google Maps + Vietmap → đổi ô phải sang YouTube (chưa chạy) → CarPlay treo 62s. So toàn bộ lần mở vào ô: mọi lần treo (0.39 Apple Maps→YouTube, 0.43 YouTube Music→Zalo, 0.44 Vietmap→YouTube) đều xảy ra ngay sau khi Dashboard đưa xuống nền đúng app vừa được gỡ khỏi ô; mọi lần mở YouTube thành công thì yêu cầu đưa xuống nền rơi vào một app vẫn đang ở trong ô và bị từ chối.
+
+Giờ khi đổi app trong một ô bằng cách mở qua Dashboard, app cũ vẫn ở trong ô (bị che bởi "Đang mở …") cho tới khi app mới sẵn sàng; yêu cầu đưa nó xuống nền của Dashboard bị từ chối như các lần thành công. Khi app mới sẵn sàng, app cũ mới được gỡ và chính tweak đưa nó xuống nền. Log: LAUNCH IN PANE keeps …, SLOT CLEAR … replaced after launch.
 
 ## 0.44 — bản nền ổn định
 

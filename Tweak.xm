@@ -1,4 +1,4 @@
-// MultiTA 0.45.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.46.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.45.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.46.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -1373,6 +1373,26 @@ static UIButton *TAButton(NSString *title, SEL action) {
     CGFloat width=splitWindow.bounds.size.width;
     NSUInteger token=generation;
     TAShowCovers(YES);
+    BOOL templKeep=[keep hasPrefix:@"com.apple."] || [[TAValue(records[keep].controller,@"sceneID") componentsSeparatedByString:@":"] count]==3;
+    if (keep.length && !templKeep && ![keep isEqual:nativeForeground]) {
+        // Kept app is bridged (YouTube). Ask Dashboard to show it natively
+        // while both panes still hold their apps (its request to background
+        // the other pane's app is declined), then leave the split. Releasing
+        // first and launching a bridged app afterwards is the hang pattern.
+        launchGuardUntil=NSProcessInfo.processInfo.systemUptime+4;
+        allowLaunchInSplit=YES; BOOL ok=TANativeLaunch(keep); allowLaunchInSplit=NO;
+        TALog(@"COLLAPSE native launch before release %@ ok=%d",keep,ok);
+        [UIView animateWithDuration:0.22 animations:^{ TALayoutAt(winner==0 ? width+20 : -20,TADividerWidth(width)); }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            if (!running || generation!=token) return;
+            if (slots[winner]) slots[winner].restoreBackground=NO;
+            launchGuardUntil=0;
+            if (ok) nativeForeground=keep;
+            TARememberPair();
+            TAStop(@"collapse");
+        });
+        return;
+    }
     [UIView animateWithDuration:0.22 animations:^{
         TALayoutAt(winner==0 ? width+20 : -20,TADividerWidth(width));
     } completion:^(__unused BOOL finished) {
@@ -2279,6 +2299,9 @@ static void TATemplateLayout(UIWindow *w) {
     UIViewController *root = w.rootViewController;
     if (!root.viewIfLoaded || ![NSStringFromClass(root.class) isEqual:@"CARTemplateUIApplicationSceneViewController"]) return;
     NSString *bundle = nil; BOOL active = TATemplateTarget(w, &bundle);
+    // 0.46: re-enabled for Google Maps only (its map viewport keeps a 45pt
+    // leading inset meant for the Dock, which is not beside a pane).
+    if (active && ![bundle isEqual:@"com.google.Maps"]) active = NO;
     NSValue *saved = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
     if (!active && !saved) return;
     NSString *stamp = active ? NSStringFromCGRect(w.windowScene.coordinateSpace.bounds) : @"restore";
@@ -2288,6 +2311,7 @@ static void TATemplateLayout(UIWindow *w) {
         objc_setAssociatedObject(root, &TALayoutQueuedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (w.rootViewController != root || !root.viewIfLoaded) return;
         NSString *currentBundle = nil; BOOL currentActive = TATemplateTarget(w, &currentBundle);
+        if (currentActive && ![currentBundle isEqual:@"com.google.Maps"]) currentActive = NO;
         NSValue *original = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
         if (!currentActive && !original) return;
         UIEdgeInsets before = root.view.safeAreaInsets;
@@ -2625,6 +2649,15 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 }
 %end
 %end
+// 0.46: the only code in CarPlayTemplateUIHost — Google Maps inset reclaim.
+%group TAInsetOnly
+%hook UIWindow
+- (void)layoutSubviews {
+    %orig;
+    TATemplateLayout(self);
+}
+%end
+%end
 %group TAClient
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
@@ -2827,6 +2860,11 @@ static void TAUpdateEdge(void) {
         // 0.44 stable base: all in-app layout experiments (45pt inset reclaim,
         // tab-title/image-row compaction, scroll-rail hiding, Now Playing art)
         // are off. Apps draw in a pane exactly as CarPlay renders them.
+        if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+            %init(TAInsetOnly);
+            dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); });
+            return;
+        }
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
