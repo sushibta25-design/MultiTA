@@ -1,4 +1,4 @@
-// MultiTA 0.46.1 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.46.2 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.46.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.46.2] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -2299,7 +2299,7 @@ static void TATemplateLayout(UIWindow *w) {
     UIViewController *root = w.rootViewController;
     if (!root.viewIfLoaded || ![NSStringFromClass(root.class) isEqual:@"CARTemplateUIApplicationSceneViewController"]) return;
     NSString *bundle = nil; BOOL active = TATemplateTarget(w, &bundle);
-    // 0.46.1: every template app with a split target reclaims the 45pt
+    // 0.46.2: every template app with a split target reclaims the 45pt
     // leading inset meant for the Dock, which is not beside a pane (0.46 did
     // this for Google Maps only, so other apps drew shifted right in a pane).
     NSValue *saved = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
@@ -2324,7 +2324,10 @@ static void TATemplateLayout(UIWindow *w) {
             // Keep top/bottom navigation regions intact. Do not patch children.
             CGFloat left = MAX(0, before.left-root.additionalSafeAreaInsets.left);
             CGFloat right = MAX(0, before.right-root.additionalSafeAreaInsets.right);
-            CGFloat limit = w.bounds.size.width * 0.25;
+            // Cap by the physical display, not the pane: a pane narrower than
+            // 180pt made 25% of its width smaller than the 45pt Dock inset, so
+            // narrow panes kept the inset and drew shifted right (0.10.10 fix).
+            CGFloat limit = MIN(64, w.screen.bounds.size.width * 0.25);
             if (left <= limit) desired.left -= left;
             if (right <= limit) desired.right -= right;
             root.additionalSafeAreaInsets = desired;

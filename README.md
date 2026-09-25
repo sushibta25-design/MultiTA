@@ -1,6 +1,10 @@
-# MultiTA Beta 0.46.1
+# MultiTA Beta 0.46.2
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.46.2 — ô hẹp cũng được trả lại khoảng Dock
+
+Ô chia hẹp hơn ~180pt (khoảng 42% màn 426pt) vẫn bị lệch phải: giới hạn trả lại inset tính bằng 25% độ rộng ô nên nhỏ hơn 45pt của Dock và bị bỏ qua. Giới hạn giờ tính theo màn hình CarPlay (tối đa 64pt) như bản 0.10.10. Cùng ý với DuoPhone V6.2: ô app không bao giờ nằm dưới vùng Dock 45pt.
 
 ## 0.46.1 — app tự co vừa ô (hết lệch phải)
 
