@@ -1,4 +1,4 @@
-// MultiTA 0.42.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
+// MultiTA 0.43.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.42.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.43.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -159,6 +159,9 @@ static void TASetLayoutTarget(NSString *bundle, CGSize size);
 static void TAUpdateEdge(void);
 static void TAKickVideo(NSString *bundle, NSString *why);
 static NSMutableSet<NSString *> *hostedBundles;   // non-template apps shown in a pane this session
+// Largest app frame Dashboard has used natively on this display. A scene
+// frame smaller than this outside the split is one we left behind.
+static CGSize TANativeSize;
 static UIWindowScene *TADashboard(void) {
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:UIWindowScene.class] && [s.session.persistentIdentifier containsString:@"DBDashboard-Car"])
@@ -240,6 +243,10 @@ static void TAResize(TARecord *r, CGSize size) {
     if (!r.frameCaptured) {
         CGRect original = CGRectZero;
         if (!TAReadFrame(scene, &original)) { TALog(@"RESIZE NO FRAME %@", r.bundle); return; }
+        if (TANativeSize.width>0 && original.size.width<TANativeSize.width-1) {
+            TALog(@"ORIGINAL FIXED %@ read=%@ native=%@",r.bundle,NSStringFromCGSize(original.size),NSStringFromCGSize(TANativeSize));
+            original=(CGRect){original.origin,TANativeSize};
+        }
         r.scene = scene; r.originalFrame = original; r.frameCaptured = YES;
     }
     if (r.scene != scene) { for (NSInteger i=0;i<2;i++) if (slots[i]==r) TAClearSlot(i,@"resize scene changed"); return; }
@@ -1498,7 +1505,16 @@ static UIButton *TAButton(NSString *title, SEL action) {
     if (!running) return;
     NSString *target=[bundle copy];
     TALog(@"ATTACH FAILED side=%ld bundle=%@ reason=%@",(long)slot,target,reason);
-    if ([reason containsString:@"no hosted surface"]) records[target].noSurface=YES;
+    if ([reason containsString:@"no hosted surface"]) {
+        BOOL first=!records[target].noSurface;
+        records[target].noSurface=YES;
+        if (first && catalog[target]) {
+            NSUInteger token=generation;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,400*NSEC_PER_MSEC),dispatch_get_main_queue(),^{
+                if (running && generation==token && !slots[slot]) { TALog(@"AUTO RETRY via Dashboard %@",target); [self prepare:target slot:slot]; }
+            });
+        }
+    }
     TAClearSlot(slot,reason); retryTargets[slot]=target;
     [choose[slot] setTitle:@"Chưa hiển thị được\nChạm để thử lại" forState:UIControlStateNormal];
     choose[slot].hidden=NO; choose[slot].enabled=YES;
@@ -1724,6 +1740,14 @@ static UIButton *TAButton(NSString *title, SEL action) {
             r.presentationID=[NSString stringWithFormat:@"com.sushibta.multita.beta.%lu.%ld.%lu",(unsigned long)token,(long)slot,(unsigned long)request];
             id view=((id(*)(id,SEL,id))objc_msgSend)(r.controller,create,r.presentationID);
             if (![view isKindOfClass:UIView.class] || ((UIView *)view).superview) @throw [NSException exceptionWithName:@"NotIndependent" reason:r.bundle userInfo:nil];
+            // 0.42 log: Apple Maps adopted directly returned a plain UIView
+            // (empty pane). Only a scene presentation view carries the app.
+            if (![NSStringFromClass([view class]) containsString:@"ScenePresentation"]) {
+                SEL invalidate=NSSelectorFromString(@"invalidatePresentationViewForIdentifier:");
+                if ([r.controller respondsToSelector:invalidate]) ((void(*)(id,SEL,id))objc_msgSend)(r.controller,invalidate,r.presentationID);
+                r.presentationID=nil;
+                @throw [NSException exceptionWithName:@"no hosted surface (placeholder view)" reason:r.bundle userInfo:nil];
+            }
             r.presentation=view; r.presentation.transform=CGAffineTransformIdentity; r.presentation.frame=panes[slot].bounds;
             [panes[slot] insertSubview:r.presentation belowSubview:choose[slot]];
             [r.presentation setNeedsLayout]; [r.presentation layoutIfNeeded];
@@ -1743,7 +1767,6 @@ static UIButton *TAButton(NSString *title, SEL action) {
             if (r.restoreBackground) TAKickVideo(r.bundle,@"attached from background");
         }
         TALog(@"ATTACHED slot=%ld bundle=%@ surface=1 foregroundIssued=%d attempt=%lu (not pixel validation)",(long)slot,r.bundle,r.foregroundIssued,(unsigned long)attempt);
-        [self verifyPane:slot record:r generation:token attempt:0];
         TARememberPair(); return;
     }
     if (attempt%4==0) TALog(@"ATTACH WAIT bundle=%@ frame=%d foregroundIssued=%d presentation=%d hostedSurface=%d",r.bundle,ready,r.foregroundIssued,r.presentation!=nil,surface);
@@ -1949,7 +1972,7 @@ static void TATick(void) {
         TAStop(@"display changed"); buttonWindow.hidden = YES; buttonWindow = nil;
         TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil;
         [records removeAllObjects]; [order removeAllObjects]; dashboard = s;
-        nativeForeground=nil; edgeWindow.hidden=YES; edgeWindow=nil;
+        nativeForeground=nil; edgeWindow.hidden=YES; edgeWindow=nil; TANativeSize=CGSizeZero;
         TALog(@"DISPLAY %@", s.session.persistentIdentifier);
     }
     if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
@@ -2653,6 +2676,21 @@ static void TAUpdateEdge(void) {
     TARecord *foregroundRecord=records[bundle ?: @""];
     if (foregroundRecord.controller==self) foregroundRecord.backgrounded=NO;
     if (external && !running && bundle) { nativeForeground=bundle; dispatch_async(dispatch_get_main_queue(), ^{ TAUpdateEdge(); }); }
+    if (external && !running && bundle) {
+        // Learn the native app size; repair a scene still at a split size
+        // (device photo: Google Maps full screen showing only ~208pt of map).
+        id nativeScene=TAValue(self,@"scene"); CGRect f=CGRectZero;
+        if (TAReadFrame(nativeScene,&f)) {
+            if (f.size.width>TANativeSize.width+0.5) TANativeSize=f.size;
+            else if (TANativeSize.width>0 && f.size.width<TANativeSize.width-1 && TAHasUpdater(nativeScene,@"updateSettingsWithBlock:")) {
+                CGRect fixed=(CGRect){f.origin,TANativeSize};
+                @try {
+                    ((void(*)(id,SEL,id))objc_msgSend)(nativeScene,NSSelectorFromString(@"updateSettingsWithBlock:"),^(id settings){ TASetFrame(settings,fixed); });
+                    TALog(@"NATIVE FRAME REPAIRED %@ %@ -> %@",bundle,NSStringFromCGSize(f.size),NSStringFromCGSize(TANativeSize));
+                } @catch (NSException *e) { TALog(@"NATIVE FRAME REPAIR error %@",e.name); }
+            }
+        }
+    }
     if (external && running && bundle && [bundle isEqual:launchBundle]) nativeForeground=bundle;
     if (external && bundle && [hostedBundles containsObject:bundle]) TAKickVideo(bundle,@"native foreground after split");
     if (external && interruptionStart>0) {
