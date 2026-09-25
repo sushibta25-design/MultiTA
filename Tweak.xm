@@ -2659,6 +2659,8 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 }
 %end
 %end
+#import "TAKeyboard.h"
+
 %group TAClient
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
@@ -2855,6 +2857,16 @@ static void TAUpdateEdge(void) {
 %ctor {
     @autoreleasepool {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
+
+        // Shared keyboard client for apps that own a CarPlay text responder.
+        // Keep YouTube excluded by the stable 0.47 rule.
+        if ([TAClientBundles() containsObject:process] &&
+            ![process isEqual:@"com.google.ios.youtube"] &&
+            ![process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+            dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallClients(); });
+            return;
+        }
+
         // YouTube is a full UIKit app bridged into CarPlay. It hung repeatedly
         // after being hosted; keep MultiTA code out of its process entirely.
         if ([process isEqual:@"com.google.ios.youtube"]) return;
@@ -2863,6 +2875,7 @@ static void TAUpdateEdge(void) {
         // are off. Apps draw in a pane exactly as CarPlay renders them.
         if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAInsetOnly);
+            dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallClients(); });
             // 0.47: YouTube Music narrow-pane fixes back on (tab titles, the
             // fixed 61pt image-row buttons). Both check the bundle themselves.
             %init(TACompactHome);
@@ -2883,6 +2896,7 @@ static void TAUpdateEdge(void) {
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
+        dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallHost(); });
         dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }
