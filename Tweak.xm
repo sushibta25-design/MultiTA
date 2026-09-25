@@ -1,4 +1,4 @@
-// MultiTA 0.46.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.49.2 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -8,6 +8,7 @@
 #import <fcntl.h>
 #import <dlfcn.h>
 #import <unistd.h>
+#import <sys/resource.h>
 
 static void TALog(NSString *format, ...) {
     va_list args; va_start(args, format);
@@ -25,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.46.3] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.3] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -119,7 +120,11 @@ static NSString *launchBundle;
 static NSInteger launchSlot;
 static NSTimeInterval launchGuardUntil, launchStart, launchSurfaceSince;
 static BOOL allowLaunchInSplit;
-static UIWindow *edgeWindow;
+static BOOL pullFromLeft;          // current pull started in the Dock and moves right
+static BOOL layoutMirror;
+static CGFloat dockZoneRight;      // right edge of the CarPlay Dock, in display points
+static NSHashTable<UIPanGestureRecognizer *> *dockSwipes;   // the Dock swipe recogniser(s)
+static UIWindow *dockTopWindow;   // clear swipe zone over the top of the Dock (clock/Wi-Fi), above the icons
 static UIImageView *railIcon;
 // Capsule handle (visual part fades after 3s; its touch area stays live).
 static UIView *lockVisual, *swapVisual;
@@ -138,7 +143,7 @@ static BOOL dragMoved;
 // Hold ≥1s on the divider/handle opens the Tác vụ page (greeting card).
 static NSUInteger holdSerial;
 static BOOL holdFired;
-static const CGFloat kTADragSlop=9;
+static const CGFloat kTADragSlop=5;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSArray<NSString *> *resumeBundles;
@@ -458,6 +463,20 @@ static UIImage *TAAppIcon(NSString *bundle) {
     if (image) cache[bundle]=image;
     return image;
 }
+// Swap button stacked directly on the lock handle, centred on the display.
+static const CGFloat kTALockHeight=44;
+#define kTAHandleHeight (kTASwapArea+2+kTALockHeight)
+// While shown, the swap button and lock handle are drawn and hit-tested at
+// up to 2x, keeping the top and bottom 48pt free for the panes' own controls
+// (picker close/next buttons): ~1.56x on a 240pt display. Once faded they
+// return to 1x. Only the two controls take touches (TAHandleView).
+static void TASetHandleBig(BOOL big) {
+    if (!floatingActions || !splitWindow) return;
+    CGFloat height=splitWindow.bounds.size.height;
+    CGFloat scale=big ? MAX(1,MIN(2,(height-96)/kTAHandleHeight)) : 1;
+    floatingActions.transform=CGAffineTransformMakeScale(scale,scale);
+    floatingActions.center=CGPointMake(floatingActions.center.x,height/2);
+}
 static void TAShowChrome(void) {
     if (!running || !floatingActions) return;
     floatingActions.hidden=NO;
@@ -465,6 +484,7 @@ static void TAShowChrome(void) {
     [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionBeginFromCurrentState|UIViewAnimationOptionAllowUserInteraction animations:^{
         lockVisual.alpha=1; dividerGrip.alpha=1;
         swapVisual.alpha=(slots[0].presentation && slots[1].presentation) ? 1 : 0.35;
+        TASetHandleBig(YES);
     } completion:nil];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),dispatch_get_main_queue(),^{
         if (!running || chromeHold || token!=chromeToken) return;
@@ -472,10 +492,23 @@ static void TAShowChrome(void) {
         // touch containers is untouched), so a hidden handle still works.
         [UIView animateWithDuration:0.35 delay:0 options:UIViewAnimationOptionAllowUserInteraction animations:^{
             lockVisual.alpha=0; swapVisual.alpha=0; if (!staged) dividerGrip.alpha=0;
-        } completion:nil];
+        } completion:^(__unused BOOL finished) {
+            if (running && !chromeHold && token==chromeToken) TASetHandleBig(NO);
+        }];
     });
 }
 static void TARevealActions(void) { TAShowChrome(); }
+// Touch container of the swap button + lock handle: only the two controls
+// (plus 4pt) take touches, so the space around them reaches the panes.
+@interface TAHandleView : UIView
+@end
+@implementation TAHandleView
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    for (UIView *v in self.subviews)
+        if (!v.hidden && CGRectContainsPoint(CGRectInset(v.frame,-4,-4),point)) return YES;
+    return NO;
+}
+@end
 @interface TASplitWindow : UIWindow
 @end
 @implementation TASplitWindow
@@ -595,8 +628,10 @@ static void TADumpDock(void) {
 @interface TADividerView : UIView
 @end
 @implementation TADividerView
+// Touch width = visible width + 14pt each side (44pt on a 426pt display):
+// the divider must be easy to grab while driving.
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    return CGRectContainsPoint(CGRectInset(self.bounds,-6,0),point);
+    return CGRectContainsPoint(CGRectInset(self.bounds,-14,0),point);
 }
 @end
 static CGFloat TADividerWidth(CGFloat width) { return MAX(16,2*round(width*0.015)); }
@@ -624,6 +659,7 @@ static UIColor *TADividerColor(void) { return staged ? [UIColor colorWithWhite:0
 static void TALayoutAt(CGFloat cx, CGFloat dw) {
     if (!splitWindow || !panes[0] || !panes[1]) return;
     CGSize size=splitWindow.bounds.size; CGFloat inset=3, height=size.height-2*inset;
+    if (layoutMirror) cx=size.width-cx;   // a Dock pull is the right-edge pull, mirrored
     CGFloat normal=TADividerWidth(size.width), rail=TARailWidth(size.width);
     // Visual gap between panes is only 4pt; the divider view keeps its full
     // width (plus 6pt each side) as touch area and overlaps the pane edges.
@@ -652,7 +688,12 @@ static CGFloat TAPullRestRatio(void) {
     CGFloat width=MAX(1,splitWindow.bounds.size.width);
     return 1-TARailWidth(width)/2/width;
 }
+static void TALayoutPullFromRight(CGFloat raw);
 static void TALayoutPull(CGFloat raw) {
+    if (!pullFromLeft) { TALayoutPullFromRight(raw); return; }
+    layoutMirror=YES; TALayoutPullFromRight(1-raw); layoutMirror=NO;
+}
+static void TALayoutPullFromRight(CGFloat raw) {
     if (!splitWindow) return;
     CGFloat width=splitWindow.bounds.size.width, rest=TAPullRestRatio();
     CGFloat normal=TADividerWidth(width), rail=TARailWidth(width);
@@ -692,18 +733,130 @@ static void TAClearSlot(NSInteger slot, NSString *reason) {
     [choose[slot] setTitle:@"Chạm để chọn ứng dụng" forState:UIControlStateNormal];
     TALog(@"SLOT CLEAR side=%ld reason=%@",(long)slot,reason);
 }
+// Dock pull show: a mouse rides the divider toward a round green monster in
+// the other pane whose mouth opens wider (and body grows) as the divider
+// approaches; on release the mouse is swallowed, then the overlay fades and
+// the apps appear. About one second, nothing flashes. Drawn in code.
+static UIView *funView, *funMonster;
+static CAShapeLayer *funBody, *funTeeth, *funPupil;
+static UILabel *funMouse, *funMouseSay, *funMonsterSay;
+static UILabel *TAFunBubble(void) {
+    UILabel *l=[UILabel new];
+    l.font=[UIFont systemFontOfSize:13 weight:UIFontWeightBold]; l.textColor=UIColor.blackColor;
+    l.backgroundColor=[UIColor colorWithWhite:1 alpha:0.92]; l.textAlignment=NSTextAlignmentCenter;
+    l.layer.cornerRadius=10; l.clipsToBounds=YES; l.alpha=0;
+    return l;
+}
+static void TAFunSay(UILabel *bubble, NSString *text, CGPoint anchor) {
+    bubble.text=text;
+    CGSize size=CGSizeMake(ceil([text sizeWithAttributes:@{NSFontAttributeName:bubble.font}].width)+16,24);
+    bubble.bounds=(CGRect){CGPointZero,size}; bubble.center=anchor; bubble.alpha=text.length ? 1 : 0;
+}
+// Pac-Man style body facing left; open = half-angle of the mouth (radians).
+static void TAFunShape(CGFloat r, CGFloat open) {
+    CGPoint c=CGPointMake(r,r);
+    UIBezierPath *body=[UIBezierPath bezierPath];
+    [body moveToPoint:c];
+    [body addArcWithCenter:c radius:r startAngle:M_PI+open endAngle:M_PI-open clockwise:YES];
+    [body closePath];
+    funBody.path=body.CGPath;
+    UIBezierPath *teeth=[UIBezierPath bezierPath];
+    CGFloat size=MAX(4,r*0.18);
+    for (NSInteger lip=0;lip<2;lip++) {
+        CGFloat angle=lip==0 ? M_PI+open : M_PI-open, dir=lip==0 ? 1 : -1;
+        for (NSNumber *at in @[@0.55,@0.85]) {
+            CGFloat k=at.doubleValue*r;
+            CGPoint p=CGPointMake(c.x+k*cos(angle),c.y+k*sin(angle));
+            [teeth moveToPoint:CGPointMake(p.x-size/2,p.y)];
+            [teeth addLineToPoint:CGPointMake(p.x+size/2,p.y)];
+            [teeth addLineToPoint:CGPointMake(p.x,p.y+dir*size*1.2)];
+            [teeth closePath];
+        }
+    }
+    funTeeth.path=open>0.05 ? teeth.CGPath : NULL;
+}
+static void TAFunStart(void) {
+    UIView *root=splitWindow.rootViewController.view;
+    if (!root || funView) return;
+    funView=[[UIView alloc] initWithFrame:root.bounds]; funView.userInteractionEnabled=NO;
+    if (dividerView.superview==root) [root insertSubview:funView belowSubview:dividerView]; else [root addSubview:funView];
+    funMonster=[UIView new]; [funView addSubview:funMonster];
+    funBody=[CAShapeLayer layer];
+    funBody.fillColor=[UIColor colorWithRed:0.36 green:0.82 blue:0.32 alpha:1].CGColor;
+    funBody.strokeColor=[UIColor colorWithRed:0.12 green:0.4 blue:0.1 alpha:1].CGColor; funBody.lineWidth=2;
+    [funMonster.layer addSublayer:funBody];
+    funTeeth=[CAShapeLayer layer]; funTeeth.fillColor=UIColor.whiteColor.CGColor; [funMonster.layer addSublayer:funTeeth];
+    CAShapeLayer *eye=[CAShapeLayer layer]; eye.name=@"eye"; eye.fillColor=UIColor.whiteColor.CGColor; [funMonster.layer addSublayer:eye];
+    funPupil=[CAShapeLayer layer]; funPupil.fillColor=UIColor.blackColor.CGColor; [funMonster.layer addSublayer:funPupil];
+    CAShapeLayer *brow=[CAShapeLayer layer]; brow.name=@"brow"; brow.strokeColor=[UIColor colorWithRed:0.1 green:0.3 blue:0.08 alpha:1].CGColor;
+    brow.lineWidth=3; brow.lineCap=kCALineCapRound; [funMonster.layer addSublayer:brow];
+    funMouse=[UILabel new]; funMouse.text=@"🐭"; funMouse.font=[UIFont systemFontOfSize:30]; [funMouse sizeToFit];
+    [funView addSubview:funMouse];
+    funMouseSay=TAFunBubble(); funMonsterSay=TAFunBubble();
+    [funView addSubview:funMouseSay]; [funView addSubview:funMonsterSay];
+}
+// cx = divider centre; progress 0 at the Dock edge, 1 near the far limit.
+static void TAFunUpdate(void) {
+    if (!funView || !splitWindow) return;
+    CGSize size=funView.bounds.size;
+    CGFloat cx=dividerView.center.x, left=dockZoneRight, far=size.width*0.8;
+    CGFloat p=MIN(1,MAX(0,(cx-left)/MAX(1,far-left)));
+    CGFloat room=MAX(40,size.width-cx);
+    CGFloat r=MIN(room*0.34,size.height*0.26)*(0.75+0.35*p);
+    CGFloat mx=cx+MAX(r+18,room*0.5), my=size.height/2;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    funMonster.frame=CGRectMake(mx-r,my-r,2*r,2*r);
+    TAFunShape(r,0.12+0.62*p);
+    CAShapeLayer *eye=nil, *brow=nil;
+    for (CALayer *l in funMonster.layer.sublayers) { if ([l.name isEqual:@"eye"]) eye=(CAShapeLayer *)l; if ([l.name isEqual:@"brow"]) brow=(CAShapeLayer *)l; }
+    CGPoint e=CGPointMake(r*1.05,r*0.45); CGFloat er=MAX(4,r*0.2);
+    eye.path=[UIBezierPath bezierPathWithOvalInRect:CGRectMake(e.x-er,e.y-er,2*er,2*er)].CGPath;
+    CGFloat pr=er*0.5;   // pupil glances at the mouse
+    funPupil.path=[UIBezierPath bezierPathWithOvalInRect:CGRectMake(e.x-er*0.45-pr,e.y+er*0.1-pr,2*pr,2*pr)].CGPath;
+    UIBezierPath *b=[UIBezierPath bezierPath];
+    [b moveToPoint:CGPointMake(e.x-er*1.2,e.y-er*1.1)]; [b addLineToPoint:CGPointMake(e.x+er*1.1,e.y-er*1.7-p*er*0.6)];
+    brow.path=b.CGPath;
+    [CATransaction commit];
+    CGFloat shake=p>0.72 ? (CGFloat)(arc4random_uniform(5))-2 : 0;
+    // Mouse sits 22pt left of the divider; its bubble ends 16pt short of it.
+    funMouse.center=CGPointMake(cx-funMouse.bounds.size.width/2-22+shake,my+shake*0.6);
+    NSString *line=p<0.33 ? @"Ơ… đi đâu đây?" : p<0.72 ? @"Hình như có mùi…" : @"CỨU TÔI!!!";
+    TAFunSay(funMouseSay,line,CGPointZero);
+    CGFloat half=funMouseSay.bounds.size.width/2;
+    funMouseSay.center=CGPointMake(MAX(half+4,cx-16-half),my-38);
+    TAFunSay(funMonsterSay,p>0.45 ? @"Măm măm…" : @"",CGPointMake(mx,my-r-14));
+}
+static void TAFunEnd(BOOL eaten) {
+    UIView *view=funView; funView=nil;
+    if (!view) return;
+    if (!eaten) { [view removeFromSuperview]; return; }
+    CGRect m=funMonster.frame; CGFloat r=m.size.width/2;
+    CGPoint mouth=CGPointMake(CGRectGetMinX(m)+r*0.55,CGRectGetMidY(m));
+    UILabel *mouse=funMouse, *monsterSay=funMonsterSay;
+    funMouseSay.alpha=0;
+    [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
+        mouse.center=mouth; mouse.transform=CGAffineTransformMakeScale(0.3,0.3); mouse.alpha=0;
+    } completion:^(__unused BOOL finished) {
+        if (!funView) TAFunShape(r,0.01);   // chomp (drops the teeth), unless a new pull reuses the layers
+        TAFunSay(monsterSay,@"Măm! Ngon 😋",CGPointMake(CGRectGetMidX(m),CGRectGetMinY(m)-14));
+        [UIView animateWithDuration:0.3 delay:0.45 options:0 animations:^{ view.alpha=0; } completion:^(__unused BOOL f) {
+            [view removeFromSuperview];
+        }];
+    }];
+}
 static void TAStop(NSString *reason) {
     if (primeBundle) { primeBundle=nil; primeSelection=nil; primePrevious=nil; primeSawForeground=NO; ++generation; }
     resumeBundles=nil; resumeCandidate=nil;
     if (!running) return;
     running = NO; ++generation;
+    TAFunEnd(NO);
     for (NSInteger i=0;i<2;i++) { [appPickers[i] removeFromSuperview]; appPickers[i]=nil; pickerItems[i]=nil; pickerPages[i]=0; retryTargets[i]=nil; }
     TALog(@"STOP %@", reason);
     BOOL previous = ownCall; ownCall = YES;
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
     dividerView = nil; dividerGrip = nil; railIcon = nil; dragCovers[0] = dragCovers[1] = nil;
-    staged = NO; pullCurrent = nil; pullCompanion = nil;
+    staged = NO; pullFromLeft = NO; pullCurrent = nil; pullCompanion = nil;
     lockVisual = nil; swapVisual = nil; chromeHold = NO; ++chromeToken; changeOverlays[0] = changeOverlays[1] = nil;
     lockTaps = 0; ++lockTapSerial; dragMoved = NO; actionPanel = nil;
     launchBundle = nil; launchGuardUntil = 0;
@@ -721,7 +874,7 @@ static void TASuspend(NSString *reason) {
     TALog(@"SESSION SAVED left=%@ right=%@",selection[0],selection[1]);
     buttonWindow.hidden=YES;
 }
-@interface TAControls : NSObject
+@interface TAControls : NSObject <UIGestureRecognizerDelegate>
 - (void)start;
 - (void)enter;
 - (void)selectTile:(TAAppTile *)tile;
@@ -754,7 +907,8 @@ static void TASuspend(NSString *reason) {
 - (void)dragDivider:(UIPanGestureRecognizer *)gesture;
 - (void)resetDivider:(UITapGestureRecognizer *)gesture;
 - (void)commitSplit:(CGFloat)ratio;
-- (void)edgePull:(UILongPressGestureRecognizer *)gesture;
+- (void)dockPull:(UIPanGestureRecognizer *)gesture;
+- (BOOL)beginPullFromLeft;
 - (void)finishPull:(CGFloat)ratio;
 - (void)collapseTo:(NSInteger)winner;
 - (void)lockTap:(UITapGestureRecognizer *)gesture;
@@ -943,19 +1097,19 @@ static UIButton *TAButton(NSString *title, SEL action) {
     railIcon.layer.cornerRadius = 10; railIcon.clipsToBounds = YES; railIcon.alpha = 0; railIcon.userInteractionEnabled = NO;
     [dividerView addSubview:railIcon];
 
-    // Touch container: 56 wide; top 46pt = swap button, below = 88pt capsule
-    // area. The capsule stays vertically centred on the display.
-    floatingActions = [[UIView alloc] initWithFrame:CGRectMake(half-28,MAX(0,MAX(4,(bounds.size.height-88)/2)-kTASwapArea),56,88+kTASwapArea)];
+    // Touch container: 56 wide; top 46pt = swap button, directly below it the
+    // 44pt lock capsule; the stack is centred on the display.
+    floatingActions = [[TAHandleView alloc] initWithFrame:CGRectMake(half-28,round((bounds.size.height-kTAHandleHeight)/2),56,kTAHandleHeight)];
     floatingActions.backgroundColor=UIColor.clearColor;
     floatingActions.isAccessibilityElement=YES;
     floatingActions.accessibilityLabel=@"Tay nắm chia màn: chạm mở tác vụ, chạm hai lần để đổi app, kéo để đổi tỉ lệ";
-    // Visible part: 22x60 dark frosted capsule with hairline and three dots.
-    lockVisual=[[UIView alloc] initWithFrame:CGRectMake(17,14+kTASwapArea,22,60)];
+    // Visible part: 22x44 dark capsule with hairline and three dots.
+    lockVisual=[[UIView alloc] initWithFrame:CGRectMake(17,kTASwapArea+2,22,kTALockHeight)];
     lockVisual.userInteractionEnabled=NO; lockVisual.layer.cornerRadius=11; lockVisual.clipsToBounds=YES;
     lockVisual.layer.borderWidth=0.5; lockVisual.layer.borderColor=[UIColor colorWithWhite:1 alpha:0.28].CGColor;
     lockVisual.backgroundColor=[UIColor colorWithWhite:0.1 alpha:0.82];
     for (NSInteger d=0;d<3;d++) {
-        UIView *dot=[[UIView alloc] initWithFrame:CGRectMake(8.5,19+d*9,5,5)];
+        UIView *dot=[[UIView alloc] initWithFrame:CGRectMake(8.5,11+d*9,5,5)];
         dot.backgroundColor=[UIColor colorWithWhite:1 alpha:0.9]; dot.layer.cornerRadius=2.5; [lockVisual addSubview:dot];
     }
     [floatingActions addSubview:lockVisual];
@@ -1280,71 +1434,121 @@ static UIButton *TAButton(NSString *title, SEL action) {
 - (void)resetDivider:(UITapGestureRecognizer *)gesture {
     if (gesture.state==UIGestureRecognizerStateRecognized) [self commitSplit:0.5];
 }
-- (void)edgePull:(UILongPressGestureRecognizer *)gesture {
-    CGFloat x=[gesture locationInView:edgeWindow].x+edgeWindow.frame.origin.x;
+// Swipe right from the empty top of the CarPlay Dock: once the finger leaves
+// the Dock, the divider slides out and follows it. The new app takes the
+// left pane (next to the Dock), the app already open takes the right pane.
+- (void)dockPull:(UIPanGestureRecognizer *)gesture {
+    UIView *view=gesture.view;
+    CGFloat x=[view convertPoint:[gesture locationInView:view] toCoordinateSpace:dashboard.coordinateSpace].x;
+    CGFloat width=MAX(1,splitWindow ? splitWindow.bounds.size.width : TADisplayWidth());
     switch (gesture.state) {
-        case UIGestureRecognizerStateBegan: {
-            NSString *current=[nativeForeground copy];
-            if (running || primeBundle || !current.length || !TADirectReady(records[current])) {
-                TALog(@"EDGE PULL rejected current=%@ running=%d ready=%d",current,running,TADirectReady(records[current]));
-                gesture.enabled=NO; gesture.enabled=YES; return;
-            }
-            // Companion: most recently used other app that can attach directly.
-            NSString *companion=nil; pullCurrentSlot=0;
-            if (openBundle && [current isEqual:openBundle] && NSProcessInfo.processInfo.systemUptime-openTime<180 && openKeep.length && TADirectReady(records[openKeep])) {
-                companion=openKeep; pullCurrentSlot=openSlot;
-                TALog(@"EDGE PULL uses remembered pair %@ + %@",current,companion);
-            }
-            openBundle=nil; openKeep=nil;
-            // Only apps the user actually opened this session and that last
-            // rendered fine. Apple Maps restored in the background at connect
-            // (no launch source) had a scene but never drew in a pane (0.39 log).
-            if (!companion) for (NSString *bundle in [order reverseObjectEnumerator]) {
-                TARecord *candidate=records[bundle];
-                if (![bundle isEqual:current] && candidate.userLaunched && !candidate.noSurface && TADirectReady(candidate)) { companion=bundle; break; }
-            }
-            resumeBundles=nil; resumeCandidate=nil;
-            staged=YES; pullCurrent=current; pullCompanion=companion;
-            [self start];
-            if (!running) { staged=NO; pullCurrent=nil; pullCompanion=nil; return; }
-            floatingActions.hidden=YES;
-            dividerView.backgroundColor=TADividerColor();
-            railIcon.image=companion ? TAAppIcon(companion) : [UIImage systemImageNamed:@"plus.square.on.square"];
-            railIcon.tintColor=UIColor.lightGrayColor;
-            for (NSInteger i=0;i<2;i++) {
-                NSString *bundle=i==pullCurrentSlot ? current : companion;
-                [choose[i] setTitle:bundle ? @"" : @"Chọn ứng dụng" forState:UIControlStateNormal];
-                [choose[i] setImage:bundle ? TAAppIcon(bundle) : nil forState:UIControlStateNormal];
-                choose[i].enabled=NO; choose[i].adjustsImageWhenDisabled=NO;
-            }
-            // Rail above the panes, but the handle must stay above the rail:
-            // otherwise the divider's own tap recognizers swallow handle taps.
-            [splitWindow.rootViewController.view bringSubviewToFront:dividerView];
-            [splitWindow.rootViewController.view bringSubviewToFront:floatingActions];
-            edgeWindow.alpha=0.02;   // keep the touch alive, hide the handle
-            TALayoutPull(x/MAX(1,splitWindow.bounds.size.width));
-            TALog(@"EDGE PULL begin current=%@ companion=%@",current,companion);
-            break;
-        }
+        case UIGestureRecognizerStateBegan:
+            TALog(@"DOCK SWIPE start x=%.1f dockRight=%.1f current=%@",x,dockZoneRight,nativeForeground ?: @"-");
+            // fall through: the finger may already be past the Dock
         case UIGestureRecognizerStateChanged:
-            if (staged) TALayoutPull(x/MAX(1,splitWindow.bounds.size.width));
+            // Slide the divider out as soon as the finger nears the Dock edge.
+            if (!staged && x>dockZoneRight-8 && ![self beginPullFromLeft]) { gesture.enabled=NO; gesture.enabled=YES; break; }
+            if (staged) { TALayoutPull(x/width); TAFunUpdate(); }
             break;
         case UIGestureRecognizerStateEnded:
-            if (staged) [self finishPull:x/MAX(1,splitWindow.bounds.size.width)];
+            if (staged) [self finishPull:x/width];
             break;
         default:
-            if (staged) [self finishPull:1];
+            if (staged) [self finishPull:0];
             break;
     }
 }
+// Only a rightward, mostly horizontal swipe that started inside the Dock and
+// only while no split is open. Anything else stays a normal Dock touch.
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    if (![dockSwipes containsObject:(UIPanGestureRecognizer *)gesture]) return YES;
+    if (running || primeBundle || !dashboard) return NO;
+    UIPanGestureRecognizer *pan=(UIPanGestureRecognizer *)gesture;
+    UIView *view=pan.view;
+    CGPoint moved=[pan translationInView:view];
+    CGPoint now=[view convertPoint:[pan locationInView:view] toCoordinateSpace:dashboard.coordinateSpace];
+    CGFloat startX=now.x-moved.x;
+    // Diagonal swipes count too (right component at least 0.6x the vertical).
+    BOOL begin=moved.x>0 && moved.x>=fabs(moved.y)*0.6 && startX<=dockZoneRight;
+    if (!begin && startX<=dockZoneRight+40) {
+        static NSTimeInterval lastLog;
+        NSTimeInterval t=NSProcessInfo.processInfo.systemUptime;
+        if (t-lastLog>1) { lastLog=t; TALog(@"DOCK SWIPE ignored startX=%.1f moved=%@ dockRight=%.1f window=%@",startX,NSStringFromCGPoint(moved),dockZoneRight,NSStringFromClass(view.class)); }
+    }
+    return begin;
+}
+// CarPlay's own Dock/scroll recognisers must not starve the swipe.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gesture shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return [dockSwipes containsObject:(UIPanGestureRecognizer *)gesture];
+}
+- (BOOL)beginPullFromLeft {
+    NSString *current=[nativeForeground copy];
+    if (running || primeBundle) {
+        TALog(@"DOCK PULL rejected running=%d prime=%@",running,primeBundle);
+        return NO;
+    }
+    // From CarPlay Home (no app open, or one that cannot attach directly) the
+    // split still opens: the two most recent usable apps fill it below.
+    if (current.length && !TADirectReady(records[current])) current=nil;
+    // Companion: most recently used other app that can attach directly.
+    NSString *companion=nil; pullCurrentSlot=1;
+    if (openBundle && [current isEqual:openBundle] && NSProcessInfo.processInfo.systemUptime-openTime<180 && openKeep.length && TADirectReady(records[openKeep])) {
+        companion=openKeep; pullCurrentSlot=openSlot;
+        TALog(@"DOCK PULL uses remembered pair %@ + %@",current,companion);
+    }
+    openBundle=nil; openKeep=nil;
+    // Only apps the user actually opened this session and that last
+    // rendered fine. Apple Maps restored in the background at connect
+    // (no launch source) had a scene but never drew in a pane (0.39 log).
+    if (!companion) for (NSString *bundle in [order reverseObjectEnumerator]) {
+        TARecord *candidate=records[bundle];
+        if (![bundle isEqual:current] && candidate.userLaunched && !candidate.noSurface && TADirectReady(candidate)) { companion=bundle; break; }
+    }
+    if (!current.length) {
+        // Most recent app to the right pane, the one before it to the left;
+        // with none, both panes offer the app picker.
+        current=companion; companion=nil;
+        if (current) for (NSString *bundle in [order reverseObjectEnumerator]) {
+            TARecord *candidate=records[bundle];
+            if (![bundle isEqual:current] && candidate.userLaunched && !candidate.noSurface && TADirectReady(candidate)) { companion=bundle; break; }
+        }
+        TALog(@"DOCK PULL from Home recent=%@ + %@",current ?: @"-",companion ?: @"-");
+    }
+    resumeBundles=nil; resumeCandidate=nil;
+    staged=YES; pullFromLeft=YES; pullCurrent=current; pullCompanion=companion;
+    [self start];
+    if (!running) { staged=NO; pullFromLeft=NO; pullCurrent=nil; pullCompanion=nil; return NO; }
+    floatingActions.hidden=YES;
+    dividerView.backgroundColor=TADividerColor();
+    railIcon.image=companion ? TAAppIcon(companion) : [UIImage systemImageNamed:@"plus.square.on.square"];
+    railIcon.tintColor=UIColor.lightGrayColor;
+    for (NSInteger i=0;i<2;i++) {
+        // Neither the "Chọn ứng dụng" prompt nor the app icon while the
+        // mouse-and-monster show runs (the icon sat behind the monster); the
+        // empty-pane prompt returns in -finishPull: if the pane stays empty.
+        [choose[i] setTitle:@"" forState:UIControlStateNormal];
+        [choose[i] setImage:nil forState:UIControlStateNormal];
+        choose[i].enabled=NO; choose[i].adjustsImageWhenDisabled=NO;
+    }
+    // Rail above the panes, but the handle must stay above the rail:
+    // otherwise the divider's own tap recognizers swallow handle taps.
+    [splitWindow.rootViewController.view bringSubviewToFront:dividerView];
+    [splitWindow.rootViewController.view bringSubviewToFront:floatingActions];
+    TAFunStart();
+    TALog(@"DOCK PULL begin current=%@ companion=%@ dockRight=%.1f",current,companion,dockZoneRight);
+    return YES;
+}
 - (void)finishPull:(CGFloat)ratio {
-    edgeWindow.alpha=1;
     if (!running || !staged) return;
     NSString *current=[pullCurrent copy], *companion=[pullCompanion copy];
-    staged=NO; pullCurrent=nil; pullCompanion=nil;
-    // Released near the edge: nothing was attached, just remove the overlay.
-    // Cancel only if the finger travelled less than ~72pt from the right edge.
-    if (ratio>1-kTAPullCancel/MAX(1,TADisplayWidth())) { TALog(@"EDGE PULL cancelled ratio=%.3f",ratio); TAStop(@"edge pull cancelled"); return; }
+    BOOL fromLeft=pullFromLeft;
+    staged=NO; pullFromLeft=NO; pullCurrent=nil; pullCompanion=nil;
+    // Released close to where it started: nothing was attached, just remove
+    // the overlay (within ~72pt of the right edge, or of the Dock's edge).
+    CGFloat display=MAX(1,TADisplayWidth());
+    BOOL cancel=fromLeft ? ratio<(dockZoneRight+kTAPullCancel*0.6)/display : ratio>1-kTAPullCancel/display;
+    if (cancel) { TALog(@"PULL cancelled ratio=%.3f fromLeft=%d",ratio,fromLeft); TAStop(@"pull cancelled"); return; }
+    if (fromLeft) TAFunEnd(YES);
     ratio=TAClampRatio(ratio);
     if (fabs(ratio-0.5)<0.03) ratio=0.5;
     splitRatio=ratio;
@@ -1358,10 +1562,10 @@ static UIButton *TAButton(NSString *title, SEL action) {
     [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
         TALayoutSplit(ratio);
     } completion:nil];
-    TALog(@"EDGE PULL open ratio=%.3f left=%@ right=%@",ratio,current,companion);
+    TALog(@"PULL open ratio=%.3f fromLeft=%d current=%@ companion=%@",ratio,fromLeft,current,companion);
     TAUpdateEdge();
     NSInteger cs=pullCurrentSlot; pullCurrentSlot=0;
-    [self attach:current slot:cs];
+    if (current.length) [self attach:current slot:cs];
     if (companion.length) [self replace:companion slot:1-cs];
 }
 // Divider dragged to an edge: the pane that keeps the screen returns to
@@ -2001,6 +2205,67 @@ static void TAStartResponsivenessProbe(void) {
     });
     dispatch_resume(timer);
 }
+// Heat diagnostics: every 30s (and on each iOS thermal-state change) log the
+// thermal state, battery temperature/level/charging, this process's CPU use,
+// and the split state, so a drive log shows when heat starts and what ran.
+static double TABatteryCelsius(void) {
+    typedef CFMutableDictionaryRef (*MatchFn)(const char *);
+    typedef unsigned int (*ServiceFn)(unsigned int, CFDictionaryRef);
+    typedef CFTypeRef (*PropFn)(unsigned int, CFStringRef, CFAllocatorRef, unsigned int);
+    typedef int (*ReleaseFn)(unsigned int);
+    static MatchFn matching; static ServiceFn service; static PropFn property; static ReleaseFn release;
+    static BOOL loaded;
+    if (!loaded) {
+        loaded=YES;
+        void *iokit=dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",RTLD_LAZY);
+        if (iokit) {
+            matching=(MatchFn)dlsym(iokit,"IOServiceMatching");
+            service=(ServiceFn)dlsym(iokit,"IOServiceGetMatchingService");
+            property=(PropFn)dlsym(iokit,"IORegistryEntryCreateCFProperty");
+            release=(ReleaseFn)dlsym(iokit,"IOObjectRelease");
+        }
+    }
+    if (!matching || !service || !property || !release) return NAN;
+    unsigned int battery=service(0,matching("AppleSmartBattery"));   // consumes the dictionary
+    if (!battery) return NAN;
+    CFTypeRef value=property(battery,CFSTR("Temperature"),kCFAllocatorDefault,0);
+    release(battery);
+    double celsius=NAN; int centi=0;
+    if (value && CFGetTypeID(value)==CFNumberGetTypeID() && CFNumberGetValue((CFNumberRef)value,kCFNumberIntType,&centi)) celsius=centi/100.0;
+    if (value) CFRelease(value);
+    return celsius;
+}
+static void TALogHeat(NSString *reason) {
+    static double lastCPU=-1, lastWall=0;
+    struct rusage usage; getrusage(RUSAGE_SELF,&usage);
+    double cpu=usage.ru_utime.tv_sec+usage.ru_utime.tv_usec/1e6+usage.ru_stime.tv_sec+usage.ru_stime.tv_usec/1e6;
+    double wall=NSProcessInfo.processInfo.systemUptime;
+    NSString *percent=lastCPU>=0 && wall>lastWall ? [NSString stringWithFormat:@"%.1f%%",(cpu-lastCPU)/(wall-lastWall)*100] : @"?";
+    lastCPU=cpu; lastWall=wall;
+    NSArray *states=@[@"nominal",@"fair",@"serious",@"critical"];
+    NSInteger thermal=NSProcessInfo.processInfo.thermalState;
+    UIDevice *device=UIDevice.currentDevice; device.batteryMonitoringEnabled=YES;
+    NSArray *charge=@[@"unknown",@"unplugged",@"charging",@"full"];
+    double celsius=TABatteryCelsius();
+    TALog(@"HEAT %@ thermal=%@ battery=%@ level=%.0f%% power=%@ cpu=%@ split=%d left=%@ right=%@ ratio=%.2f",reason,
+          thermal>=0 && thermal<(NSInteger)states.count ? (id)states[thermal] : (id)@(thermal),
+          isnan(celsius) ? @"?" : [NSString stringWithFormat:@"%.1fC",celsius],
+          device.batteryLevel*100,(NSUInteger)device.batteryState<charge.count ? (id)charge[device.batteryState] : (id)@(device.batteryState),
+          percent,running,slots[0].bundle ?: @"-",slots[1].bundle ?: @"-",splitRatio);
+}
+static void TAHeatTick(void) {
+    TALogHeat(@"tick");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAHeatTick(); });
+}
+static void TAStartHeatLog(void) {
+    static BOOL started;
+    if (started) return;
+    started=YES;
+    [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil
+        queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) { TALogHeat(@"change"); }];
+    TALogHeat(@"start");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAHeatTick(); });
+}
 static void TATick(void) {
     UIWindowScene *s = TADashboard();
     // Track playback and the display's shape. A lost or reshaped CarPlay
@@ -2021,7 +2286,7 @@ static void TATick(void) {
         TAStop(@"display changed"); buttonWindow.hidden = YES; buttonWindow = nil;
         TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil;
         [records removeAllObjects]; [order removeAllObjects]; dashboard = s;
-        nativeForeground=nil; edgeWindow.hidden=YES; edgeWindow=nil; [TANativeSizes removeAllObjects];
+        nativeForeground=nil; [TANativeSizes removeAllObjects];
         TALog(@"DISPLAY %@", s.session.persistentIdentifier);
     }
     if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
@@ -2299,9 +2564,9 @@ static void TATemplateLayout(UIWindow *w) {
     UIViewController *root = w.rootViewController;
     if (!root.viewIfLoaded || ![NSStringFromClass(root.class) isEqual:@"CARTemplateUIApplicationSceneViewController"]) return;
     NSString *bundle = nil; BOOL active = TATemplateTarget(w, &bundle);
-    // 0.46: re-enabled for Google Maps only (its map viewport keeps a 45pt
-    // leading inset meant for the Dock, which is not beside a pane).
-    if (active && ![bundle isEqual:@"com.google.Maps"]) active = NO;
+    // 0.46.2: every template app with a split target reclaims the 45pt
+    // leading inset meant for the Dock, which is not beside a pane (0.46 did
+    // this for Google Maps only, so other apps drew shifted right in a pane).
     NSValue *saved = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
     if (!active && !saved) return;
     NSString *stamp = active ? NSStringFromCGRect(w.windowScene.coordinateSpace.bounds) : @"restore";
@@ -2311,7 +2576,6 @@ static void TATemplateLayout(UIWindow *w) {
         objc_setAssociatedObject(root, &TALayoutQueuedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (w.rootViewController != root || !root.viewIfLoaded) return;
         NSString *currentBundle = nil; BOOL currentActive = TATemplateTarget(w, &currentBundle);
-        if (currentActive && ![currentBundle isEqual:@"com.google.Maps"]) currentActive = NO;
         NSValue *original = objc_getAssociatedObject(root, &TAOriginalInsetsKey);
         if (!currentActive && !original) return;
         UIEdgeInsets before = root.view.safeAreaInsets;
@@ -2325,7 +2589,10 @@ static void TATemplateLayout(UIWindow *w) {
             // Keep top/bottom navigation regions intact. Do not patch children.
             CGFloat left = MAX(0, before.left-root.additionalSafeAreaInsets.left);
             CGFloat right = MAX(0, before.right-root.additionalSafeAreaInsets.right);
-            CGFloat limit = w.bounds.size.width * 0.25;
+            // Cap by the physical display, not the pane: a pane narrower than
+            // 180pt made 25% of its width smaller than the 45pt Dock inset, so
+            // narrow panes kept the inset and drew shifted right (0.10.10 fix).
+            CGFloat limit = MIN(64, w.screen.bounds.size.width * 0.25);
             if (left <= limit) desired.left -= left;
             if (right <= limit) desired.right -= right;
             root.additionalSafeAreaInsets = desired;
@@ -2650,6 +2917,9 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 %end
 %end
 #import "TAKeyboard.h"
+// The per-pane side buttons this hid (0.10.21) no longer exist; the keyboard
+// window already sits above the split window and floatingActions is hidden.
+static void TAHideSideActions(void) {}
 
 // YouTube iPad layout experiment. YouTube picks its iPhone or iPad UI from
 // the device idiom at launch, so report the iPad idiom. 0.46.2 showed the
@@ -2741,7 +3011,7 @@ static void TAListenYouTubeTraits(void) {
     });
 }
 
-// 0.46: the only code in CarPlayTemplateUIHost — Google Maps inset reclaim.
+// 0.46.1: the only code in CarPlayTemplateUIHost — pane inset reclaim.
 %group TAInsetOnly
 %hook UIWindow
 - (void)layoutSubviews {
@@ -2787,32 +3057,62 @@ static void TAListenYouTubeTraits(void) {
     if (!running && self==mountedDock && !dockAdjusting) TAInstallDock(self);
 }
 %end
-// Show the edge handle only while a captured app is open natively.
+static NSArray<UIWindow *> *TADockProbeWindows(UIWindowScene *s) {
+    return [s.windows sortedArrayUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *c) {
+        return a.windowLevel>c.windowLevel ? NSOrderedAscending : a.windowLevel<c.windowLevel ? NSOrderedDescending : NSOrderedSame;
+    }];
+}
+// Which window would take a touch at this display point (highest level
+// first, as UIKit delivers it). Logged once per zone so an overlay stealing
+// the swipe shows up in the log.
+static NSString *TATopWindowAt(UIWindowScene *s, CGPoint p) {
+    for (UIWindow *w in TADockProbeWindows(s)) {
+        if (w.hidden || w.alpha<0.01) continue;
+        if ([w hitTest:[w convertPoint:p fromCoordinateSpace:s.coordinateSpace] withEvent:nil])
+            return [NSString stringWithFormat:@"%@(level %.0f)",NSStringFromClass(w.class),w.windowLevel];
+    }
+    return @"none";
+}
+// The Dock is drawn outside CarPlayApp's own view tree (log 0.48.1: probing
+// every Dashboard window finds no Dock view), so only a MultiTA window can
+// receive a touch there. A clear window over the top of the Dock (clock,
+// signal, Wi-Fi, down to just above the first icon) takes the swipe; it sits
+// above other tweaks' overlays (a CTWindow at level 2100 was seen).
 static void TAUpdateEdge(void) {
     UIWindowScene *s=dashboard;
-    if (!s) { edgeWindow.hidden=YES; return; }
-    if (!edgeWindow || edgeWindow.windowScene!=s) {
-        edgeWindow.hidden=YES;
-        edgeWindow=[[UIWindow alloc] initWithWindowScene:s];
-        edgeWindow.windowLevel=UIWindowLevelAlert+75;
-        edgeWindow.rootViewController=[UIViewController new];
-        UIView *root=edgeWindow.rootViewController.view; root.backgroundColor=UIColor.clearColor;
-        UIView *pill=[[UIView alloc] initWithFrame:CGRectZero]; pill.tag=2828;
-        pill.backgroundColor=[UIColor colorWithWhite:0.85 alpha:0.55]; pill.layer.cornerRadius=2.5;
-        pill.layer.borderWidth=0.5; pill.layer.borderColor=[UIColor colorWithWhite:0 alpha:0.5].CGColor;
-        pill.userInteractionEnabled=NO; [root addSubview:pill];
-        UILongPressGestureRecognizer *hold=[[UILongPressGestureRecognizer alloc] initWithTarget:controls action:@selector(edgePull:)];
-        hold.minimumPressDuration=0.3; hold.allowableMovement=CGFLOAT_MAX;
-        [root addGestureRecognizer:hold];
-        root.accessibilityLabel=@"Giữ rồi kéo để chia màn";
+    if (!s) { dockTopWindow.hidden=YES; return; }
+    if (!dockSwipes) dockSwipes=[NSHashTable weakObjectsHashTable];
+    if (!dockTopWindow || dockTopWindow.windowScene!=s) {
+        dockTopWindow.hidden=YES;
+        dockTopWindow=[[UIWindow alloc] initWithWindowScene:s];
+        dockTopWindow.windowLevel=UIWindowLevelAlert+200;
+        dockTopWindow.rootViewController=[UIViewController new];
+        // Not fully clear: the system skips a window with no visible content
+        // when routing touches (clear zones in 0.47.0/0.47.1/0.48.2 got no
+        // touch; the red 0.47.3 test zone and the old 0.02-alpha handle did).
+        dockTopWindow.rootViewController.view.backgroundColor=[UIColor colorWithWhite:0 alpha:0.02];
+        UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc] initWithTarget:controls action:@selector(dockPull:)];
+        pan.maximumNumberOfTouches=1; pan.delegate=controls;
+        [dockTopWindow.rootViewController.view addGestureRecognizer:pan]; [dockSwipes addObject:pan];
     }
+    // Never move or hide the zone under a finger: that would cancel the swipe.
+    for (UIPanGestureRecognizer *pan in dockSwipes) {
+        UIGestureRecognizerState state=pan.state;
+        if (state==UIGestureRecognizerStateBegan || state==UIGestureRecognizerStateChanged) return;
+    }
+    if (running || primeBundle) { dockTopWindow.hidden=YES; return; }
+    // Test car (426x240): the Dock is ~14% of the width; the clock/Wi-Fi block
+    // ends at ~19% and the first Dock icon starts at ~30% of the height.
     CGRect b=s.coordinateSpace.bounds;
-    // Starts below the top-right fallback launcher.
-    CGFloat strip=round(MAX(16,b.size.width*0.028));   // 16pt on 426, 18pt on 640
-    edgeWindow.frame=CGRectMake(CGRectGetMaxX(b)-strip,CGRectGetMinY(b)+8,strip,MAX(40,b.size.height-16));
-    [edgeWindow.rootViewController.view viewWithTag:2828].frame=CGRectMake(strip-5-3,(edgeWindow.bounds.size.height-44)/2,5,44);
-    BOOL show=staged || (!running && !primeBundle && nativeForeground.length && records[nativeForeground]);
-    edgeWindow.hidden=!show;
+    CGRect zone=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(44,round(b.size.width*0.14)),round(b.size.height*0.29));
+    if (!CGRectEqualToRect(dockTopWindow.frame,zone)) {
+        dockTopWindow.frame=zone;
+        dockZoneRight=CGRectGetMaxX(zone)-CGRectGetMinX(b);
+        dockTopWindow.hidden=NO;
+        TALog(@"DOCK ZONE %@ top=%@ display=%@",NSStringFromCGRect(zone),
+              TATopWindowAt(s,CGPointMake(CGRectGetMidX(zone),CGRectGetMidY(zone))),NSStringFromCGRect(b));
+    }
+    dockTopWindow.hidden=NO;
 }
 %hook DBApplicationSceneViewController
 - (void)foregroundSceneWithSettings:(id)settings completion:(id)completion {
@@ -3000,6 +3300,6 @@ static void TAUpdateEdge(void) {
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
         dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallHost(); TAListenYouTubeTraits(); });
-        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TAStartHeatLog(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }

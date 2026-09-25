@@ -1,8 +1,8 @@
-# MultiTA Beta 0.46.3
+# MultiTA Beta 0.49.3
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
 
-## 0.46.3 — YouTube: cột theo độ rộng ô, hủy tìm kiếm
+## 0.49.3 — YouTube: cột theo độ rộng ô, hủy tìm kiếm (gộp 0.46.1–0.46.3 vào 0.49.2)
 
 Log 0.46.2: YouTube đã nhận giao diện iPad (`device=pad trait=pad`) nhưng cửa sổ CarPlay luôn là `hClass=compact` mà YouTube vẫn vẽ lưới 3 cột tí hon của iPad ngang: nó đọc size class từ chỗ khác (màn hình/cửa sổ điện thoại). Giờ mọi truy vấn `horizontalSizeClass` trong YouTube đều trả lời theo độ rộng ô CarPlay khi đang kết nối CarPlay: dưới `TA_YOUTUBE_REGULAR_WIDTH` (250pt) là compact (1 cột), từ 250pt là regular (lưới). Log `YOUTUBE TRAITS` thêm hướng màn hình và size class/hướng/độ rộng cửa sổ điện thoại.
 
@@ -15,6 +15,73 @@ YouTube được cho là đang chạy trên iPad (hook duy nhất: UIDevice.user
 ## 0.46.1 — bàn phím chung cho ô tìm kiếm YouTube
 
 YouTube được nạp lại nhưng chỉ chạy phần bàn phím chung (không hook giao diện), khởi động sau 2s. Ô nhập được tìm qua firstResponder của cửa sổ vì cây view YouTube vượt giới hạn 500 view.
+## 0.49.1 — chỉnh chuột và lời thoại
+
+Chuột cách divider 22pt (trước 6pt); bong bóng lời của chuột kết thúc cách divider 16pt, không đè lên thanh chia; chữ bong bóng 13pt (trước 11pt). Bỏ chữ "Chọn ứng dụng" trong lúc vuốt (0.49.2: bỏ cả icon app nằm sau quái vật); ô trống vẫn hiện "Chạm để chọn ứng dụng" sau khi thả tay.
+
+## 0.49 — chuột và quái vật khi vuốt từ Dock
+
+Khi vuốt từ Dock: con chuột 🐭 bám trên divider, ô bên kia có quái vật tròn màu xanh (kiểu Pac-Man, răng nanh, mắt liếc về phía chuột, lông mày dữ). Divider càng tiến lại, quái vật càng to và há miệng rộng. Chuột nói "Ơ… đi đâu đây?" → "Hình như có mùi…" → run và hét "CỨU TÔI!!!"; quái vật "Măm măm…". Thả tay để chia màn: chuột bị hút vào miệng, quái vật ngậm "chóp", nói "Măm! Ngon 😋" rồi mờ đi (~1 giây) và hai app hiện ra. Huỷ (thả sát Dock) thì biến mất ngay. Vẽ bằng code, không dùng ảnh.
+
+## 0.48.6 — nút đổi bên sát ổ khoá, không che nút của ô
+
+Ảnh 0.48.5: khung tay nắm phóng to che nút ">" sang trang của bảng chọn bên trái, và nút đổi bên cách xa ổ khoá. Giờ nút đổi bên nằm ngay trên ổ khoá (ổ khoá 22×44, trước 22×60), cả cụm căn giữa màn; chỉ đúng hai nút (±4pt) nhận chạm, khoảng trống quanh chúng thuộc về ô bên dưới. Khi hiện, cụm to tối đa 2 lần nhưng chừa 48pt trên và dưới cho nút của ô (≈1,56 lần trên màn cao 240pt).
+
+## 0.48.5 — vuốt từ Home, tay nắm to khi hiện
+
+Log 0.48.4: vuốt Dock từ màn Home luôn bị từ chối (`DOCK PULL rejected current=(null)`). Giờ vuốt từ Home cũng mở chia màn: app dùng gần nhất vào ô phải, app trước đó vào ô trái; chưa có app nào thì cả hai ô hiện bảng chọn. Log `DOCK PULL from Home recent=… + …`.
+
+Ổ khoá (tay nắm) và nút tròn đổi bên: khi hiện lên được vẽ và nhận chạm to gấp tối đa 2 lần, giới hạn theo chiều cao màn (≈1,73 lần trên màn cao 240pt), căn giữa theo chiều dọc; khi tự ẩn thì thu về cỡ cũ để vùng chạm vô hình không đè lên app.
+
+## 0.48.4 — divider và vuốt Dock nhạy hơn
+
+Khó bắt divider khi lái xe. Vùng chạm divider rộng thêm: +14pt mỗi bên (44pt trên màn 426pt, trước 28pt); phần nhìn thấy không đổi. Divider bắt đầu chạy theo tay sau 5pt (trước 9pt). Vuốt Dock: divider xổ ra ngay khi ngón tay tới gần mép Dock (trước phải qua mép +4pt), chấp nhận vuốt chéo (thành phần ngang ≥ 0,6 lần dọc; trước phải gần như ngang), vùng vuốt cao 29% màn hình.
+
+## 0.48.3 — vùng vuốt không còn trong suốt hoàn toàn
+
+Log 0.48.2: vùng vuốt nằm trên cùng (`top=UIWindow(level 2200)`) nhưng không nhận cú chạm nào. Các vùng trong suốt 100% (0.47.0, 0.47.1, 0.48.2) đều không nhận chạm; vùng tô đỏ 0.47.3 và tay nắm cũ (alpha 0.02) thì nhận — hệ thống bỏ qua cửa sổ không có nội dung khi định tuyến cú chạm. Nền vùng vuốt giờ là đen alpha 0.02 (không nhìn thấy).
+
+## 0.48.2 — vùng vuốt riêng ở đầu Dock, nằm trên overlay khác
+
+Log 0.48.1: dò mọi cửa sổ Dashboard đều không thấy view Dock — Dock được vẽ ngoài cây view của CarPlayApp, nên bộ nhận vuốt gắn vào cửa sổ CarPlay không bao giờ nhận cú chạm ở Dock (đã gỡ). Chỉ cửa sổ riêng của MultiTA nhận được (như bản thử 0.47.3). Vùng vuốt giờ là cửa sổ trong suốt ở đầu Dock: rộng 14% màn hình (bề rộng Dock), cao 28% (từ giờ/Wi-Fi tới ngay trên icon đầu tiên), level Alert+200 để nằm trên CTWindow (level 2100) của tweak khác. Log `DOCK ZONE … top=<cửa sổ trên cùng tại vùng vuốt>`.
+
+## 0.48.1 — sửa vuốt Dock không ăn ở 0.48.0
+
+Log 0.48.0: bộ nhận vuốt đã gắn vào các cửa sổ Dashboard nhưng không lần nào bắt đầu. (1) Dò Dock thất bại vì DBLockOutWindow trả lời hit-test trên toàn màn hình, nên bề rộng Dock rơi về 60pt, trong khi ở 0.47.3 người dùng bắt đầu vuốt ở x≈43–88pt. (2) Nhận dạng cử chỉ gốc của CarPlay có thể giành mất cú vuốt. Sửa: bỏ qua DBLockOutWindow khi dò, cho cú vuốt chạy song song với cử chỉ của CarPlay, vùng mặc định 20% màn hình như bản thử đã vuốt được, log `DOCK SWIPE ignored …` khi một cú vuốt gần Dock bị bỏ qua. Thêm vùng dự phòng trong suốt ở phần trên Dock (giờ/sóng/Wi-Fi, tới ngay trên icon đầu tiên, tối đa 25% chiều cao) — cách đã chạy ở 0.47.3 và không che icon.
+
+## 0.48 — vuốt từ cả cột Dock, icon Dock vẫn bấm được
+
+Bản thử 0.47.3 xác nhận vuốt từ Dock hoạt động trên xe, nhưng lớp phủ che icon Dock. Giờ không còn lớp phủ: thao tác vuốt được gắn thẳng lên các cửa sổ Dashboard của CarPlay. Chạm icon Dock vẫn mở app như thường; chỉ vuốt ngang sang phải bắt đầu trong Dock mới mở chia màn (và huỷ cú chạm vào icon). Vùng bắt đầu là cả cột Dock (bề rộng Dock đo từ icon, không đo được thì lấy 14% màn hình). Log: `DOCK SWIPE installed`, `DOCK ZONE right=…`, `DOCK SWIPE start`, `DOCK PULL begin/rejected`, `PULL open/cancelled`.
+
+## 0.47.3 — bản thử vùng vuốt to
+
+Bản thử: vùng vuốt phủ cả cột Dock (rộng ~20% màn hình, cao hết màn), tô đỏ mờ để thấy vị trí. Icon Dock không bấm được trong bản này. Dùng để xác nhận vuốt hoạt động trên xe, sau đó thu nhỏ lại đúng khoảng trống dưới Wi-Fi (`kTADockZoneTest`).
+
+## 0.47.2 — dò Dock rộng hơn
+
+Log 0.47.1: vùng vuốt hiện nhưng không dò được icon Dock (`DOCK ZONE fallback`), vùng mặc định 44×72pt ở góc trên nhỏ hơn Dock thật nên không nhận được vuốt (không có `DOCK SWIPE start`). Giờ dò ở nhiều vị trí x (12/20/30/42pt), chấp nhận icon lớn hơn trên màn to; vùng mặc định rộng 12% màn hình, cao 40%. Ghi một lần `DOCK PROBE …` (view dọc mép trái mỗi 12pt) để khớp Dock từ log nếu vẫn trượt.
+
+## 0.47.1 — vùng vuốt Dock luôn bật
+
+0.47.0: vuốt không có tác dụng và log không có dòng DOCK nào — vùng vuốt chỉ bật khi tweak đã ghi nhận app đang mở, điều này không xảy ra trên xe thử. Giờ vùng vuốt bật bất cứ khi nào chưa chia màn; vuốt khi chưa có app dùng được thì bị từ chối và ghi lý do. Log thêm: `DOCK ZONE shown/hidden … current=… captured=…`, `DOCK SWIPE start …`.
+
+## 0.47 — vuốt từ Dock để chia màn
+
+Bỏ tay nắm ở cạnh phải (khó với tới trên màn xe dài). Giờ vuốt sang phải từ phần trên của thanh Dock CarPlay — vùng giờ/sóng/Wi-Fi xuống tới ngay trên icon đầu tiên — là mở chia màn luôn, không cần giữ. Khi ngón tay ra khỏi Dock, thanh divider xổ ra và chạy theo ngón tay; thả tay là chia màn ở tỉ lệ đó (thả sát Dock thì huỷ). App mới vào ô trái (cạnh Dock), app đang mở sang ô phải. Vùng vuốt chỉ có khi đang mở một app (như tay nắm cũ).
+
+Vùng vuốt không dựa vào tên class Dock (lần trước không tìm được trên một số xe): dò icon Dock đầu tiên dọc mép trái màn hình để biết bề rộng Dock và chỗ trống phía trên. Log: `DOCK ZONE icon=… zone=…`, hoặc `DOCK ZONE fallback` (dùng vùng mặc định 44pt × 30% chiều cao phía trên), `DOCK PULL begin`, `PULL open`, `PULL cancelled`.
+
+## 0.46.3 — log nhiệt độ
+
+Mỗi 30 giây (và ngay khi iOS đổi mức nhiệt) ghi một dòng `HEAT` vào `/var/mobile/MultiTA-beta.log`: mức nhiệt iOS (nominal/fair/serious/critical), nhiệt độ pin, % pin, đang sạc hay không, % CPU của CarPlay (nơi MultiTA chạy, 100% = một nhân), đang chia màn không, app ô trái/phải và tỉ lệ chia.
+
+## 0.46.2 — ô hẹp cũng được trả lại khoảng Dock
+
+Ô chia hẹp hơn ~180pt (khoảng 42% màn 426pt) vẫn bị lệch phải: giới hạn trả lại inset tính bằng 25% độ rộng ô nên nhỏ hơn 45pt của Dock và bị bỏ qua. Giới hạn giờ tính theo màn hình CarPlay (tối đa 64pt) như bản 0.10.10. Cùng ý với DuoPhone V6.2: ô app không bao giờ nằm dưới vùng Dock 45pt.
+
+## 0.46.1 — app tự co vừa ô (hết lệch phải)
+
+Trong ô chia màn, app CarPlay (YouTube Music, Apple Maps, Vietmap) bị đẩy lệch sang phải và cắt mất phần bên phải, dù ở ô trái hay ô phải. Nguyên nhân: app vẫn chừa ~45pt bên trái cho Dock; 0.46 chỉ trả lại khoảng đó cho Google Maps. Giờ mọi app có mẹo layout (Apple Maps, Google Maps, YouTube Music, Vietmap) đều được trả lại khoảng đó nên nội dung lấp đầy ô. Log: TEMPLATE APPLY / TEMPLATE RESTORE.
 
 ## 0.46 — Google Maps trong ô, giữ YouTube khi kéo divider về cạnh
 

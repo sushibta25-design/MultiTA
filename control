@@ -1,8 +1,8 @@
 Package: com.sushibta.multita.beta
 Name: MultiTA Beta
-Version: 0.46.3
+Version: 0.49.3
 Architecture: iphoneos-arm64
-Description: MultiTA beta: CarPlay split screen, long-press the right edge and drag to split (30–70%).
+Description: MultiTA beta: CarPlay split screen, swipe right from the Dock to split (30–70%).
 Maintainer: sushibta25-design
 Author: sushibta25-design
 Section: Tweaks
