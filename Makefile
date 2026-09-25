@@ -8,6 +8,7 @@ TWEAK_NAME = MultiTABeta
 
 MultiTABeta_FILES = Tweak.xm
 MultiTABeta_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
+MultiTABeta_CCFLAGS = -std=c++11
 MultiTABeta_FRAMEWORKS = UIKit Foundation QuartzCore
 
 include $(THEOS_MAKE_PATH)/tweak.mk
