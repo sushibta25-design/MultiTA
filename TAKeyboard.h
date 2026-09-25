@@ -581,7 +581,8 @@ static void TAKBShow(NSString *bundle) {
     TAKBWindow.rootViewController=TAKBHost; TAKBWindow.hidden=NO;
     // Do not makeKeyWindow: the remote input must keep its focus and selection.
     floatingActions.hidden=YES;
-    TAHideSideActions();
+    // Shared keyboard is full-screen; hiding floating actions is sufficient here.
+    // The old TAHideSideActions helper no longer exists in the current MultiTA base.
     TALog(@"KEYBOARD OPEN side=%ld bundle=%@",(long)(slots[0]==r ? 0 : 1),bundle);
 }
 static void TAKBInstallHost(void) {
