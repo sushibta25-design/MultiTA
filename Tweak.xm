@@ -1,4 +1,4 @@
-// MultiTA 0.43.0 (beta, from TAduo): edge pull, collapse-to-edge, capsule handle, swap arrow, tap-count change mode, lightweight (diagnostics off).
+// MultiTA 0.44.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -25,7 +25,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.43.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.44.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -161,7 +161,8 @@ static void TAKickVideo(NSString *bundle, NSString *why);
 static NSMutableSet<NSString *> *hostedBundles;   // non-template apps shown in a pane this session
 // Largest app frame Dashboard has used natively on this display. A scene
 // frame smaller than this outside the split is one we left behind.
-static CGSize TANativeSize;
+static NSMutableDictionary<NSString *,NSValue *> *TANativeSizes;   // per app, learned outside the split
+static CGSize TANativeSizeFor(NSString *bundle) { return bundle ? [TANativeSizes[bundle] CGSizeValue] : CGSizeZero; }
 static UIWindowScene *TADashboard(void) {
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:UIWindowScene.class] && [s.session.persistentIdentifier containsString:@"DBDashboard-Car"])
@@ -243,9 +244,10 @@ static void TAResize(TARecord *r, CGSize size) {
     if (!r.frameCaptured) {
         CGRect original = CGRectZero;
         if (!TAReadFrame(scene, &original)) { TALog(@"RESIZE NO FRAME %@", r.bundle); return; }
-        if (TANativeSize.width>0 && original.size.width<TANativeSize.width-1) {
-            TALog(@"ORIGINAL FIXED %@ read=%@ native=%@",r.bundle,NSStringFromCGSize(original.size),NSStringFromCGSize(TANativeSize));
-            original=(CGRect){original.origin,TANativeSize};
+        CGSize known=TANativeSizeFor(r.bundle);
+        if (known.width>0 && original.size.width<known.width-1) {
+            TALog(@"ORIGINAL FIXED %@ read=%@ native=%@",r.bundle,NSStringFromCGSize(original.size),NSStringFromCGSize(known));
+            original=(CGRect){original.origin,known};
         }
         r.scene = scene; r.originalFrame = original; r.frameCaptured = YES;
     }
@@ -281,7 +283,7 @@ static void TACleanup(TARecord *r) {
     r.presentationID = nil; r.scene = nil; r.changed = NO; r.frameCaptured = NO; ++r.resizeSerial;
 }
 static NSString *TAAppName(NSString *bundle) {
-    return @{@"com.apple.Maps":@"Apple Maps",@"com.google.Maps":@"Google Maps",@"vn.vietmap.live":@"Vietmap Live",@"com.google.ios.youtubemusic":@"YouTube Music",@"com.google.ios.youtube":@"YouTube",@"com.apple.Music":@"Nhạc"}[bundle] ?: bundle;
+    return @{@"com.apple.Maps":@"Apple Maps",@"com.google.Maps":@"Google Maps",@"vn.vietmap.live":@"Vietmap Live",@"com.google.ios.youtubemusic":@"YouTube Music",@"com.google.ios.youtube":@"YouTube",@"com.apple.Music":@"Nhạc",@"vn.com.vng.zingalo":@"Zalo"}[bundle] ?: bundle;
 }
 static void TARememberPair(void) {
     if (!slots[0].presentation || !slots[1].presentation) return;
@@ -1537,6 +1539,18 @@ static UIButton *TAButton(NSString *title, SEL action) {
         else [self failAttach:slot bundle:bundle reason:@"not launchable"];
         return;
     }
+    // Apps bridged into CarPlay (not a CarPlay app, not Apple) that are not
+    // running: starting them while the split is up hung CarPlay (Zalo, 0.43).
+    // YouTube is the tested exception (waits for its first picture).
+    TARecord *known=records[bundle];
+    BOOL live=TADirectReady(known);
+    BOOL bridged=known ? [[TAValue(known.controller,@"sceneID") componentsSeparatedByString:@":"] count]==2 : TAValue(catalog[bundle],@"carPlayDeclaration")==nil;
+    if (!live && bridged && ![bundle hasPrefix:@"com.apple."] && ![bundle isEqual:@"com.google.ios.youtube"]) {
+        TALog(@"LAUNCH IN PANE refused cold bridged app %@",bundle);
+        [self failAttach:slot bundle:bundle reason:@"bridged app not running"];
+        [choose[slot] setTitle:[NSString stringWithFormat:@"Mở %@ ở ngoài trước\nrồi chọn lại",TAAppName(bundle)] forState:UIControlStateNormal];
+        return;
+    }
     if (launchBundle) {
         // One Dashboard launch at a time; queue this one.
         NSString *queued=[bundle copy]; NSUInteger token=generation;
@@ -1972,7 +1986,7 @@ static void TATick(void) {
         TAStop(@"display changed"); buttonWindow.hidden = YES; buttonWindow = nil;
         TARestoreDock(); [dockButton removeFromSuperview]; mountedDock=nil;
         [records removeAllObjects]; [order removeAllObjects]; dashboard = s;
-        nativeForeground=nil; edgeWindow.hidden=YES; edgeWindow=nil; TANativeSize=CGSizeZero;
+        nativeForeground=nil; edgeWindow.hidden=YES; edgeWindow=nil; [TANativeSizes removeAllObjects];
         TALog(@"DISPLAY %@", s.session.persistentIdentifier);
     }
     if (running && !CGRectEqualToRect(splitWindow.frame, s.coordinateSpace.bounds)) TAStop(@"display geometry changed");
@@ -2681,12 +2695,17 @@ static void TAUpdateEdge(void) {
         // (device photo: Google Maps full screen showing only ~208pt of map).
         id nativeScene=TAValue(self,@"scene"); CGRect f=CGRectZero;
         if (TAReadFrame(nativeScene,&f)) {
-            if (f.size.width>TANativeSize.width+0.5) TANativeSize=f.size;
-            else if (TANativeSize.width>0 && f.size.width<TANativeSize.width-1 && TAHasUpdater(nativeScene,@"updateSettingsWithBlock:")) {
-                CGRect fixed=(CGRect){f.origin,TANativeSize};
+            // Learned per app (0.43 learned one global size from a full-display
+            // app and restored others over the Dock). Never wider than the display.
+            if (!TANativeSizes) TANativeSizes=[NSMutableDictionary new];
+            CGSize known=TANativeSizeFor(bundle);
+            CGFloat displayWidth=dashboard.coordinateSpace.bounds.size.width;
+            if (f.size.width>known.width+0.5 && f.size.width<=displayWidth+0.5) TANativeSizes[bundle]=[NSValue valueWithCGSize:f.size];
+            else if (known.width>0 && f.size.width<known.width-1 && TAHasUpdater(nativeScene,@"updateSettingsWithBlock:")) {
+                CGRect fixed=(CGRect){f.origin,known};
                 @try {
                     ((void(*)(id,SEL,id))objc_msgSend)(nativeScene,NSSelectorFromString(@"updateSettingsWithBlock:"),^(id settings){ TASetFrame(settings,fixed); });
-                    TALog(@"NATIVE FRAME REPAIRED %@ %@ -> %@",bundle,NSStringFromCGSize(f.size),NSStringFromCGSize(TANativeSize));
+                    TALog(@"NATIVE FRAME REPAIRED %@ %@ -> %@",bundle,NSStringFromCGSize(f.size),NSStringFromCGSize(known));
                 } @catch (NSException *e) { TALog(@"NATIVE FRAME REPAIR error %@",e.name); }
             }
         }
@@ -2790,6 +2809,10 @@ static void TAUpdateEdge(void) {
         // YouTube is a full UIKit app bridged into CarPlay. It hung repeatedly
         // after being hosted; keep MultiTA code out of its process entirely.
         if ([process isEqual:@"com.google.ios.youtube"]) return;
+        // 0.44 stable base: all in-app layout experiments (45pt inset reclaim,
+        // tab-title/image-row compaction, scroll-rail hiding, Now Playing art)
+        // are off. Apps draw in a pane exactly as CarPlay renders them.
+        if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
             if (NSClassFromString(@"_UIStaticScrollBar")) {

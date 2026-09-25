@@ -1,6 +1,48 @@
-# MultiTA Beta 0.38.0
+# MultiTA Beta 0.44.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.44 — bản nền ổn định
+
+Không còn code nào chạy bên trong app: Filter chỉ còn com.apple.CarPlayApp và %ctor thoát với mọi tiến trình khác. Tắt toàn bộ thí nghiệm giao diện kế thừa TAduo (lấy lại 45pt bên trái, rút gọn tab, co hàng ảnh, ẩn thanh cuộn, bỏ ảnh bìa Now Playing). App template trong ô có thể dư dải trống bên trái; chữ tab có thể bị cắt. Sẽ bật lại từng thứ một sau khi nền ổn định.
+
+Sửa lỗi của 0.43: kích thước native học riêng cho từng app và không vượt độ rộng màn (0.43 học 426pt từ CleanTA rồi trả YouTube về 426pt, đè Dock).
+
+App đi qua cầu nối (không phải app CarPlay, không phải Apple, trừ YouTube) chưa chạy thì không mở vào ô: ô báo "Mở … ở ngoài trước rồi chọn lại" (Zalo làm CarPlay treo ngay lúc khởi động khi đang chia màn). App đó đã chạy thì mở vào ô như thường. Log: LAUNCH IN PANE refused cold bridged app.
+
+## 0.43 — sửa khung app bị kẹt ở cỡ ô, ô trống do view giả
+
+Ảnh 3 (Google Maps mở toàn màn sau khi thoát chia): bản đồ chỉ chiếm ~208pt, phần còn lại là hình nền — scene vẫn giữ cỡ ô. Nguyên nhân: "kích thước gốc" được đọc lúc gắn vào ô, nếu scene đang mang cỡ ô cũ thì khôi phục về đúng cỡ sai đó. Giờ tweak học kích thước app native lớn nhất trên màn này; không bao giờ lấy cỡ nhỏ hơn làm kích thước gốc (ORIGINAL FIXED), và khi một app lên toàn màn với khung nhỏ hơn thì tự sửa lại (NATIVE FRAME REPAIRED).
+
+Ảnh 1 (ô phải tối trống): Apple Maps gắn trực tiếp trả về UIView thường chứ không phải _UIScenePresentationView → ô không có app. View như vậy giờ bị huỷ và coi là "không có hình"; tự thử lại một lần qua Dashboard (AUTO RETRY via Dashboard).
+
+Bỏ lịch PANE CHECK của 0.42: view native của Dashboard không chứa context nào trong lúc ô đang hiển thị, nên phép so luôn rỗng.
+
+Còn mở: ô chỉ hiện hình nền với app template (YouTube Music lúc 11:26:08) dù đã mở qua Dashboard. Cần log template (/var/mobile/MultiTA-beta-template.log) cùng thời điểm.
+
+## 0.42 — tự phát hiện và dựng lại ô chỉ còn hình nền
+
+Log 0.41: mọi lần mở vào ô đều báo ATTACHED với surface=1 nhưng ô phải vẫn chỉ hiện hình nền. surface=1 chỉ nói có một lớp hiển thị từ xa, không nói lớp đó còn đúng. Giả thuyết: ô được tạo khi app vừa khởi động; app sau đó thay "ngữ cảnh vẽ" của mình, ô vẫn trỏ vào ngữ cảnh cũ.
+
+Kiểm tra sau khi gắn 1.5s và 4.5s: so các context id mà ô đang hiển thị với các context id mà chính Dashboard đang hiển thị cho app đó. Nếu không trùng cái nào, dựng lại riêng khung nhìn của ô (không đụng tới app), tối đa 3 lần. Mọi app mở vào ô (không riêng YouTube) giờ chờ hình gốc của app xuất hiện ≥1s (tối thiểu 1s, tối đa 4s; YouTube 2s/2s/6s). Log: PANE CHECK, PANE REFRESH.
+
+## 0.41 — app đang ở nền cũng mở qua Dashboard vào ô
+
+Log 0.40: ô phải (mở app qua Dashboard ngay trong ô) ổn; ô trái chọn YouTube rồi YouTube Music — cả hai đang ở nền — được kéo lên bằng lệnh foreground trực tiếp và ô chỉ còn hình nền. Giờ chỉ app đang hiển thị native ngay lúc đó mới được gắn trực tiếp; mọi app đang ở nền (kể cả app đi kèm khi kéo cạnh, và khi khôi phục cặp) đều được mở qua Dashboard ngay trong ô như 0.39–0.40. Mỗi lần chỉ một lệnh mở; lệnh thứ hai xếp hàng ("Chờ mở …"). App không có trong danh mục Dashboard thì gắn trực tiếp nếu còn cảnh sống. Log: LAUNCH IN PANE queued.
+
+## 0.40 — chờ YouTube sẵn sàng, không ghép app chạy ngầm, thử lại bằng cách mở lại
+
+Log 0.39 (máy sạch): YouTube được mở vào ô và gắn ~1s sau lần khởi chạy → CarPlay treo 48s (mất cảm ứng) → khởi động lại. Mở YouTube ngoài trước rồi mới chia thì ổn. Với app không phải template (YouTube), việc gắn vào ô chờ tới khi hình gốc của app (Dashboard vẽ phía sau cửa sổ chia màn) đã xuất hiện ≥2s, hoặc tối đa 6s kể từ lúc mở; không bao giờ sớm hơn 2s. App template vẫn gắn sau 0.8s yên. Thời gian chặn đưa-xuống-nền kéo dài thành 14s, hạn mở 16s. Log: LAUNCH IN PANE native picture seen.
+
+Kéo cạnh chỉ ghép với app người dùng thực sự mở trong phiên CarPlay này (có launch source) và lần gắn gần nhất có hình. Apple Maps tự khôi phục ngầm khi cắm (không có launch source) không còn được tự ghép.
+
+Gắn vào ô mà không có hình trong 8s: app bị đánh dấu; chạm thử lại (hoặc chọn lại app đó) sẽ mở nó qua Dashboard ngay trong ô thay vì gắn lại cảnh cũ.
+
+## 0.39 — mở app chưa chạy ngay trong ô, không rời chia màn
+
+Log 0.38: sau AUTO REJOIN, YouTube (bị đẩy xuống nền khi rời chia màn để mở app mới) được gắn lại và ô chỉ còn hình nền, tiếng vẫn chạy; VIDEO KICK không gỡ được. Kết luận: YouTube không vẽ lại sau khi bị đưa xuống nền rồi lên lại — nên không được để nó xuống nền.
+
+Chọn một app chưa có scene giờ giữ nguyên chia màn: ô đó hiện icon + "Đang mở …", Dashboard khởi chạy app ở phía sau cửa sổ chia màn, và ngay khi scene sẵn sàng (≥0.8s yên) app được gắn vào đúng ô. Trong tối đa 8 giây của lần mở này, nếu Dashboard định đẩy xuống nền một app đang hiển thị trong ô, yêu cầu đó bị từ chối (gọi completion luôn, đánh dấu để khi thoát chia màn mới đưa xuống nền đúng cách). Không còn hộp thoại "Đưa app vào bên nào?" cho app đang được mở vào ô. Quá 12 giây chưa lên thì ô báo lỗi, chạm để thử lại. Log: LAUNCH IN PANE, BACKGROUND DECLINED.
 
 ## 0.38 — giữ đúng cặp khi đổi sang app chưa mở, gỡ YouTube đứng hình
 
