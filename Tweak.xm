@@ -2651,6 +2651,61 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 %end
 #import "TAKeyboard.h"
 
+// YouTube iPad layout experiment. YouTube picks its iPhone or iPad UI from
+// the device idiom at launch; the iPad UI then sizes its feed grid from the
+// window width (1 column narrow, 2+ wide), so a resized split pane reflows
+// like iPad Split View. This is process-wide: YouTube on the phone screen
+// also gets the iPad UI. Set to 0 to turn it off.
+#define TA_YOUTUBE_IPAD 1
+%group TAYouTubeIPad
+%hook UIDevice
+- (UIUserInterfaceIdiom)userInterfaceIdiom { return UIUserInterfaceIdiomPad; }
+%end
+%end
+// YouTube's sandbox cannot write MultiTA's log, so it publishes what its
+// CarPlay window sees through notify state and CarPlay.app logs it.
+static NSString *const kTAYouTubeTraits=@"com.sushibta.multita.youtube-traits";
+static uint64_t TAYouTubePackTraits(void) {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *ws=(UIWindowScene *)scene;
+        if (![ws.session.persistentIdentifier hasPrefix:@"Car["]) continue;
+        UITraitCollection *t=ws.traitCollection; CGSize size=ws.coordinateSpace.bounds.size;
+        uint64_t device=((uint64_t)(UIDevice.currentDevice.userInterfaceIdiom+1)&0xff)<<56;
+        uint64_t trait=((uint64_t)(t.userInterfaceIdiom+1)&0xff)<<48;
+        uint64_t classes=(((uint64_t)t.horizontalSizeClass&0xf)<<44)|(((uint64_t)t.verticalSizeClass&0xf)<<40);
+        return device|trait|classes|(((uint64_t)MIN(MAX(size.width,0),65535))<<16)|(uint64_t)MIN(MAX(size.height,0),65535);
+    }
+    return 0;
+}
+static void TAYouTubeReportTraits(void) {
+    static int token=-1; static uint64_t last;
+    if (token<0 && notify_register_check(kTAYouTubeTraits.UTF8String,&token)!=NOTIFY_STATUS_OK) return;
+    uint64_t packed=TAYouTubePackTraits();
+    if (!packed || packed==last) return;
+    last=packed;
+    if (notify_set_state(token,packed)==NOTIFY_STATUS_OK) notify_post(kTAYouTubeTraits.UTF8String);
+}
+static void TAYouTubeStartTraitReports(void) {
+    static dispatch_source_t timer;
+    timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,0),1*NSEC_PER_SEC,200*NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer,^{ TAYouTubeReportTraits(); }); dispatch_resume(timer);
+}
+static void TAListenYouTubeTraits(void) {
+    int token;
+    notify_register_dispatch(kTAYouTubeTraits.UTF8String,&token,dispatch_get_main_queue(),^(int t) {
+        uint64_t p=0; if (notify_get_state(t,&p)!=NOTIFY_STATUS_OK || !p) return;
+        NSArray *idioms=@[@"unspecified",@"phone",@"pad",@"tv",@"carPlay",@"?",@"mac"];
+        NSArray *classes=@[@"unspecified",@"compact",@"regular"];
+        NSUInteger d=(NSUInteger)((p>>56)&0xff),i=(NSUInteger)((p>>48)&0xff),h=(NSUInteger)((p>>44)&0xf),v=(NSUInteger)((p>>40)&0xf);
+        TALog(@"YOUTUBE TRAITS device=%@ trait=%@ hClass=%@ vClass=%@ size=%llux%llu",
+              d<idioms.count ? idioms[d] : @(d), i<idioms.count ? idioms[i] : @(i),
+              h<classes.count ? classes[h] : @(h), v<classes.count ? classes[v] : @(v),
+              (p>>16)&0xffff, p&0xffff);
+    });
+}
+
 // 0.46: the only code in CarPlayTemplateUIHost — Google Maps inset reclaim.
 %group TAInsetOnly
 %hook UIWindow
@@ -2868,7 +2923,9 @@ static void TAUpdateEdge(void) {
         // after being hosted, so install no hooks there: only the shared
         // keyboard client, started after launch settles.
         if ([process isEqual:@"com.google.ios.youtube"]) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); });
+            // The idiom hook must be in place before YouTube builds its UI.
+            if (TA_YOUTUBE_IPAD) { %init(TAYouTubeIPad); }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAYouTubeStartTraitReports(); });
             return;
         }
         // 0.44 stable base: all in-app layout experiments (45pt inset reclaim,
@@ -2907,7 +2964,7 @@ static void TAUpdateEdge(void) {
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
-        dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallHost(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallHost(); TAListenYouTubeTraits(); });
         dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }

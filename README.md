@@ -1,6 +1,14 @@
-# MultiTA Beta 0.46.0
+# MultiTA Beta 0.46.2
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.46.2 — YouTube giao diện iPad trong ô (thử nghiệm)
+
+YouTube được cho là đang chạy trên iPad (hook duy nhất: UIDevice.userInterfaceIdiom), nên dùng giao diện iPad và tự chia cột theo độ rộng ô: ô hẹp 1 cột, ô rộng 2 cột, đổi ngay khi kéo divider. Cần tắt hẳn YouTube rồi mở lại một lần sau khi cài. Ảnh hưởng cả YouTube trên màn iPhone. Tắt: đặt `TA_YOUTUBE_IPAD` = 0 trong Tweak.xm. Log: `YOUTUBE TRAITS device=… trait=… hClass=… size=…` (YouTube gửi qua notify, CarPlay ghi hộ vì YouTube không ghi được file log).
+
+## 0.46.1 — bàn phím chung cho ô tìm kiếm YouTube
+
+YouTube được nạp lại nhưng chỉ chạy phần bàn phím chung (không hook giao diện), khởi động sau 2s. Ô nhập được tìm qua firstResponder của cửa sổ vì cây view YouTube vượt giới hạn 500 view.
 
 ## 0.46 — Google Maps trong ô, giữ YouTube khi kéo divider về cạnh
 
