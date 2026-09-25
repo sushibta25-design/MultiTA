@@ -158,6 +158,7 @@ static NSArray<NSString *> *TAClientBundles(void);
 static void TASetLayoutTarget(NSString *bundle, CGSize size);
 static void TAUpdateEdge(void);
 static void TAKickVideo(NSString *bundle, NSString *why);
+static void TAHideSideActions(void);
 static NSMutableSet<NSString *> *hostedBundles;   // non-template apps shown in a pane this session
 // Largest app frame Dashboard has used natively on this display. A scene
 // frame smaller than this outside the split is one we left behind.
