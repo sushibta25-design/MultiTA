@@ -1,4 +1,4 @@
-// MultiTA 0.49.0 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.49.1 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -742,14 +742,14 @@ static CAShapeLayer *funBody, *funTeeth, *funPupil;
 static UILabel *funMouse, *funMouseSay, *funMonsterSay;
 static UILabel *TAFunBubble(void) {
     UILabel *l=[UILabel new];
-    l.font=[UIFont systemFontOfSize:11 weight:UIFontWeightBold]; l.textColor=UIColor.blackColor;
+    l.font=[UIFont systemFontOfSize:13 weight:UIFontWeightBold]; l.textColor=UIColor.blackColor;
     l.backgroundColor=[UIColor colorWithWhite:1 alpha:0.92]; l.textAlignment=NSTextAlignmentCenter;
-    l.layer.cornerRadius=8; l.clipsToBounds=YES; l.alpha=0;
+    l.layer.cornerRadius=10; l.clipsToBounds=YES; l.alpha=0;
     return l;
 }
 static void TAFunSay(UILabel *bubble, NSString *text, CGPoint anchor) {
     bubble.text=text;
-    CGSize size=CGSizeMake(ceil([text sizeWithAttributes:@{NSFontAttributeName:bubble.font}].width)+14,20);
+    CGSize size=CGSizeMake(ceil([text sizeWithAttributes:@{NSFontAttributeName:bubble.font}].width)+16,24);
     bubble.bounds=(CGRect){CGPointZero,size}; bubble.center=anchor; bubble.alpha=text.length ? 1 : 0;
 }
 // Pac-Man style body facing left; open = half-angle of the mouth (radians).
@@ -818,9 +818,12 @@ static void TAFunUpdate(void) {
     brow.path=b.CGPath;
     [CATransaction commit];
     CGFloat shake=p>0.72 ? (CGFloat)(arc4random_uniform(5))-2 : 0;
-    funMouse.center=CGPointMake(cx-funMouse.bounds.size.width/2-6+shake,my+shake*0.6);
+    // Mouse sits 22pt left of the divider; its bubble ends 16pt short of it.
+    funMouse.center=CGPointMake(cx-funMouse.bounds.size.width/2-22+shake,my+shake*0.6);
     NSString *line=p<0.33 ? @"Ơ… đi đâu đây?" : p<0.72 ? @"Hình như có mùi…" : @"CỨU TÔI!!!";
-    TAFunSay(funMouseSay,line,CGPointMake(MAX(40,funMouse.center.x),my-34));
+    TAFunSay(funMouseSay,line,CGPointZero);
+    CGFloat half=funMouseSay.bounds.size.width/2;
+    funMouseSay.center=CGPointMake(MAX(half+4,cx-16-half),my-38);
     TAFunSay(funMonsterSay,p>0.45 ? @"Măm măm…" : @"",CGPointMake(mx,my-r-14));
 }
 static void TAFunEnd(BOOL eaten) {
@@ -1521,7 +1524,9 @@ static UIButton *TAButton(NSString *title, SEL action) {
     railIcon.tintColor=UIColor.lightGrayColor;
     for (NSInteger i=0;i<2;i++) {
         NSString *bundle=i==pullCurrentSlot ? current : companion;
-        [choose[i] setTitle:bundle ? @"" : @"Chọn ứng dụng" forState:UIControlStateNormal];
+        // No "Chọn ứng dụng" while the mouse-and-monster show runs; the
+        // empty-pane prompt returns in -finishPull: if the pane stays empty.
+        [choose[i] setTitle:@"" forState:UIControlStateNormal];
         [choose[i] setImage:bundle ? TAAppIcon(bundle) : nil forState:UIControlStateNormal];
         choose[i].enabled=NO; choose[i].adjustsImageWhenDisabled=NO;
     }
