@@ -2868,30 +2868,9 @@ static void TAUpdateEdge(void) {
             dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); });
             return;
         }
-        if (![process isEqual:@"com.apple.CarPlayApp"]) return;
-        if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
-            %init(TAClient);
-            if (NSClassFromString(@"_UIStaticScrollBar")) {
-                %init(TAScrollRail);
-                dispatch_async(dispatch_get_main_queue(), ^{ TAListenScrollBars(); });
-            }
-            if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
-                %init(TACompactHome);
-                if (NSClassFromString(@"CPSImageRowCell")) {
-                    %init(TAImageRowExperiment);
-                }
-                Class cls=NSClassFromString(@"CPUINowPlayingView");
-                SEL selector=NSSelectorFromString(@"recalculateLayout:allowsAlbumArt:hasDataSource:viewArea:safeArea:rightHandDrive:");
-                Method method=class_getInstanceMethod(cls,selector);
-                const char *encoding=method ? method_getTypeEncoding(method) : NULL;
-                if (encoding && strcmp(encoding,"v96@0:8B16B20B24{CGRect={CGPoint=dd}{CGSize=dd}}28{CGRect={CGPoint=dd}{CGSize=dd}}60B92")==0) {
-                    %init(TANowPlayingExperiment);
-                    TALog(@"NATIVE LAYOUT HOOK enabled");
-                } else TALog(@"NATIVE LAYOUT HOOK skipped encoding=%s",encoding ?: "missing");
-                dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); TAListenSnapshots(); });
-            }
-            return;
-        }
+        // (Former per-app client branch removed: unreachable since 0.44, and
+        // Logos rejects a second %init of the groups now used above.)
+        (void)&TAListenScrollBars; (void)&TAListenSnapshots;   // kept for later re-enable; silence unused warnings
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
