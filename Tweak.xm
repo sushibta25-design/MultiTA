@@ -1754,6 +1754,200 @@ static void TAListenScrollBars(void) {
         });
     }
 }
+
+// ---- Shared split keyboard -------------------------------------------------
+// One full-width keyboard is owned by CarPlay.app. Split client processes keep
+// their real first responder, suppress the pane-sized native keyboard, and
+// receive text commands through a tiny Darwin-notify + plist IPC channel.
+static NSString *const kTAKeyboardPayload=@"/var/mobile/Library/Preferences/com.sushibta.multita.keyboard.plist";
+static NSString *const kTAKeyboardFocusNotify=@"com.sushibta.multita.keyboard.focus";
+static NSString *const kTAKeyboardCommandNotify=@"com.sushibta.multita.keyboard.command";
+static __weak id TAKeyboardResponder=nil;
+static UIWindow *TAKeyboardWindow=nil;
+static NSString *TAKeyboardBundle=nil;
+static BOOL TAKeyboardSymbols=NO, TAKeyboardShift=NO;
+static NSUInteger TAKeyboardSequence=0;
+
+static void TAKeyboardWrite(NSDictionary *payload) {
+    if (!payload) return;
+    NSMutableDictionary *p=[payload mutableCopy];
+    p[@"seq"]=@(++TAKeyboardSequence);
+    [p writeToFile:kTAKeyboardPayload atomically:YES];
+}
+static NSDictionary *TAKeyboardRead(void) {
+    NSDictionary *p=[NSDictionary dictionaryWithContentsOfFile:kTAKeyboardPayload];
+    return [p isKindOfClass:NSDictionary.class] ? p : nil;
+}
+static NSString *TAKeyboardFocusedBundle(void) {
+    NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
+    if ([bundle isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            NSString *sid=scene.session.persistentIdentifier ?: @"";
+            NSArray *parts=[sid componentsSeparatedByString:@":"];
+            if (parts.count==3 && [parts[1] isEqual:@"com.apple.CarPlayTemplateUIHost"]) return parts.lastObject;
+        }
+    }
+    return bundle;
+}
+static UISearchBar *TAKeyboardSearchBar(UIView *view) {
+    for (UIView *v=view;v;v=v.superview) if ([v isKindOfClass:UISearchBar.class]) return (UISearchBar *)v;
+    return nil;
+}
+static void TAKeyboardDirectCancel(id responder) {
+    UIView *view=[responder isKindOfClass:UIView.class] ? responder : nil;
+    UISearchBar *bar=TAKeyboardSearchBar(view);
+    if (bar) {
+        bar.text=@"";
+        id delegate=bar.delegate;
+        if ([delegate respondsToSelector:@selector(searchBarCancelButtonClicked:)])
+            [delegate searchBarCancelButtonClicked:bar];
+        [bar resignFirstResponder];
+        return;
+    }
+    if ([responder respondsToSelector:@selector(resignFirstResponder)]) [responder resignFirstResponder];
+}
+static void TAKeyboardClientFocus(id responder) {
+    UIWindow *w=[responder isKindOfClass:UIView.class] ? ((UIView *)responder).window : nil;
+    NSString *bundle=nil;
+    if (!TAInputTarget(w,&bundle)) return;
+    TAKeyboardResponder=responder;
+    TAKeyboardWrite(@{@"type":@"focus",@"bundle":bundle ?: TAKeyboardFocusedBundle() ?: @""});
+    notify_post(kTAKeyboardFocusNotify.UTF8String);
+}
+static void TAKeyboardClientBlur(id responder) {
+    if (TAKeyboardResponder!=responder) return;
+    NSString *bundle=TAKeyboardFocusedBundle() ?: @"";
+    TAKeyboardResponder=nil;
+    TAKeyboardWrite(@{@"type":@"blur",@"bundle":bundle});
+    notify_post(kTAKeyboardFocusNotify.UTF8String);
+}
+static void TAKeyboardApplyCommand(void) {
+    NSDictionary *p=TAKeyboardRead();
+    NSString *bundle=p[@"bundle"], *mine=TAKeyboardFocusedBundle();
+    if (!TAKeyboardResponder || ![bundle isKindOfClass:NSString.class] || ![bundle isEqual:mine]) return;
+    NSString *op=p[@"op"], *value=p[@"text"];
+    id r=TAKeyboardResponder;
+    if ([op isEqual:@"insert"] && [value isKindOfClass:NSString.class] && [r respondsToSelector:@selector(insertText:)]) {
+        [r insertText:value];
+    } else if ([op isEqual:@"delete"] && [r respondsToSelector:@selector(deleteBackward)]) {
+        [r deleteBackward];
+    } else if ([op isEqual:@"return"]) {
+        if ([r respondsToSelector:@selector(insertText:)]) [r insertText:@"\n"];
+        [r resignFirstResponder];
+    } else if ([op isEqual:@"cancel"]) {
+        TAKeyboardDirectCancel(r);
+        TAKeyboardResponder=nil;
+    }
+}
+static void TAKeyboardListenClient(void) {
+    int token=0;
+    notify_register_dispatch(kTAKeyboardCommandNotify.UTF8String,&token,dispatch_get_main_queue(),^(__unused int delivered){
+        TAKeyboardApplyCommand();
+    });
+}
+static void TAKeyboardSend(NSString *op, NSString *text) {
+    if (!TAKeyboardBundle.length) return;
+    NSMutableDictionary *p=[@{@"type":@"command",@"bundle":TAKeyboardBundle,@"op":op ?: @""} mutableCopy];
+    if (text) p[@"text"]=text;
+    TAKeyboardWrite(p);
+    notify_post(kTAKeyboardCommandNotify.UTF8String);
+}
+static UIButton *TAKeyboardKey(NSString *title, NSInteger tag) {
+    UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem];
+    b.tag=tag; [b setTitle:title forState:UIControlStateNormal];
+    [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    b.titleLabel.font=[UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    b.backgroundColor=[UIColor colorWithWhite:0.20 alpha:1];
+    b.layer.cornerRadius=6; b.clipsToBounds=YES;
+    return b;
+}
+@interface TAKeyboardTarget : NSObject
+- (void)key:(UIButton *)sender;
+@end
+static TAKeyboardTarget *TAKeyboardControls=nil;
+static void TAKeyboardRender(void);
+@implementation TAKeyboardTarget
+- (void)key:(UIButton *)sender {
+    NSString *t=[sender titleForState:UIControlStateNormal] ?: @"";
+    if (sender.tag==900) { TAKeyboardSymbols=!TAKeyboardSymbols; TAKeyboardShift=NO; TAKeyboardRender(); return; }
+    if (sender.tag==901) { TAKeyboardShift=!TAKeyboardShift; TAKeyboardRender(); return; }
+    if (sender.tag==902) { TAKeyboardSend(@"delete",nil); return; }
+    if (sender.tag==903) { TAKeyboardSend(@"insert",@" "); return; }
+    if (sender.tag==904) { TAKeyboardSend(@"return",nil); TAKeyboardWindow.hidden=YES; return; }
+    if (sender.tag==905) { TAKeyboardSend(@"cancel",nil); TAKeyboardWindow.hidden=YES; return; }
+    if (sender.tag==906) { return; } // VI indicator; text path stays Unicode-safe.
+    if (TAKeyboardShift) t=t.uppercaseString;
+    TAKeyboardSend(@"insert",t);
+    if (TAKeyboardShift) { TAKeyboardShift=NO; TAKeyboardRender(); }
+}
+@end
+static void TAKeyboardRender(void) {
+    UIView *root=TAKeyboardWindow.rootViewController.view;
+    if (!root) return;
+    [root.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
+    root.backgroundColor=[UIColor colorWithWhite:0.035 alpha:0.985];
+    CGSize z=root.bounds.size;
+    CGFloat pad=5, top=4, rowGap=4, rows=5;
+    CGFloat rh=(z.height-top*2-rowGap*(rows-1))/rows;
+    NSArray *layout=TAKeyboardSymbols ?
+        @[@[@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"0"],
+          @[@"!",@"@",@"#",@"$",@"%",@"^",@"&",@"*",@"(",@")"],
+          @[@"-",@"/",@":",@";",@"(",@")",@"₫",@"&",@"@",@"\""],
+          @[@"#+=",@",",@".",@"?",@"!",@"'",@"⌫"],
+          @[@"VI",@"Hủy",@"Dấu cách",@"Tìm"]] :
+        @[@[@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"0"],
+          @[@"q",@"w",@"e",@"r",@"t",@"y",@"u",@"i",@"o",@"p"],
+          @[@"a",@"s",@"d",@"f",@"g",@"h",@"j",@"k",@"l"],
+          @[@"⇧",@"z",@"x",@"c",@"v",@"b",@"n",@"m",@"⌫"],
+          @[@"#+=",@"VI",@"Hủy",@"Dấu cách",@"Tìm"]];
+    for (NSUInteger r=0;r<layout.count;r++) {
+        NSArray *keys=layout[r]; CGFloat y=top+r*(rh+rowGap);
+        CGFloat units=0;
+        for (NSString *k in keys) units += [k isEqual:@"Dấu cách"] ? 3.0 : ([k isEqual:@"Hủy"]||[k isEqual:@"Tìm"] ? 1.45 : 1.0);
+        CGFloat available=z.width-pad*2-pad*(keys.count-1), unit=available/units, x=pad;
+        for (NSString *k in keys) {
+            CGFloat mult=[k isEqual:@"Dấu cách"] ? 3.0 : ([k isEqual:@"Hủy"]||[k isEqual:@"Tìm"] ? 1.45 : 1.0);
+            NSInteger tag=0;
+            if ([k isEqual:@"#+="]) tag=900; else if ([k isEqual:@"⇧"]) tag=901; else if ([k isEqual:@"⌫"]) tag=902;
+            else if ([k isEqual:@"Dấu cách"]) tag=903; else if ([k isEqual:@"Tìm"]) tag=904;
+            else if ([k isEqual:@"Hủy"]) tag=905; else if ([k isEqual:@"VI"]) tag=906;
+            UIButton *b=TAKeyboardKey(k,tag); b.frame=CGRectMake(x,y,unit*mult,rh);
+            if (tag==905) b.backgroundColor=[UIColor colorWithRed:0.42 green:0.10 blue:0.10 alpha:1];
+            if (tag==904) b.backgroundColor=TACyan();
+            if (tag==900 || tag==906) b.backgroundColor=[UIColor colorWithWhite:0.12 alpha:1];
+            [b addTarget:TAKeyboardControls action:@selector(key:) forControlEvents:UIControlEventTouchUpInside];
+            [root addSubview:b]; x+=unit*mult+pad;
+        }
+    }
+}
+static void TAKeyboardShowForBundle(NSString *bundle) {
+    if (!running || !dashboard || !bundle.length) return;
+    BOOL selected=[slots[0].bundle isEqual:bundle] || [slots[1].bundle isEqual:bundle];
+    if (!selected) return;
+    TAKeyboardBundle=[bundle copy];
+    if (!TAKeyboardControls) TAKeyboardControls=[TAKeyboardTarget new];
+    if (!TAKeyboardWindow || TAKeyboardWindow.windowScene!=dashboard) {
+        TAKeyboardWindow=[[UIWindow alloc] initWithWindowScene:dashboard];
+        TAKeyboardWindow.windowLevel=UIWindowLevelAlert+140;
+        TAKeyboardWindow.rootViewController=[UIViewController new];
+    }
+    TAKeyboardWindow.frame=dashboard.coordinateSpace.bounds;
+    TAKeyboardWindow.hidden=NO;
+    TAKeyboardRender();
+    TALog(@"KEYBOARD show bundle=%@",bundle);
+}
+static void TAKeyboardListenHost(void) {
+    int token=0;
+    notify_register_dispatch(kTAKeyboardFocusNotify.UTF8String,&token,dispatch_get_main_queue(),^(__unused int delivered){
+        NSDictionary *p=TAKeyboardRead();
+        NSString *type=p[@"type"], *bundle=p[@"bundle"];
+        if ([type isEqual:@"focus"]) TAKeyboardShowForBundle(bundle);
+        else if ([type isEqual:@"blur"] && [bundle isEqual:TAKeyboardBundle]) TAKeyboardWindow.hidden=YES;
+    });
+}
+
+
 // Change only native tab item titles. UIKit still owns all button geometry.
 static NSHashTable<UITabBar *> *TACompactTabBars;
 static char TATabTitleKey, TATabBusyKey;
@@ -2257,6 +2451,42 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 %end
 %end
 %group TAClient
+%hook UITextField
+- (BOOL)becomeFirstResponder {
+    NSString *bundle=nil; BOOL split=TAInputTarget(self.window,&bundle);
+    if (split) {
+        UIView *blank=[[UIView alloc] initWithFrame:CGRectMake(0,0,1,1)];
+        blank.backgroundColor=UIColor.clearColor;
+        self.inputView=blank;
+    }
+    BOOL ok=%orig;
+    if (ok && split) { [self reloadInputViews]; TAKeyboardClientFocus(self); }
+    return ok;
+}
+- (BOOL)resignFirstResponder {
+    BOOL ok=%orig;
+    if (ok) TAKeyboardClientBlur(self);
+    return ok;
+}
+%end
+%hook UITextView
+- (BOOL)becomeFirstResponder {
+    NSString *bundle=nil; BOOL split=TAInputTarget(self.window,&bundle);
+    if (split) {
+        UIView *blank=[[UIView alloc] initWithFrame:CGRectMake(0,0,1,1)];
+        blank.backgroundColor=UIColor.clearColor;
+        self.inputView=blank;
+    }
+    BOOL ok=%orig;
+    if (ok && split) { [self reloadInputViews]; TAKeyboardClientFocus(self); }
+    return ok;
+}
+- (BOOL)resignFirstResponder {
+    BOOL ok=%orig;
+    if (ok) TAKeyboardClientBlur(self);
+    return ok;
+}
+%end
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
@@ -2406,6 +2636,7 @@ static void TAUpdateEdge(void) {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
         if ([TAClientBundles() containsObject:process] || [process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAClient);
+            TAKeyboardListenClient();
             if (NSClassFromString(@"_UIStaticScrollBar")) {
                 %init(TAScrollRail);
                 dispatch_async(dispatch_get_main_queue(), ^{ TAListenScrollBars(); });
@@ -2430,6 +2661,7 @@ static void TAUpdateEdge(void) {
         if (![process isEqual:@"com.apple.CarPlayApp"]) return;
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
+        TAKeyboardListenHost();
         dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }
