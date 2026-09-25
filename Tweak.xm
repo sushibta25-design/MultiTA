@@ -1,4 +1,4 @@
-// MultiTA 0.48.3 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
+// MultiTA 0.48.4 (beta, from TAduo) STABLE BASE: no code inside apps, per-app native size, bridged apps must be open first.
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <math.h>
@@ -26,7 +26,7 @@ static void TALog(NSString *format, ...) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.3] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.48.4] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -143,7 +143,7 @@ static BOOL dragMoved;
 // Hold ≥1s on the divider/handle opens the Tác vụ page (greeting card).
 static NSUInteger holdSerial;
 static BOOL holdFired;
-static const CGFloat kTADragSlop=9;
+static const CGFloat kTADragSlop=5;
 static __weak UIWindowScene *dashboard;
 static BOOL running, ownCall;
 static NSArray<NSString *> *resumeBundles;
@@ -600,8 +600,10 @@ static void TADumpDock(void) {
 @interface TADividerView : UIView
 @end
 @implementation TADividerView
+// Touch width = visible width + 14pt each side (44pt on a 426pt display):
+// the divider must be easy to grab while driving.
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    return CGRectContainsPoint(CGRectInset(self.bounds,-6,0),point);
+    return CGRectContainsPoint(CGRectInset(self.bounds,-14,0),point);
 }
 @end
 static CGFloat TADividerWidth(CGFloat width) { return MAX(16,2*round(width*0.015)); }
@@ -1304,7 +1306,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
             TALog(@"DOCK SWIPE start x=%.1f dockRight=%.1f current=%@",x,dockZoneRight,nativeForeground ?: @"-");
             // fall through: the finger may already be past the Dock
         case UIGestureRecognizerStateChanged:
-            if (!staged && x>dockZoneRight+4 && ![self beginPullFromLeft]) { gesture.enabled=NO; gesture.enabled=YES; break; }
+            // Slide the divider out as soon as the finger nears the Dock edge.
+            if (!staged && x>dockZoneRight-8 && ![self beginPullFromLeft]) { gesture.enabled=NO; gesture.enabled=YES; break; }
             if (staged) TALayoutPull(x/width);
             break;
         case UIGestureRecognizerStateEnded:
@@ -1325,7 +1328,8 @@ static UIButton *TAButton(NSString *title, SEL action) {
     CGPoint moved=[pan translationInView:view];
     CGPoint now=[view convertPoint:[pan locationInView:view] toCoordinateSpace:dashboard.coordinateSpace];
     CGFloat startX=now.x-moved.x;
-    BOOL begin=moved.x>0 && fabs(moved.x)>fabs(moved.y)*1.2 && startX<=dockZoneRight;
+    // Diagonal swipes count too (right component at least 0.6x the vertical).
+    BOOL begin=moved.x>0 && moved.x>=fabs(moved.y)*0.6 && startX<=dockZoneRight;
     if (!begin && startX<=dockZoneRight+40) {
         static NSTimeInterval lastLog;
         NSTimeInterval t=NSProcessInfo.processInfo.systemUptime;
@@ -2853,7 +2857,7 @@ static void TAUpdateEdge(void) {
     // Test car (426x240): the Dock is ~14% of the width; the clock/Wi-Fi block
     // ends at ~19% and the first Dock icon starts at ~30% of the height.
     CGRect b=s.coordinateSpace.bounds;
-    CGRect zone=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(44,round(b.size.width*0.14)),round(b.size.height*0.28));
+    CGRect zone=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(44,round(b.size.width*0.14)),round(b.size.height*0.29));
     if (!CGRectEqualToRect(dockTopWindow.frame,zone)) {
         dockTopWindow.frame=zone;
         dockZoneRight=CGRectGetMaxX(zone)-CGRectGetMinX(b);

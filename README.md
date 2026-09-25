@@ -1,6 +1,10 @@
-# MultiTA Beta 0.48.3
+# MultiTA Beta 0.48.4
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.48.4 — divider và vuốt Dock nhạy hơn
+
+Khó bắt divider khi lái xe. Vùng chạm divider rộng thêm: +14pt mỗi bên (44pt trên màn 426pt, trước 28pt); phần nhìn thấy không đổi. Divider bắt đầu chạy theo tay sau 5pt (trước 9pt). Vuốt Dock: divider xổ ra ngay khi ngón tay tới gần mép Dock (trước phải qua mép +4pt), chấp nhận vuốt chéo (thành phần ngang ≥ 0,6 lần dọc; trước phải gần như ngang), vùng vuốt cao 29% màn hình.
 
 ## 0.48.3 — vùng vuốt không còn trong suốt hoàn toàn
 
