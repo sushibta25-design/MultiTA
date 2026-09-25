@@ -2869,6 +2869,16 @@ static void TAUpdateEdge(void) {
 
         if ([process isEqual:@"com.apple.CarPlayTemplateUIHost"]) {
             %init(TAInsetOnly);
+            // Keep the current MultiTA client groups initialized exactly as on
+            // the last green baseline. Keyboard restoration must not bypass
+            // Logos group initialization.
+            %init(TACompactHome);
+            if (NSClassFromString(@"CPSImageRowCell")) { %init(TAImageRowExperiment); }
+            if (kTALegacyClientHooks) {
+                %init(TAClient);
+                %init(TAScrollRail);
+                %init(TANowPlayingExperiment);
+            }
             dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallClients(); });
             dispatch_async(dispatch_get_main_queue(), ^{ TAListenTemplateTargets(); });
             return;
