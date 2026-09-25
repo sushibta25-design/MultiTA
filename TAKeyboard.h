@@ -385,12 +385,13 @@ static void TAKBHostStop(void) {
 - (void)buildKeys {
     for (UIView *v in self.panel.subviews) [v removeFromSuperview];
     NSArray<NSArray<NSString *> *> *labels=self.numbers ?
-        @[@[@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"0"],
-          @[@"-",@"/",@":",@";",@"(",@")",@"₫",@"&",@"@"],
+        @[@[@"@",@"#",@"$",@"%",@"&",@"*",@"+",@"=",@"_",@"€"],
+          @[@"-",@"/",@":",@";",@"(",@")",@"₫",@"[",@"]"],
           @[@".",@",",@"?",@"!",@"'",@"\"",@"⌫"],@[@"ABC",self.english ? @"EN" : @"VI",@"Dấu cách",@"Tìm"]] :
-        @[@[@"Q",@"W",@"E",@"R",@"T",@"Y",@"U",@"I",@"O",@"P"],
+        @[@[@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"0"],
+          @[@"Q",@"W",@"E",@"R",@"T",@"Y",@"U",@"I",@"O",@"P"],
           @[@"A",@"S",@"D",@"F",@"G",@"H",@"J",@"K",@"L"],
-          @[@"⇧",@"Z",@"X",@"C",@"V",@"B",@"N",@"M",@"⌫"],@[@"123",self.english ? @"EN" : @"VI",@"Dấu cách",@"Tìm"]];
+          @[@"⇧",@"Z",@"X",@"C",@"V",@"B",@"N",@"M",@"⌫"],@[@"#+=",self.english ? @"EN" : @"VI",@"Dấu cách",@"Tìm"]];
     NSMutableArray *rows=[NSMutableArray new];
     for (NSArray *row in labels) {
         NSMutableArray *keys=[NSMutableArray new];
@@ -416,11 +417,14 @@ static void TAKBHostStop(void) {
     self.panel.frame=CGRectMake(margin,top+2*margin,w-2*margin,MAX(1,h-top-3*margin));
     CGFloat pw=self.panel.bounds.size.width,ph=self.panel.bounds.size.height;
     NSUInteger rowCount=self.rows.count;
-    CGFloat kh=MAX(1,(ph-(rowCount+1)*gap)/MAX(1,(CGFloat)rowCount));
+    BOOL hasDigitRow=!self.numbers;
+    CGFloat digitWeight=0.8;
+    CGFloat units=hasDigitRow ? (CGFloat)rowCount-1+digitWeight : (CGFloat)rowCount;
+    CGFloat kh=MAX(1,(ph-(rowCount+1)*gap)/MAX(1,units));
     CGFloat kw=MAX(1,(pw-11*gap)/10), y=gap;
     for (NSUInteger r=0;r<rowCount;r++) {
         NSArray<UIButton *> *keys=self.rows[r];
-        CGFloat rowHeight=kh;
+        CGFloat rowHeight=(hasDigitRow && r==0) ? kh*digitWeight : kh;
         if (r==rowCount-1) {
             CGFloat small=(pw-5*gap)*0.15,space=pw-5*gap-3*small;
             keys[0].frame=CGRectMake(gap,y,small,rowHeight);
@@ -444,7 +448,7 @@ static void TAKBHostStop(void) {
     NSString *label=sender.accessibilityIdentifier;
     if ([label isEqual:@"VI"] || [label isEqual:@"EN"]) { self.english=!self.english; [self buildKeys]; return; }
     if ([label isEqual:@"⇧"]) { self.shifted=!self.shifted; [self buildKeys]; return; }
-    if ([label isEqual:@"123"] || [label isEqual:@"ABC"]) { self.numbers=!self.numbers; [self buildKeys]; return; }
+    if ([label isEqual:@"#+="] || [label isEqual:@"ABC"]) { self.numbers=!self.numbers; [self buildKeys]; return; }
     if ([label isEqual:@"×"]) { if (self.stalled) TAKBHostStop(); else [self enqueue:3 scalar:0]; return; }
     if ([label isEqual:@"⌫"]) { [self enqueue:1 scalar:0]; return; }
     if ([label isEqual:@"Tìm"]) { [self enqueue:2 scalar:0]; return; }
