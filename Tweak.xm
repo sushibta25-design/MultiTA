@@ -64,14 +64,14 @@ static void TALog(NSString *format, ...) {
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.49.6] [%@] %@",time,bundle,s]); return; }
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.49.7] [%@] %@",time,bundle,s]); return; }
             NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.6] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.7] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -3022,6 +3022,24 @@ static void TAPublishYouTubeSwitch(void) {
 }
 #define TA_YOUTUBE_REGULAR_WIDTH 250
 static CGFloat TAYouTubeCarWidth; // cached on the main thread by the trait timer; 0 = no CarPlay scene
+// 0.49.6 log: with the iPad hook NOT installed (CTOR ipad=0) YouTube still
+// reported device=pad trait=pad and kept CTTabletContainer, so another hook
+// (a YouTube tweak's "iPad layout") or YouTube's own cache forces the iPad
+// idiom. With the switch off, answer phone explicitly; the ctor logs which
+// image implemented userInterfaceIdiom before MultiTA touched it.
+%group TAYouTubePhone
+%hook UIDevice
+- (UIUserInterfaceIdiom)userInterfaceIdiom { UIUserInterfaceIdiom i=%orig; return i==UIUserInterfaceIdiomPad ? UIUserInterfaceIdiomPhone : i; }
+%end
+%hook UITraitCollection
+- (UIUserInterfaceIdiom)userInterfaceIdiom { UIUserInterfaceIdiom i=%orig; return i==UIUserInterfaceIdiomPad ? UIUserInterfaceIdiomPhone : i; }
+%end
+%end
+static NSString *TAImplementationImage(Class cls, SEL sel) {
+    Method m=class_getInstanceMethod(cls,sel); if (!m) return @"missing";
+    Dl_info info; if (!dladdr((const void *)method_getImplementation(m),&info) || !info.dli_fname) return @"unknown";
+    return [[NSString stringWithUTF8String:info.dli_fname] lastPathComponent];
+}
 %group TAYouTubeIPad
 %hook UIDevice
 - (UIUserInterfaceIdiom)userInterfaceIdiom { return UIUserInterfaceIdiomPad; }
@@ -3079,6 +3097,40 @@ static void TAStartVideoZoom(void) {
     timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
     dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,0),250*NSEC_PER_MSEC,50*NSEC_PER_MSEC);
     dispatch_source_set_event_handler(timer,^{ TAZoomCarWindows(); }); dispatch_resume(timer);
+}
+// Log how a bridged app laid out its CarPlay windows 1.5 s after every
+// scene size change: window frame/bounds/transform/safe area, root view and
+// its first children. Finds offsets such as Netflix's right shift.
+static void TADumpCarWindows(NSString *why) {
+    UIWindowScene *ws=TAYouTubeScene(YES); if (!ws) return;
+    TALog(@"CARLAYOUT %@ scene=%@ screen=%@",why,NSStringFromCGRect(ws.coordinateSpace.bounds),NSStringFromCGRect(ws.screen.bounds));
+    for (UIWindow *w in ws.windows) {
+        UIViewController *vc=w.rootViewController; UIView *root=vc.viewIfLoaded;
+        TALog(@"CARLAYOUT window %@ hidden=%d frame=%@ bounds=%@ transform=%@ safe=%@ rootVC=%@ root=%@ rootSafe=%@ additional=%@ presented=%@",
+              NSStringFromClass(w.class),w.hidden,NSStringFromCGRect(w.frame),NSStringFromCGRect(w.bounds),NSStringFromCGAffineTransform(w.transform),
+              NSStringFromUIEdgeInsets(w.safeAreaInsets),NSStringFromClass(vc.class),NSStringFromCGRect(root.frame),
+              NSStringFromUIEdgeInsets(root.safeAreaInsets),NSStringFromUIEdgeInsets(vc.additionalSafeAreaInsets),
+              NSStringFromClass(vc.presentedViewController.class));
+        NSMutableArray *kids=[NSMutableArray new];
+        for (UIView *c in root.subviews) {
+            if (kids.count>=8) break;
+            NSMutableString *e=[NSMutableString stringWithFormat:@"%@%@",NSStringFromClass(c.class),NSStringFromCGRect(c.frame)];
+            for (UIView *g in c.subviews) { if (g.hidden) continue; [e appendFormat:@">%@%@",NSStringFromClass(g.class),NSStringFromCGRect(g.frame)]; break; }
+            [kids addObject:e];
+        }
+        if (kids.count) TALog(@"CARLAYOUT children %@",[kids componentsJoinedByString:@" "]);
+    }
+}
+static void TAStartCarLayoutDump(void) {
+    static dispatch_source_t timer; static CGSize last; static NSUInteger tick, dumpAt;
+    timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,0),300*NSEC_PER_MSEC,100*NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer,^{
+        tick++;
+        UIWindowScene *ws=TAYouTubeScene(YES); CGSize size=ws ? ws.coordinateSpace.bounds.size : CGSizeZero;
+        if (!CGSizeEqualToSize(size,last)) { last=size; dumpAt=size.width>0 ? tick+5 : 0; }
+        if (dumpAt && tick>=dumpAt) { dumpAt=0; TADumpCarWindows([NSString stringWithFormat:@"size=%.0fx%.0f",size.width,size.height]); }
+    }); dispatch_resume(timer);
 }
 static uint64_t TAYouTubePackTraits(void) {
     UIWindowScene *carScene=TAYouTubeScene(YES);
@@ -3415,7 +3467,9 @@ static void TAUpdateEdge(void) {
         // Netflix: bridged iPhone app like YouTube. No hooks; keyboard client
         // and CarPlay window zoom only, after launch settles.
         if ([process isEqual:@"com.netflix.Netflix"]) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAStartVideoZoom(); });
+            // 0.49.6 photos: zoomed Netflix drew shifted right and clipped in
+            // both panes. Zoom is off for Netflix until the layout dump shows why.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAStartCarLayoutDump(); });
             return;
         }
         // Shared keyboard: restore the last proven common-keyboard path.
@@ -3431,9 +3485,12 @@ static void TAUpdateEdge(void) {
         if ([process isEqual:@"com.google.ios.youtube"]) {
             // The idiom hook must be in place before YouTube builds its UI.
             uint64_t sw=TAYouTubeSwitchState();
-            if (sw==2 ? NO : (sw==1 ? YES : TA_YOUTUBE_IPAD)) { %init(TAYouTubeIPad); }
-            TALog(@"YOUTUBE CTOR ipad=%d switch=%llu",sw==2 ? 0 : (sw==1 ? 1 : TA_YOUTUBE_IPAD),sw);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAYouTubeStartTraitReports(); TAStartVideoZoom(); });
+            BOOL ipad=sw==2 ? NO : (sw==1 ? YES : TA_YOUTUBE_IPAD);
+            NSString *owner=TAImplementationImage(UIDevice.class,@selector(userInterfaceIdiom));
+            NSString *traitOwner=TAImplementationImage(UITraitCollection.class,@selector(userInterfaceIdiom));
+            if (ipad) { %init(TAYouTubeIPad); } else { %init(TAYouTubePhone); }
+            TALog(@"YOUTUBE CTOR ipad=%d switch=%llu idiomImpBefore=%@ traitImpBefore=%@",ipad,sw,owner,traitOwner);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAYouTubeStartTraitReports(); TAStartVideoZoom(); TAStartCarLayoutDump(); });
             return;
         }
         // 0.44 stable base: all in-app layout experiments (45pt inset reclaim,
