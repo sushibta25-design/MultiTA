@@ -20,13 +20,19 @@ static void TALog(NSString *format, ...) {
     NSDate *time=NSDate.date;
     dispatch_async(queue, ^{
         @autoreleasepool {
-            NSString *path=[NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
+            NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
+            // Sandboxed client apps (YouTube, Google Maps) cannot write
+            // /var/mobile: they log into their own container's tmp/ and
+            // CarPlay.app copies new lines into the main log (TAHarvestClientLogs).
+            BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
+            NSString *path=client ? [NSHomeDirectory() stringByAppendingPathComponent:@"tmp/MultiTA-client.log"]
+                : [bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.3] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.4]%@ %@\n",time,client ? [NSString stringWithFormat:@" [%@]",bundle] : @"",s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -2257,6 +2263,48 @@ static void TAHeatTick(void) {
     TALogHeat(@"tick");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAHeatTick(); });
 }
+// Copy new lines from every client container's tmp/MultiTA-client.log into
+// the main log. Runs off the main thread; offsets are kept per file so each
+// line is copied once. The container list is refreshed every 20 s.
+static void TAHarvestClientLogs(void) {
+    static dispatch_queue_t queue; static dispatch_once_t once;
+    dispatch_once(&once, ^{ queue=dispatch_queue_create("com.sushibta.multita.harvest",DISPATCH_QUEUE_SERIAL); });
+    dispatch_async(queue, ^{
+        @autoreleasepool {
+            static NSMutableDictionary<NSString *,NSNumber *> *offsets; static NSArray<NSString *> *files; static NSTimeInterval scanned;
+            if (!offsets) offsets=[NSMutableDictionary new];
+            NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+            if (!files || now-scanned>20) {
+                NSMutableArray *found=[NSMutableArray new]; NSString *root=@"/var/mobile/Containers/Data/Application";
+                for (NSString *dir in [NSFileManager.defaultManager contentsOfDirectoryAtPath:root error:nil]) {
+                    NSString *f=[NSString stringWithFormat:@"%@/%@/tmp/MultiTA-client.log",root,dir];
+                    if ([NSFileManager.defaultManager fileExistsAtPath:f]) [found addObject:f];
+                }
+                files=found; scanned=now;
+            }
+            for (NSString *f in files) {
+                NSFileHandle *h=[NSFileHandle fileHandleForReadingAtPath:f]; if (!h) continue;
+                unsigned long long size=[h seekToEndOfFile], from=offsets[f].unsignedLongLongValue;
+                if (size<from) from=0; // rotated
+                if (size==from) continue;
+                [h seekToFileOffset:from]; NSData *data=[h readDataToEndOfFile]; [h closeFile];
+                // Copy whole lines only; a partial trailing line waits for the next pass.
+                NSUInteger end=data.length; const uint8_t *bytes=data.bytes;
+                while (end>0 && bytes[end-1]!='\n') end--;
+                if (!end) continue;
+                offsets[f]=@(from+end);
+                int fd=open("/var/mobile/MultiTA-beta.log",O_WRONLY|O_CREAT|O_APPEND,0644);
+                if (fd>=0) { (void)write(fd,bytes,end); close(fd); }
+            }
+        }
+    });
+}
+static void TAStartClientLogHarvest(void) {
+    static dispatch_source_t timer;
+    timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),2*NSEC_PER_SEC,500*NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer,^{ TAHarvestClientLogs(); }); dispatch_resume(timer);
+}
 static void TAStartHeatLog(void) {
     static BOOL started;
     if (started) return;
@@ -2927,6 +2975,24 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 // (1 column), regular at or above it (grid). Process-wide: YouTube on the
 // phone screen also gets the iPad UI. Set TA_YOUTUBE_IPAD to 0 to turn off.
 #define TA_YOUTUBE_IPAD 1
+// Runtime switch without a rebuild: CarPlay.app publishes 2 (off) when the
+// file /var/mobile/MultiTA-youtube-phone exists, else 1 (on); YouTube reads
+// it in its ctor (Darwin notify state is reachable from the sandbox). 0 =
+// CarPlay.app has not run yet: keep the compiled default. Restart YouTube
+// after creating or deleting the file.
+static NSString *const kTAYouTubeIPadSwitch=@"com.sushibta.multita.youtube-ipad";
+static uint64_t TAYouTubeSwitchState(void) {
+    int token=-1; uint64_t v=0;
+    if (notify_register_check(kTAYouTubeIPadSwitch.UTF8String,&token)==NOTIFY_STATUS_OK) { notify_get_state(token,&v); notify_cancel(token); }
+    return v;
+}
+static void TAPublishYouTubeSwitch(void) {
+    int token=-1;
+    if (notify_register_check(kTAYouTubeIPadSwitch.UTF8String,&token)!=NOTIFY_STATUS_OK) return;
+    BOOL off=[NSFileManager.defaultManager fileExistsAtPath:@"/var/mobile/MultiTA-youtube-phone"];
+    notify_set_state(token,off ? 2 : 1);
+    TALog(@"YOUTUBE IPAD switch=%@",off ? @"off (file MultiTA-youtube-phone present)" : @"on");
+}
 #define TA_YOUTUBE_REGULAR_WIDTH 250
 static CGFloat TAYouTubeCarWidth; // cached on the main thread by the trait timer; 0 = no CarPlay scene
 %group TAYouTubeIPad
@@ -2976,10 +3042,55 @@ static uint64_t TAYouTubePackTraits(void) {
     p|=((uint64_t)MIN(MAX(size.width,0),65535))<<16; p|=(uint64_t)MIN(MAX(size.height,0),65535);
     return p;
 }
+// Log how YouTube laid out its CarPlay window: window/root frames and
+// transforms, the screen it thinks it is on, and the first collection view's
+// cell geometry. Explains a 3-column grid drawn tiny into a 155pt pane.
+static UICollectionView *TAYouTubeFindGrid(UIView *v, NSInteger *budget) {
+    if (!v || --*budget<0) return nil;
+    if ([v isKindOfClass:UICollectionView.class] && v.bounds.size.height>100) return (UICollectionView *)v;
+    for (UIView *c in v.subviews) { UICollectionView *g=TAYouTubeFindGrid(c,budget); if (g) return g; }
+    return nil;
+}
+static void TAYouTubeDumpLayout(NSString *why) {
+    UIWindowScene *ws=TAYouTubeScene(YES); if (!ws) return;
+    UIScreen *screen=ws.screen;
+    TALog(@"YOUTUBE LAYOUT %@ scene=%@ screen=%@ scale=%.1f mainScreen=%@ windows=%lu",why,
+          NSStringFromCGRect(ws.coordinateSpace.bounds),NSStringFromCGRect(screen.bounds),screen.scale,
+          NSStringFromCGRect(UIScreen.mainScreen.bounds),(unsigned long)ws.windows.count);
+    for (UIWindow *w in ws.windows) {
+        if (w.hidden) continue;
+        UIView *root=w.rootViewController.view;
+        TALog(@"YOUTUBE WINDOW %@ frame=%@ transform=%@ rootVC=%@ rootView=%@ rootTransform=%@ presented=%@",
+              NSStringFromClass(w.class),NSStringFromCGRect(w.frame),NSStringFromCGAffineTransform(w.transform),
+              NSStringFromClass(w.rootViewController.class),NSStringFromCGRect(root.frame),NSStringFromCGAffineTransform(root.transform),
+              NSStringFromClass(w.rootViewController.presentedViewController.class));
+        NSInteger budget=4000; UICollectionView *grid=TAYouTubeFindGrid(w,&budget);
+        if (!grid) { TALog(@"YOUTUBE GRID none budget=%ld",(long)budget); continue; }
+        NSMutableArray *cells=[NSMutableArray new];
+        for (UICollectionViewCell *c in [grid.visibleCells sortedArrayUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
+            return a.frame.origin.y!=b.frame.origin.y ? (a.frame.origin.y<b.frame.origin.y ? NSOrderedAscending : NSOrderedDescending) : (a.frame.origin.x<b.frame.origin.x ? NSOrderedAscending : NSOrderedDescending); }]) {
+            if (cells.count>=6) break;
+            [cells addObject:[NSString stringWithFormat:@"%@%@",NSStringFromClass(c.class),NSStringFromCGRect(c.frame)]];
+        }
+        UIView *v=grid; NSMutableArray *chain=[NSMutableArray new];
+        for (NSInteger i=0;v && v!=w && i<6;v=v.superview,i++)
+            if (!CGAffineTransformIsIdentity(v.transform)) [chain addObject:[NSString stringWithFormat:@"%@ transform=%@",NSStringFromClass(v.class),NSStringFromCGAffineTransform(v.transform)]];
+        TALog(@"YOUTUBE GRID %@ frame=%@ inWindow=%@ contentSize=%@ layout=%@ visible=%lu traits=%ld/%ld cells=%@ scaledAncestors=%@",
+              NSStringFromClass(grid.class),NSStringFromCGRect(grid.frame),NSStringFromCGRect([grid convertRect:grid.bounds toView:w]),
+              NSStringFromCGSize(grid.contentSize),NSStringFromClass(grid.collectionViewLayout.class),(unsigned long)grid.visibleCells.count,
+              (long)grid.traitCollection.horizontalSizeClass,(long)grid.traitCollection.userInterfaceIdiom,
+              [cells componentsJoinedByString:@" "],chain.count ? [chain componentsJoinedByString:@" "] : @"none");
+    }
+}
 static void TAYouTubeReportTraits(void) {
-    static int token=-1; static uint64_t last;
+    static int token=-1; static uint64_t last; static CGFloat lastWidth; static NSUInteger dumpAt;
     UIWindowScene *carScene=TAYouTubeScene(YES);
     TAYouTubeCarWidth=carScene ? carScene.coordinateSpace.bounds.size.width : 0;
+    // Dump the layout 1.5 s after each width change (5 timer ticks) so the
+    // grid has settled.
+    static NSUInteger tick; tick++;
+    if (TAYouTubeCarWidth!=lastWidth) { lastWidth=TAYouTubeCarWidth; dumpAt=TAYouTubeCarWidth>0 ? tick+5 : 0; }
+    if (dumpAt && tick>=dumpAt) { dumpAt=0; TAYouTubeDumpLayout([NSString stringWithFormat:@"width=%.0f",TAYouTubeCarWidth]); }
     if (token<0 && notify_register_check(kTAYouTubeTraits.UTF8String,&token)!=NOTIFY_STATUS_OK) return;
     uint64_t packed=TAYouTubePackTraits();
     if (!packed || packed==last) return;
@@ -2996,7 +3107,7 @@ static void TAListenYouTubeTraits(void) {
     int token;
     notify_register_dispatch(kTAYouTubeTraits.UTF8String,&token,dispatch_get_main_queue(),^(int t) {
         uint64_t p=0; if (notify_get_state(t,&p)!=NOTIFY_STATUS_OK || !p) return;
-        NSArray *idioms=@[@"none",@"unspecified",@"phone",@"pad",@"tv",@"carPlay",@"?",@"mac"];
+        NSArray *idioms=@[@"unspecified",@"phone",@"pad",@"tv",@"carPlay",@"?",@"mac",@"vision"];
         NSArray *classes=@[@"unspecified",@"compact",@"regular",@"?"];
         NSArray *orients=@[@"unknown",@"portrait",@"upsideDown",@"landscapeLeft",@"landscapeRight",@"?",@"?",@"?"];
         NSUInteger d=(NSUInteger)((p>>60)&0xf),i=(NSUInteger)((p>>56)&0xf);
@@ -3255,7 +3366,9 @@ static void TAUpdateEdge(void) {
         // keyboard client, started after launch settles.
         if ([process isEqual:@"com.google.ios.youtube"]) {
             // The idiom hook must be in place before YouTube builds its UI.
-            if (TA_YOUTUBE_IPAD) { %init(TAYouTubeIPad); }
+            uint64_t sw=TAYouTubeSwitchState();
+            if (sw==2 ? NO : (sw==1 ? YES : TA_YOUTUBE_IPAD)) { %init(TAYouTubeIPad); }
+            TALog(@"YOUTUBE CTOR ipad=%d switch=%llu",sw==2 ? 0 : (sw==1 ? 1 : TA_YOUTUBE_IPAD),sw);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAYouTubeStartTraitReports(); });
             return;
         }
@@ -3296,6 +3409,6 @@ static void TAUpdateEdge(void) {
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
         dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallHost(); TAListenYouTubeTraits(); });
-        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TAStartHeatLog(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TAStartHeatLog(); TAPublishYouTubeSwitch(); TAStartClientLogHarvest(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }

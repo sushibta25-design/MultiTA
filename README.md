@@ -1,6 +1,14 @@
-# MultiTA Beta 0.49.3
+# MultiTA Beta 0.49.4
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.49.4 — log từ trong app, dump bố cục YouTube, công tắc giao diện iPad
+
+Log 0.49.3: YouTube đã nhận iPad idiom và size class theo độ rộng ô (compact dưới 250pt) nhưng vẫn vẽ lưới 3 cột tí hon. Không có dòng `KEYBOARD CANCEL`/`KEYBOARD INPUT` nào vì app client (YouTube, Google Maps) bị sandbox, không ghi được `/var/mobile/MultiTA-beta.log` — chưa bao giờ ghi được. Giờ TALog trong app client ghi vào `<container>/tmp/MultiTA-client.log` (dòng có thêm `[bundle]`), CarPlay.app cứ 2 s chép dòng mới vào log chính.
+
+Mỗi lần ô đổi độ rộng, 1.5 s sau YouTube ghi `YOUTUBE LAYOUT/WINDOW/GRID`: kích thước scene, màn hình nó tưởng đang chạy, frame + transform của window/root, collection view đầu tiên (frame, contentSize, layout class, 6 cell đầu, ancestor có transform). Cho biết vì sao lưới 3 cột bị thu nhỏ.
+
+Công tắc không cần build lại: tạo file `/var/mobile/MultiTA-youtube-phone` (Filza) rồi tắt hẳn YouTube và mở lại → YouTube về giao diện điện thoại; xóa file → giao diện iPad. CarPlay.app đọc file lúc khởi động và phát trạng thái qua notify (`YOUTUBE IPAD switch=…`), YouTube đọc trong ctor (`YOUTUBE CTOR ipad=…`).
 
 ## 0.49.3 — YouTube: cột theo độ rộng ô, hủy tìm kiếm (gộp 0.46.1–0.46.3 vào 0.49.2)
 
