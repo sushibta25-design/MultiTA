@@ -64,14 +64,14 @@ static void TALog(NSString *format, ...) {
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.49.9] [%@] %@",time,bundle,s]); return; }
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.0] [%@] %@",time,bundle,s]); return; }
             NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.9] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -251,6 +251,33 @@ static void TAObserve(TARecord *r, NSUInteger token, NSUInteger serial, NSString
           NSStringFromCGSize(r.targetSize), NSStringFromCGRect(actual), readable,
           NSStringFromCGRect(r.presentation.bounds), NSStringFromCGAffineTransform(r.presentation.transform));
 }
+// Host-side pane zoom (0.50). Some bridged iPhone apps lay out in real
+// CarPlay points and are far too large in a 240pt pane (Netflix: header and
+// tab bar fill the pane). For these the scene is given a larger logical
+// size (pane / zoom) and the presentation view is scaled back to the pane.
+// The app just sees a bigger screen: no hooks or window tricks inside it
+// (the 0.49.6 in-app window transform made Netflix draw shifted right).
+static CGFloat TAPaneZoom(NSString *bundle) {
+    static NSDictionary<NSString *,NSNumber *> *zoom;
+    static dispatch_once_t once; dispatch_once(&once, ^{ zoom=@{@"com.netflix.Netflix":@0.72}; });
+    NSNumber *z=bundle ? zoom[bundle] : nil;
+    return z ? z.doubleValue : 1;
+}
+static CGSize TASceneSizeForPane(NSString *bundle, CGSize pane) {
+    CGFloat z=TAPaneZoom(bundle);
+    return z<1 ? CGSizeMake(round(pane.width/z),round(pane.height/z)) : pane;
+}
+static void TAPlacePresentation(TARecord *r, UIView *pane) {
+    UIView *v=r.presentation; if (!v || !pane) return;
+    CGFloat z=TAPaneZoom(r.bundle); CGSize size=pane.bounds.size;
+    if (z<1) {
+        v.transform=CGAffineTransformMakeScale(z,z);
+        v.bounds=(CGRect){CGPointZero,TASceneSizeForPane(r.bundle,size)};
+        v.center=CGPointMake(size.width/2,size.height/2);
+    } else {
+        v.transform=CGAffineTransformIdentity; v.frame=pane.bounds;
+    }
+}
 static void TATransact(TARecord *r, NSUInteger token, NSUInteger serial, NSUInteger index) {
     NSArray *paths = @[@"updateSettingsWithBlock:", @"updateUISettingsWithBlock:"];
     if (!running || generation != token || r.resizeSerial != serial) return;
@@ -272,6 +299,8 @@ static void TATransact(TARecord *r, NSUInteger token, NSUInteger serial, NSUInte
                 @try {
                     TAInvokeVoid(r.controller, @"_updateSceneUI");
                     TAInvokeVoid(r.presentation, @"_updateFrameAndTransform");
+                    // _updateFrameAndTransform may reset a zoomed pane's geometry.
+                    for (NSInteger i=0;i<2;i++) if (slots[i]==r && TAPaneZoom(r.bundle)<1) TAPlacePresentation(r,panes[i]);
                     [r.presentation setNeedsLayout];
                 } @catch (NSException *e) { TALog(@"REFRESH ERROR %@", e.name); }
                 if (kTADiag) TAObserve(r, token, serial, @"after-transaction");
@@ -286,7 +315,8 @@ static void TATransact(TARecord *r, NSUInteger token, NSUInteger serial, NSUInte
     });
 }
 static void TAResize(TARecord *r, CGSize size) {
-    if (splitWindow) {
+    if (TAPaneZoom(r.bundle)<1) size=TASceneSizeForPane(r.bundle,size);
+    else if (splitWindow) {
         CGSize limit=splitWindow.bounds.size;
         size=CGSizeMake(MIN(size.width,limit.width-6),MIN(size.height,limit.height-6));
     }
@@ -1067,7 +1097,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     // Mirror the divider: each app keeps its own width, so no scene resize.
     splitRatio=1-splitRatio; TALayoutSplit(splitRatio);
     for (NSInteger i=0;i<2;i++) {
-        [panes[i] addSubview:slots[i].presentation]; slots[i].presentation.frame=panes[i].bounds;
+        [panes[i] addSubview:slots[i].presentation]; TAPlacePresentation(slots[i],panes[i]);
     }
     floatingActions.hidden=NO; TARememberPair(); TALog(@"SWAP completed");
 }
@@ -1753,8 +1783,9 @@ static UIButton *TAButton(NSString *title, SEL action) {
         for (NSInteger i=0;i<2;i++) {
             TARecord *r=slots[i]; if (!r.presentation) continue;
             CGSize target=panes[i].bounds.size;
-            r.presentation.frame=panes[i].bounds;
-            if (fabs(r.targetSize.width-target.width)>0.5 || fabs(r.targetSize.height-target.height)>0.5) {
+            TAPlacePresentation(r,panes[i]);
+            CGSize scene=TASceneSizeForPane(r.bundle,target);
+            if (fabs(r.targetSize.width-scene.width)>0.5 || fabs(r.targetSize.height-scene.height)>0.5) {
                 BOOL previous=ownCall; ownCall=YES;
                 @try { TAResize(r,target); } @catch (NSException *e) { TALog(@"DIVIDER RESIZE ERROR %@ %@",r.bundle,e.name); }
                 ownCall=previous;
@@ -2046,7 +2077,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
                 r.presentationID=nil;
                 @throw [NSException exceptionWithName:@"no hosted surface (placeholder view)" reason:r.bundle userInfo:nil];
             }
-            r.presentation=view; r.presentation.transform=CGAffineTransformIdentity; r.presentation.frame=panes[slot].bounds;
+            r.presentation=view; TAPlacePresentation(r,panes[slot]);
             [panes[slot] insertSubview:r.presentation belowSubview:choose[slot]];
             [r.presentation setNeedsLayout]; [r.presentation layoutIfNeeded];
             TALog(@"PRESENTATION CREATED bundle=%@ class=%@",r.bundle,NSStringFromClass(r.presentation.class));
