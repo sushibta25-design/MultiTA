@@ -10,6 +10,48 @@
 #import <unistd.h>
 #import <sys/resource.h>
 
+// Client log channel. Sandboxed apps cannot write /var/mobile, and 0.49.4
+// showed CarPlay.app cannot read their containers either, so a client line
+// travels the way the keyboard preview does: 8-byte chunks in notify states
+// com.sushibta.multita.clog.<bundle>.<i>, then the head state <seq,length>
+// is set and posted. CarPlay.app copies the line into the main log and acks
+// <seq>; the client sends one line at a time and waits up to 1 s for the ack.
+static int TACLogToken(NSString *name) {
+    static NSMutableDictionary<NSString *,NSNumber *> *tokens; static dispatch_once_t once;
+    dispatch_once(&once, ^{ tokens=[NSMutableDictionary new]; });
+    @synchronized(tokens) {
+        NSNumber *cached=tokens[name]; if (cached) return cached.intValue;
+        int token=-1;
+        if (notify_register_check(name.UTF8String,&token)!=NOTIFY_STATUS_OK) token=-1;
+        tokens[name]=@(token); return token;
+    }
+}
+#define TA_CLOG_MAX 1016
+static void TAClientLogSend(NSString *bundle, NSString *line) {
+    static dispatch_queue_t queue; static dispatch_once_t once; static uint32_t seq;
+    dispatch_once(&once, ^{ queue=dispatch_queue_create("com.sushibta.multita.clog",DISPATCH_QUEUE_SERIAL); });
+    dispatch_async(queue, ^{
+        @autoreleasepool {
+            NSString *text=line;
+            while ([text lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>TA_CLOG_MAX)
+                text=[text substringToIndex:[text rangeOfComposedCharacterSequenceAtIndex:text.length-1].location];
+            NSData *d=[text dataUsingEncoding:NSUTF8StringEncoding]; if (!d.length) return;
+            NSString *base=[NSString stringWithFormat:@"com.sushibta.multita.clog.%@",bundle];
+            int head=TACLogToken(base), ack=TACLogToken([base stringByAppendingString:@".ack"]);
+            if (head<0 || ack<0) return;
+            const uint8_t *bytes=(const uint8_t *)d.bytes;
+            for (NSUInteger i=0;i*8<d.length;i++) {
+                uint64_t v=0; memcpy(&v,bytes+i*8,MIN((NSUInteger)8,d.length-i*8));
+                int t=TACLogToken([NSString stringWithFormat:@"%@.%lu",base,(unsigned long)i]);
+                if (t>=0) notify_set_state(t,v);
+            }
+            uint32_t s=++seq; if (!s) s=++seq;
+            if (notify_set_state(head,((uint64_t)s<<32)|d.length)!=NOTIFY_STATUS_OK) return;
+            notify_post(base.UTF8String);
+            for (int k=0;k<50;k++) { uint64_t a=0; notify_get_state(ack,&a); if ((uint32_t)a==s) return; usleep(20000); }
+        }
+    });
+}
 static void TALog(NSString *format, ...) {
     va_list args; va_start(args, format);
     NSString *s = [[NSString alloc] initWithFormat:format arguments:args]; va_end(args);
@@ -21,18 +63,15 @@ static void TALog(NSString *format, ...) {
     dispatch_async(queue, ^{
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
-            // Sandboxed client apps (YouTube, Google Maps) cannot write
-            // /var/mobile: they log into their own container's tmp/ and
-            // CarPlay.app copies new lines into the main log (TAHarvestClientLogs).
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            NSString *path=client ? [NSHomeDirectory() stringByAppendingPathComponent:@"tmp/MultiTA-client.log"]
-                : [bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.49.5] [%@] %@",time,bundle,s]); return; }
+            NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.4]%@ %@\n",time,client ? [NSString stringWithFormat:@" [%@]",bundle] : @"",s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.5] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -2263,47 +2302,32 @@ static void TAHeatTick(void) {
     TALogHeat(@"tick");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAHeatTick(); });
 }
-// Copy new lines from every client container's tmp/MultiTA-client.log into
-// the main log. Runs off the main thread; offsets are kept per file so each
-// line is copied once. The container list is refreshed every 20 s.
-static void TAHarvestClientLogs(void) {
-    static dispatch_queue_t queue; static dispatch_once_t once;
-    dispatch_once(&once, ^{ queue=dispatch_queue_create("com.sushibta.multita.harvest",DISPATCH_QUEUE_SERIAL); });
-    dispatch_async(queue, ^{
-        @autoreleasepool {
-            static NSMutableDictionary<NSString *,NSNumber *> *offsets; static NSArray<NSString *> *files; static NSTimeInterval scanned;
-            if (!offsets) offsets=[NSMutableDictionary new];
-            NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
-            if (!files || now-scanned>20) {
-                NSMutableArray *found=[NSMutableArray new]; NSString *root=@"/var/mobile/Containers/Data/Application";
-                for (NSString *dir in [NSFileManager.defaultManager contentsOfDirectoryAtPath:root error:nil]) {
-                    NSString *f=[NSString stringWithFormat:@"%@/%@/tmp/MultiTA-client.log",root,dir];
-                    if ([NSFileManager.defaultManager fileExistsAtPath:f]) [found addObject:f];
-                }
-                files=found; scanned=now;
+// Receive client log lines (see TAClientLogSend) and append them to the
+// main log as sent; the client already stamped time and bundle.
+static void TAListenClientLogs(void) {
+    static dispatch_queue_t queue; queue=dispatch_queue_create("com.sushibta.multita.clog.host",DISPATCH_QUEUE_SERIAL);
+    for (NSString *bundle in TAClientBundles()) {
+        NSString *base=[NSString stringWithFormat:@"com.sushibta.multita.clog.%@",bundle]; int token;
+        notify_register_dispatch(base.UTF8String,&token,queue,^(int t) {
+            uint64_t h=0; if (notify_get_state(t,&h)!=NOTIFY_STATUS_OK || !h) return;
+            uint32_t s=(uint32_t)(h>>32); NSUInteger len=(NSUInteger)(h&0xffffffff);
+            if (!len || len>TA_CLOG_MAX) return;
+            NSMutableData *d=[NSMutableData dataWithLength:((len+7)/8)*8]; uint8_t *bytes=(uint8_t *)d.mutableBytes;
+            for (NSUInteger i=0;i*8<len;i++) {
+                uint64_t v=0; int c=TACLogToken([NSString stringWithFormat:@"%@.%lu",base,(unsigned long)i]);
+                if (c>=0) notify_get_state(c,&v); memcpy(bytes+i*8,&v,8);
             }
-            for (NSString *f in files) {
-                NSFileHandle *h=[NSFileHandle fileHandleForReadingAtPath:f]; if (!h) continue;
-                unsigned long long size=[h seekToEndOfFile], from=offsets[f].unsignedLongLongValue;
-                if (size<from) from=0; // rotated
-                if (size==from) continue;
-                [h seekToFileOffset:from]; NSData *data=[h readDataToEndOfFile]; [h closeFile];
-                // Copy whole lines only; a partial trailing line waits for the next pass.
-                NSUInteger end=data.length; const uint8_t *bytes=(const uint8_t *)data.bytes;
-                while (end>0 && bytes[end-1]!='\n') end--;
-                if (!end) continue;
-                offsets[f]=@(from+end);
+            d.length=len;
+            NSString *line=[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+            if (line.length) {
+                NSData *out=[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
                 int fd=open("/var/mobile/MultiTA-beta.log",O_WRONLY|O_CREAT|O_APPEND,0644);
-                if (fd>=0) { (void)write(fd,bytes,end); close(fd); }
+                if (fd>=0) { (void)write(fd,out.bytes,out.length); close(fd); }
             }
-        }
-    });
-}
-static void TAStartClientLogHarvest(void) {
-    static dispatch_source_t timer;
-    timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
-    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),2*NSEC_PER_SEC,500*NSEC_PER_MSEC);
-    dispatch_source_set_event_handler(timer,^{ TAHarvestClientLogs(); }); dispatch_resume(timer);
+            int ack=TACLogToken([base stringByAppendingString:@".ack"]);
+            if (ack>=0) notify_set_state(ack,s);
+        });
+    }
 }
 static void TAStartHeatLog(void) {
     static BOOL started;
@@ -3409,6 +3433,6 @@ static void TAUpdateEdge(void) {
         records = [NSMutableDictionary new]; order = [NSMutableArray new]; controls = [TAControls new];
         %init(TAHost);
         dispatch_async(dispatch_get_main_queue(), ^{ TAKBInstallHost(); TAListenYouTubeTraits(); });
-        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TAStartHeatLog(); TAPublishYouTubeSwitch(); TAStartClientLogHarvest(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ TALog(@"LOADED pid=%d",getpid()); TAStartResponsivenessProbe(); TAStartHeatLog(); TAPublishYouTubeSwitch(); TAListenClientLogs(); TALoadMediaRemote(); for (NSString *b in TAClientBundles()) TASetLayoutTarget(b, CGSizeZero); TAListenClients(); TATick(); });
     }
 }

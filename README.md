@@ -1,6 +1,10 @@
-# MultiTA Beta 0.49.4
+# MultiTA Beta 0.49.5
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.49.5 — log app client đi qua notify
+
+Log 0.49.4: `YOUTUBE TRAITS` vẫn tới nhưng không có dòng `[com.google.ios.youtube]` nào → CarPlay.app không đọc được container của app (hoặc app không ghi được). Bỏ cách chép file. Giờ dòng log của app client đi như bản xem trước của bàn phím: cắt thành khối 8 byte vào notify state `com.sushibta.multita.clog.<bundle>.<i>`, đặt head `<seq,len>` rồi post; CarPlay.app ghép lại, ghi vào log chính và ack `<seq>`; client gửi từng dòng, chờ ack tối đa 1 s. Tối đa 1016 byte/dòng.
 
 ## 0.49.4 — log từ trong app, dump bố cục YouTube, công tắc giao diện iPad
 
