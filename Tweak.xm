@@ -64,14 +64,14 @@ static void TALog(NSString *format, ...) {
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.0] [%@] %@",time,bundle,s]); return; }
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.1] [%@] %@",time,bundle,s]); return; }
             NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -267,16 +267,45 @@ static CGSize TASceneSizeForPane(NSString *bundle, CGSize pane) {
     CGFloat z=TAPaneZoom(bundle);
     return z<1 ? CGSizeMake(round(pane.width/z),round(pane.height/z)) : pane;
 }
+// 0.50.0 log: Netflix got the enlarged scene (438x325) but the pane showed
+// it unscaled, cropped right and bottom: _UIScenePresentationView resets its
+// own transform/frame from the scene settings. So the scale lives on a plain
+// holder view the presentation sits in; the presentation only ever fills the
+// holder's bounds (= scene size), whatever it does to itself.
+static char TAZoomHolderKey;
+static UIView *TAZoomHolder(UIView *v) { return objc_getAssociatedObject(v,&TAZoomHolderKey); }
 static void TAPlacePresentation(TARecord *r, UIView *pane) {
     UIView *v=r.presentation; if (!v || !pane) return;
     CGFloat z=TAPaneZoom(r.bundle); CGSize size=pane.bounds.size;
-    if (z<1) {
-        v.transform=CGAffineTransformMakeScale(z,z);
-        v.bounds=(CGRect){CGPointZero,TASceneSizeForPane(r.bundle,size)};
-        v.center=CGPointMake(size.width/2,size.height/2);
-    } else {
-        v.transform=CGAffineTransformIdentity; v.frame=pane.bounds;
+    UIView *holder=TAZoomHolder(v);
+    if (z>=1) {
+        if (holder && v.superview==holder) {
+            [holder.superview insertSubview:v aboveSubview:holder]; [holder removeFromSuperview];
+        }
+        v.transform=CGAffineTransformIdentity; v.frame=pane.bounds; return;
     }
+    if (!holder) {
+        holder=[[UIView alloc] initWithFrame:CGRectZero];
+        holder.backgroundColor=UIColor.blackColor; holder.clipsToBounds=YES;
+        objc_setAssociatedObject(v,&TAZoomHolderKey,holder,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (v.superview!=holder) {
+        UIView *parent=v.superview ?: pane;
+        if (v.superview) [parent insertSubview:holder aboveSubview:v]; else [parent addSubview:holder];
+        [holder addSubview:v];
+    } else if (holder.superview!=pane && !holder.superview) [pane addSubview:holder];
+    CGSize scene=TASceneSizeForPane(r.bundle,size);
+    holder.transform=CGAffineTransformIdentity;
+    holder.bounds=(CGRect){CGPointZero,scene};
+    holder.center=CGPointMake(size.width/2,size.height/2);
+    holder.transform=CGAffineTransformMakeScale(size.width/scene.width,size.height/scene.height);
+    v.transform=CGAffineTransformIdentity; v.frame=holder.bounds;
+}
+// Keep a zoomed presentation's holder in step when the presentation is moved
+// or removed as a unit (swap, cleanup).
+static void TADetachZoomHolder(UIView *v) {
+    UIView *holder=TAZoomHolder(v); if (!holder) return;
+    [v removeFromSuperview]; [holder removeFromSuperview];
 }
 static void TATransact(TARecord *r, NSUInteger token, NSUInteger serial, NSUInteger index) {
     NSArray *paths = @[@"updateSettingsWithBlock:", @"updateUISettingsWithBlock:"];
@@ -350,7 +379,7 @@ static void TACleanup(TARecord *r) {
         void (^restore)(id) = ^(id settings) { @try { TALog(@"RESTORE %@ ok=%d", r.bundle, TASetFrame(settings, original)); } @catch (__unused NSException *e) {} };
         @try { ((void(*)(id,SEL,id))objc_msgSend)(r.scene, NSSelectorFromString(r.updater), restore); } @catch (__unused NSException *e) {}
     }
-    [r.presentation removeFromSuperview]; r.presentation = nil;
+    TADetachZoomHolder(r.presentation); [r.presentation removeFromSuperview]; r.presentation = nil;
     @try {
         SEL invalidate = NSSelectorFromString(@"invalidatePresentationViewForIdentifier:");
         if (r.presentationID && [r.controller respondsToSelector:invalidate]) ((void(*)(id,SEL,id))objc_msgSend)(r.controller, invalidate, r.presentationID);
@@ -1097,7 +1126,7 @@ static UIButton *TAButton(NSString *title, SEL action) {
     // Mirror the divider: each app keeps its own width, so no scene resize.
     splitRatio=1-splitRatio; TALayoutSplit(splitRatio);
     for (NSInteger i=0;i<2;i++) {
-        [panes[i] addSubview:slots[i].presentation]; TAPlacePresentation(slots[i],panes[i]);
+        { UIView *h=TAZoomHolder(slots[i].presentation); if (h && slots[i].presentation.superview==h) [panes[i] addSubview:h]; else [panes[i] addSubview:slots[i].presentation]; } TAPlacePresentation(slots[i],panes[i]);
     }
     floatingActions.hidden=NO; TARememberPair(); TALog(@"SWAP completed");
 }
@@ -2077,8 +2106,9 @@ static UIButton *TAButton(NSString *title, SEL action) {
                 r.presentationID=nil;
                 @throw [NSException exceptionWithName:@"no hosted surface (placeholder view)" reason:r.bundle userInfo:nil];
             }
-            r.presentation=view; TAPlacePresentation(r,panes[slot]);
+            r.presentation=view;
             [panes[slot] insertSubview:r.presentation belowSubview:choose[slot]];
+            TAPlacePresentation(r,panes[slot]);
             [r.presentation setNeedsLayout]; [r.presentation layoutIfNeeded];
             TALog(@"PRESENTATION CREATED bundle=%@ class=%@",r.bundle,NSStringFromClass(r.presentation.class));
         } @catch (NSException *e) { ownCall=previous; if (running && slots[slot]==r) [self failAttach:slot bundle:r.bundle reason:e.name]; return; }

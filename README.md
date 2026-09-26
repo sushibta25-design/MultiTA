@@ -1,6 +1,10 @@
-# MultiTA Beta 0.50.0
+# MultiTA Beta 0.50.1
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.50.1 — thu nhỏ Netflix bằng khung bọc
+
+Log 0.50.0: Netflix đã nhận đúng scene lớn (vd. 438x325 cho ô 315x234) nhưng ô hiển thị nó ở kích thước thật, tràn phải và cụt dưới: `_UIScenePresentationView` tự đặt lại transform/khung theo scene. Giờ view hiển thị nằm trong một khung bọc (view thường, nền đen, cắt biên); khung bọc được thu nhỏ vừa ô, còn view hiển thị chỉ việc lấp đầy khung bọc. Khung bọc đi theo khi đổi bên và bị gỡ khi dọn ô.
 
 ## 0.50.0 — thu nhỏ Netflix từ phía CarPlay
 
