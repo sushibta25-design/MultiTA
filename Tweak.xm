@@ -9,6 +9,9 @@
 #import <dlfcn.h>
 #import <unistd.h>
 #import <sys/resource.h>
+#import <mach/mach.h>
+#import <pthread.h>
+#import <signal.h>
 
 // Client log channel. Sandboxed apps cannot write /var/mobile, and 0.49.4
 // showed CarPlay.app cannot read their containers either, so a client line
@@ -64,14 +67,14 @@ static void TALog(NSString *format, ...) {
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.1] [%@] %@",time,bundle,s]); return; }
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.2] [%@] %@",time,bundle,s]); return; }
             NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.1] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.2] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -2367,7 +2370,7 @@ static void TAHeatTick(void) {
 // main log as sent; the client already stamped time and bundle.
 static void TAListenClientLogs(void) {
     static dispatch_queue_t queue; queue=dispatch_queue_create("com.sushibta.multita.clog.host",DISPATCH_QUEUE_SERIAL);
-    for (NSString *bundle in TAClientBundles()) {
+    for (NSString *bundle in [TAClientBundles() arrayByAddingObject:@"com.sushibta.cleanta.app"]) {
         NSString *base=[NSString stringWithFormat:@"com.sushibta.multita.clog.%@",bundle]; int token;
         notify_register_dispatch(base.UTF8String,&token,queue,^(int t) {
             uint64_t h=0; if (notify_get_state(t,&h)!=NOTIFY_STATUS_OK || !h) return;
@@ -3545,12 +3548,155 @@ static void TAUpdateEdge(void) {
 }
 %end
 %end
+// ---- App watchdog (0.50.2) ------------------------------------------------
+// CleanTA froze in CarPlay (log 0.50.0: CarPlay tore down every scene, then
+// "display gone") and iOS left no report. MultiTA now loads into CleanTA
+// with NO hooks and only watches: CarPlay scene lifecycle, memory warnings,
+// a 10 s heartbeat (memory, CPU, scenes, top controller), uncaught
+// exceptions and fatal signals, and a main-thread stall detector. When the
+// main thread misses a 1 s ping for 2 s, its stack is captured (suspend,
+// walk frame pointers, resume, then symbolicate) and logged, again every 5 s
+// while it stays stuck. Lines reach the main log through the notify channel.
+static mach_port_t TAWDMainThread;
+static volatile uint64_t TAWDPong;
+static NSString *TAWDSymbol(uintptr_t pc) {
+    Dl_info info;
+    if (!dladdr((const void *)pc,&info) || !info.dli_fname) return [NSString stringWithFormat:@"0x%lx",(unsigned long)pc];
+    NSString *image=[[NSString stringWithUTF8String:info.dli_fname] lastPathComponent];
+    if (info.dli_sname) return [NSString stringWithFormat:@"%@`%s+%lu",image,info.dli_sname,(unsigned long)(pc-(uintptr_t)info.dli_saddr)];
+    return [NSString stringWithFormat:@"%@+0x%lx",image,(unsigned long)(pc-(uintptr_t)info.dli_fbase)];
+}
+static NSString *TAWDMainStack(void) {
+#if defined(__arm64__)
+    uintptr_t frames[40]; NSUInteger count=0;
+    pthread_t main=pthread_from_mach_thread_np(TAWDMainThread);
+    uintptr_t lo=main ? (uintptr_t)pthread_get_stackaddr_np(main)-pthread_get_stacksize_np(main) : 0;
+    uintptr_t hi=main ? (uintptr_t)pthread_get_stackaddr_np(main) : 0;
+    if (thread_suspend(TAWDMainThread)!=KERN_SUCCESS) return @"suspend failed";
+    arm_thread_state64_t st; mach_msg_type_number_t n=ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(TAWDMainThread,ARM_THREAD_STATE64,(thread_state_t)&st,&n)==KERN_SUCCESS) {
+        const uintptr_t mask=0x0000000FFFFFFFFFULL; // strip PAC
+        frames[count++]=(uintptr_t)arm_thread_state64_get_pc(st)&mask;
+        frames[count++]=(uintptr_t)arm_thread_state64_get_lr(st)&mask;
+        uintptr_t fp=(uintptr_t)arm_thread_state64_get_fp(st);
+        // Read only inside the main thread's own stack; no locks, no malloc.
+        while (count<40 && fp && !(fp&7) && fp>=lo && fp+16<=hi) {
+            uintptr_t next=((uintptr_t *)fp)[0], lr=((uintptr_t *)fp)[1]&mask;
+            if (!lr) break;
+            frames[count++]=lr;
+            if (next<=fp) break;
+            fp=next;
+        }
+    }
+    thread_resume(TAWDMainThread);
+    NSMutableArray *out=[NSMutableArray new];
+    for (NSUInteger i=0;i<count;i++) [out addObject:TAWDSymbol(frames[i])];
+    return [out componentsJoinedByString:@" | "];
+#else
+    return @"unsupported arch";
+#endif
+}
+static NSString *TAWDSceneSummary(void) {
+    NSMutableArray *parts=[NSMutableArray new];
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        NSString *state=@[@"unattached",@"foregroundActive",@"foregroundInactive",@"background"][MIN((NSUInteger)(scene.activationState+1),3)];
+        NSString *size=[scene isKindOfClass:UIWindowScene.class] ? NSStringFromCGSize(((UIWindowScene *)scene).coordinateSpace.bounds.size) : @"-";
+        [parts addObject:[NSString stringWithFormat:@"%@:%@:%@",scene.session.persistentIdentifier ?: @"?",state,size]];
+    }
+    return [parts componentsJoinedByString:@" "];
+}
+static NSString *TAWDTopController(void) {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class] || ![scene.session.persistentIdentifier hasPrefix:@"Car["]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            UIViewController *vc=w.rootViewController; if (!vc) continue;
+            while (vc.presentedViewController) vc=vc.presentedViewController;
+            return [NSString stringWithFormat:@"%@(root %@)",NSStringFromClass(vc.class),NSStringFromClass(w.rootViewController.class)];
+        }
+    }
+    return @"-";
+}
+static uint64_t TAWDResidentMB(void) {
+    task_vm_info_data_t info; mach_msg_type_number_t n=TASK_VM_INFO_COUNT;
+    return task_info(mach_task_self(),TASK_VM_INFO,(task_info_t)&info,&n)==KERN_SUCCESS ? info.phys_footprint/1048576 : 0;
+}
+static double TAWDCPUSeconds(void) {
+    struct rusage u; getrusage(RUSAGE_SELF,&u);
+    return u.ru_utime.tv_sec+u.ru_utime.tv_usec/1e6+u.ru_stime.tv_sec+u.ru_stime.tv_usec/1e6;
+}
+static void TAWDSignal(int sig) {
+    // Best effort: the log channel is async, so the line may not make it.
+    TALog(@"WATCHDOG FATAL signal=%d",sig);
+    usleep(300000);
+    signal(sig,SIG_DFL); raise(sig);
+}
+static void TAWDException(NSException *e) {
+    TALog(@"WATCHDOG EXCEPTION %@ reason=%@ stack=%@",e.name,e.reason,[[e.callStackSymbols subarrayWithRange:NSMakeRange(0,MIN((NSUInteger)15,e.callStackSymbols.count))] componentsJoinedByString:@" | "]);
+    usleep(300000);
+}
+static void TAStartAppWatchdog(void) {
+    TAWDMainThread=mach_thread_self();
+    NSSetUncaughtExceptionHandler(&TAWDException);
+    static const int fatal[]={SIGABRT,SIGSEGV,SIGBUS,SIGILL,SIGTRAP,SIGFPE};
+    for (size_t i=0;i<sizeof(fatal)/sizeof(fatal[0]);i++) signal(fatal[i],TAWDSignal);
+    NSNotificationCenter *nc=NSNotificationCenter.defaultCenter;
+    NSDictionary *events=@{UISceneWillConnectNotification:@"connect",UISceneDidDisconnectNotification:@"disconnect",
+                           UISceneDidActivateNotification:@"active",UISceneWillDeactivateNotification:@"inactive",
+                           UISceneDidEnterBackgroundNotification:@"background",UISceneWillEnterForegroundNotification:@"foreground"};
+    for (NSString *name in events) {
+        NSString *what=events[name];
+        [nc addObserverForName:name object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            UIScene *scene=note.object;
+            TALog(@"WATCHDOG SCENE %@ id=%@ role=%@",what,scene.session.persistentIdentifier,scene.session.role);
+        }];
+    }
+    [nc addObserverForName:UIApplicationDidReceiveMemoryWarningNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) {
+        TALog(@"WATCHDOG MEMORY WARNING footprint=%lluMB",TAWDResidentMB());
+    }];
+    TALog(@"WATCHDOG START pid=%d footprint=%lluMB scenes=%@",getpid(),TAWDResidentMB(),TAWDSceneSummary());
+    // Heartbeat on the main queue (it also shows the main thread is alive).
+    static dispatch_source_t beat;
+    beat=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+    dispatch_source_set_timer(beat,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC),10*NSEC_PER_SEC,NSEC_PER_SEC);
+    dispatch_source_set_event_handler(beat,^{
+        static double lastCPU; static NSTimeInterval lastAt;
+        double cpu=TAWDCPUSeconds(); NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+        double pct=lastAt>0 ? 100*(cpu-lastCPU)/(now-lastAt) : 0; lastCPU=cpu; lastAt=now;
+        TALog(@"WATCHDOG BEAT footprint=%lluMB cpu=%.0f%% thermal=%ld top=%@ scenes=%@",TAWDResidentMB(),pct,
+              (long)NSProcessInfo.processInfo.thermalState,TAWDTopController(),TAWDSceneSummary());
+    }); dispatch_resume(beat);
+    // Stall detector on its own thread.
+    dispatch_async(dispatch_queue_create("com.sushibta.multita.watchdog",DISPATCH_QUEUE_SERIAL), ^{
+        uint64_t sent=0; NSTimeInterval stuckSince=0, lastDump=0;
+        for (;;) {
+            sent++; uint64_t token=sent;
+            dispatch_async(dispatch_get_main_queue(), ^{ TAWDPong=token; });
+            usleep(1000000);
+            NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+            if (TAWDPong+1>=sent) {
+                if (stuckSince) TALog(@"WATCHDOG MAIN RECOVERED after %.1fs",now-stuckSince);
+                stuckSince=0; continue;
+            }
+            if (!stuckSince) stuckSince=now-1;
+            if (now-stuckSince>=2 && now-lastDump>=5) {
+                lastDump=now;
+                TALog(@"WATCHDOG MAIN STALL %.1fs footprint=%lluMB stack=%@",now-stuckSince,TAWDResidentMB(),TAWDMainStack());
+            }
+        }
+    });
+}
 // Logos allows one %init per group; both client branches call this.
 static void TAInitPhoneIdiom(void) { %init(TAPhoneIdiom); }
 %ctor {
     @autoreleasepool {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
 
+        // CleanTA: watch only (see TAStartAppWatchdog), no hooks. Starts on the
+        // main thread so the stall detector knows which thread to sample.
+        if ([process isEqual:@"com.sushibta.cleanta.app"]) {
+            dispatch_async(dispatch_get_main_queue(), ^{ TAStartAppWatchdog(); });
+            return;
+        }
         // Netflix: bridged iPhone app like YouTube. No hooks; keyboard client
         // and CarPlay window zoom only, after launch settles.
         if ([process isEqual:@"com.netflix.Netflix"]) {

@@ -1,6 +1,14 @@
-# MultiTA Beta 0.50.1
+# MultiTA Beta 0.50.2
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.50.2 — log theo dõi CleanTA
+
+CleanTA đơ trên CarPlay mà iOS không để lại báo cáo. MultiTA giờ nạp vào CleanTA (`com.sushibta.cleanta.app`), KHÔNG hook gì, chỉ ghi vào log chính (qua kênh notify):
+- `WATCHDOG START/SCENE …`: CleanTA mở, cảnh CarPlay/điện thoại kết nối, active, inactive, nền, ngắt.
+- `WATCHDOG BEAT …` mỗi 10 s: bộ nhớ (MB), % CPU, mức nhiệt, view controller đang hiện, trạng thái từng cảnh.
+- `WATCHDOG MAIN STALL …`: luồng chính không phản hồi quá 2 s → chụp ngăn xếp luồng chính (hàm đang kẹt), lặp lại mỗi 5 s khi còn kẹt; `WATCHDOG MAIN RECOVERED` khi hết.
+- `WATCHDOG MEMORY WARNING`, `WATCHDOG EXCEPTION …` (kèm ngăn xếp), `WATCHDOG FATAL signal=…`.
 
 ## 0.50.1 — thu nhỏ Netflix bằng khung bọc
 
