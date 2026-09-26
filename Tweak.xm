@@ -2289,7 +2289,7 @@ static void TAHarvestClientLogs(void) {
                 if (size==from) continue;
                 [h seekToFileOffset:from]; NSData *data=[h readDataToEndOfFile]; [h closeFile];
                 // Copy whole lines only; a partial trailing line waits for the next pass.
-                NSUInteger end=data.length; const uint8_t *bytes=data.bytes;
+                NSUInteger end=data.length; const uint8_t *bytes=(const uint8_t *)data.bytes;
                 while (end>0 && bytes[end-1]!='\n') end--;
                 if (!end) continue;
                 offsets[f]=@(from+end);
