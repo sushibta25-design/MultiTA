@@ -262,7 +262,8 @@ static void TAObserve(TARecord *r, NSUInteger token, NSUInteger serial, NSString
 // (the 0.49.6 in-app window transform made Netflix draw shifted right).
 static CGFloat TAPaneZoom(NSString *bundle) {
     static NSDictionary<NSString *,NSNumber *> *zoom;
-    static dispatch_once_t once; dispatch_once(&once, ^{ zoom=@{}; // 0.50.1 photos: scenes taller than the display are shrunk again by the system (black side bars); off });
+    // 0.50.1 photos: scenes taller than the display are shrunk again by the system (black side bars), so no app is zoomed here.
+    static dispatch_once_t once; dispatch_once(&once, ^{ zoom=@{}; });
     NSNumber *z=bundle ? zoom[bundle] : nil;
     return z ? z.doubleValue : 1;
 }
