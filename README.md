@@ -1,6 +1,12 @@
-# MultiTA Beta 0.49.8
+# MultiTA Beta 0.49.9
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.49.9 — chặn trình phát Netflix trong CarPlay (tránh đơ)
+
+Log 0.49.8: Netflix mở `NFUIPlaygraphPlayerViewController` trong ô CarPlay, ngay sau đó CarPlay.app đơ tới khi watchdog khởi động lại (35 s). Netflix vốn không cho phát lên màn CarPlay/màn ngoài (thông báo "Màn hình đã kết nối không được hỗ trợ"), nên giờ trình phát bị đóng ngay khi xuất hiện trong cảnh CarPlay. Trên màn điện thoại không đổi. Log: `NETFLIX PLAYER closed in CarPlay …`.
+
+Log 0.49.8 cũng cho thấy Netflix KHÔNG bị ConnectTA đổi idiom (`idiomImpBefore=UIKitCore`); sheet có dấu × là giao diện riêng của Netflix.
 
 ## 0.49.8 — Netflix dùng giao diện iPhone
 

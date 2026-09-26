@@ -64,14 +64,14 @@ static void TALog(NSString *format, ...) {
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.49.8] [%@] %@",time,bundle,s]); return; }
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.49.9] [%@] %@",time,bundle,s]); return; }
             NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.8] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.9] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -3132,6 +3132,30 @@ static void TAStartCarLayoutDump(void) {
         if (dumpAt && tick>=dumpAt) { dumpAt=0; TADumpCarWindows([NSString stringWithFormat:@"size=%.0fx%.0f",size.width,size.height]); }
     }); dispatch_resume(timer);
 }
+// 0.49.8 log: Netflix presented NFUIPlaygraphPlayerViewController inside a
+// CarPlay pane and CarPlay.app froze until the watchdog restarted it 35 s
+// later. Netflix refuses playback on CarPlay/external screens anyway (its
+// "connected display not supported" alert), so close its player as soon
+// as it appears in the CarPlay scene. The phone screen is untouched.
+static void TANetflixGuardPlayer(void) {
+    UIWindowScene *ws=TAYouTubeScene(YES); if (!ws) return;
+    for (UIWindow *w in ws.windows) {
+        for (UIViewController *vc=w.rootViewController.presentedViewController;vc;vc=vc.presentedViewController) {
+            NSString *cls=NSStringFromClass(vc.class);
+            if (![cls containsString:@"Playgraph"] && ![cls containsString:@"PlayerViewController"]) continue;
+            if (vc.isBeingDismissed) return;
+            TALog(@"NETFLIX PLAYER closed in CarPlay class=%@ scene=%@",cls,NSStringFromCGSize(ws.coordinateSpace.bounds.size));
+            [vc.presentingViewController dismissViewControllerAnimated:NO completion:nil];
+            return;
+        }
+    }
+}
+static void TAStartNetflixPlayerGuard(void) {
+    static dispatch_source_t timer;
+    timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,0),150*NSEC_PER_MSEC,30*NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer,^{ TANetflixGuardPlayer(); }); dispatch_resume(timer);
+}
 static uint64_t TAYouTubePackTraits(void) {
     UIWindowScene *carScene=TAYouTubeScene(YES);
     if (!carScene) return 0;
@@ -3478,7 +3502,7 @@ static void TAInitPhoneIdiom(void) { %init(TAPhoneIdiom); }
             NSString *owner=TAImplementationImage(UIDevice.class,@selector(userInterfaceIdiom));
             TAInitPhoneIdiom();
             TALog(@"NETFLIX CTOR phone idiom forced idiomImpBefore=%@",owner);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAStartCarLayoutDump(); });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAStartCarLayoutDump(); TAStartNetflixPlayerGuard(); });
             return;
         }
         // Shared keyboard: restore the last proven common-keyboard path.
