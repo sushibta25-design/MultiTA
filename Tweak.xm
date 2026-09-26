@@ -67,14 +67,14 @@ static void TALog(NSString *format, ...) {
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.5] [%@] %@",time,bundle,s]); return; }
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.6] [%@] %@",time,bundle,s]); return; }
             NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.5] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.6] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -3445,6 +3445,27 @@ static NSString *TATopWindowAt(UIWindowScene *s, CGPoint p) {
 // receive a touch there. A clear window over the top of the Dock (clock,
 // signal, Wi-Fi, down to just above the first icon) takes the swipe; it sits
 // above other tweaks' overlays (a CTWindow at level 2100 was seen).
+// 0.50.6: another tweak's full-screen overlay (CleanTA's panel, level 2100)
+// has its own controls under the zone ("Xong" at its top-left). Logs 36/37:
+// with MultiTA installed the tap on "Xong" landed in the zone and CleanTA's
+// blank launcher stayed on CarPlay ("frozen"); without MultiTA it closed.
+// Step aside whenever a foreign window at alert level or above would take a
+// touch inside the zone. Re-checked every TATick (1 s).
+static NSString *TAForeignOverlayIn(UIWindowScene *s, CGRect zone) {
+    CGPoint points[]={CGPointMake(CGRectGetMidX(zone),CGRectGetMidY(zone)),
+                      CGPointMake(CGRectGetMinX(zone)+20,CGRectGetMinY(zone)+20),
+                      CGPointMake(CGRectGetMaxX(zone)-8,CGRectGetMinY(zone)+30)};
+    for (UIWindow *w in s.windows) {
+        if (w==dockTopWindow || w==splitWindow || w==buttonWindow || w==TAKBWindow) continue;
+        if (w.hidden || w.alpha<0.01 || w.windowLevel<UIWindowLevelAlert) continue;
+        for (size_t i=0;i<sizeof(points)/sizeof(points[0]);i++) {
+            CGPoint p=[w convertPoint:points[i] fromCoordinateSpace:s.coordinateSpace];
+            if ([w pointInside:p withEvent:nil] && [w hitTest:p withEvent:nil])
+                return [NSString stringWithFormat:@"%@(level %.0f)",NSStringFromClass(w.class),w.windowLevel];
+        }
+    }
+    return nil;
+}
 static void TAUpdateEdge(void) {
     UIWindowScene *s=dashboard;
     if (!s) { dockTopWindow.hidden=YES; return; }
@@ -3472,6 +3493,13 @@ static void TAUpdateEdge(void) {
     // ends at ~19% and the first Dock icon starts at ~30% of the height.
     CGRect b=s.coordinateSpace.bounds;
     CGRect zone=CGRectMake(CGRectGetMinX(b),CGRectGetMinY(b),MAX(44,round(b.size.width*0.14)),round(b.size.height*0.29));
+    NSString *foreign=TAForeignOverlayIn(s,zone);
+    static NSString *yielded;
+    if (foreign) {
+        if (![yielded isEqual:foreign]) { yielded=foreign; TALog(@"DOCK ZONE yields to %@",foreign); }
+        dockTopWindow.hidden=YES; return;
+    }
+    if (yielded) { TALog(@"DOCK ZONE back (overlay %@ gone)",yielded); yielded=nil; }
     if (!CGRectEqualToRect(dockTopWindow.frame,zone)) {
         dockTopWindow.frame=zone;
         dockZoneRight=CGRectGetMaxX(zone)-CGRectGetMinX(b);

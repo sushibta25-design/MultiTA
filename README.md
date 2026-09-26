@@ -1,6 +1,10 @@
-# MultiTA Beta 0.50.5
+# MultiTA Beta 0.50.6
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.50.6 — vùng vuốt Dock nhường bảng CleanTA
+
+Log 36/37: gỡ MultiTA thì CleanTA "Xong" đóng bình thường, cài lại thì kẹt. Nút "Xong" của CleanTA nằm ở góc trên-trái (10,8,96,46), đúng dưới vùng vuốt Dock của MultiTA (0,0,60,70) mà cửa sổ vùng vuốt ở tầng Alert+200, cao hơn bảng CleanTA (Alert+100) → chạm "Xong" rơi vào MultiTA. Giờ mỗi giây, nếu một cửa sổ của tweak khác ở tầng Alert trở lên nhận chạm trong vùng vuốt thì vùng vuốt tự ẩn (`DOCK ZONE yields to …`), hiện lại khi cửa sổ đó thôi nhận chạm (`DOCK ZONE back`). CleanTA 1.0.5 cũng nâng bảng lên Alert+300.
 
 ## 0.50.5 — log vị trí vẽ ô
 
