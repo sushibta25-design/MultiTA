@@ -67,14 +67,14 @@ static void TALog(NSString *format, ...) {
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.6] [%@] %@",time,bundle,s]); return; }
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.51.0] [%@] %@",time,bundle,s]); return; }
             NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.6] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.51.0] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -147,6 +147,7 @@ static CGFloat TAMinRatioFor(CGFloat w) { return MIN(0.30,MAX(0.18,kTAMinPane/MA
 static CGFloat splitRatio=0.5, dragStartRatio=0.5;
 static UIView *dividerView, *dividerGrip;
 static UIView *dragCovers[2];
+static void TAFitSnapshots(NSInteger i);
 // Edge pull: while an app is open natively, a thin handle sits on the right
 // edge. Long-press it and drag left: a dark rail follows the finger, the open
 // app shrinks to the left pane and the companion app appears on the right.
@@ -800,7 +801,7 @@ static void TALayoutAt(CGFloat cx, CGFloat dw) {
     railIcon.frame=CGRectMake((dw-40)/2,14,40,40); railIcon.alpha=staged ? look : 0;
     dividerGrip.hidden=look>0.5;
     if (floatingActions) floatingActions.center=CGPointMake(cx,floatingActions.center.y);
-    for (NSInteger i=0;i<2;i++) { choose[i].frame=panes[i].bounds; dragCovers[i].frame=panes[i].bounds; }
+    for (NSInteger i=0;i<2;i++) { choose[i].frame=panes[i].bounds; dragCovers[i].frame=panes[i].bounds; TAFitSnapshots(i); }
 }
 static void TALayoutSplit(CGFloat ratio) {
     if (!splitWindow) return;
@@ -827,28 +828,94 @@ static void TALayoutPullFromRight(CGFloat raw) {
     CGFloat t=MIN(1,MAX(0,(rest-raw)/(rest-kTAMaxRatio)));
     TALayoutAt(round(width*raw),round(rail+(normal-rail)*t));
 }
+// 0.51: covers show a picture of the app instead of a dark tile. A
+// snapshot (render-server copy, no app drawing) is taken when the cover
+// appears and stretched with the pane while the divider moves; the app itself
+// is resized once, on release, exactly as before. Falls back to the dark tile
+// with the app icon when no snapshot is available.
+static char TASnapshotSizeKey;
+static UIView *TASnapshotOf(NSInteger i) {
+    UIView *source=slots[i].presentation;
+    if (!source || !source.window || CGRectIsEmpty(source.bounds)) return nil;
+    UIView *snap=nil;
+    @try { snap=[source snapshotViewAfterScreenUpdates:NO]; } @catch (__unused NSException *e) { snap=nil; }
+    if (!snap) return nil;
+    snap.userInteractionEnabled=NO;
+    snap.frame=[panes[i] convertRect:source.bounds fromView:source];
+    objc_setAssociatedObject(snap,&TASnapshotSizeKey,[NSValue valueWithCGSize:panes[i].bounds.size],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return snap;
+}
+static UIView *freezeCovers[2];   // pane pictures held while another app launches
+// Stretch every snapshot in pane i from the pane size it was taken at to now.
+static void TAFitSnapshots(NSInteger i) {
+    CGSize now=panes[i].bounds.size;
+    for (UIView *cover in @[dragCovers[i] ?: (id)NSNull.null, freezeCovers[i] ?: (id)NSNull.null]) {
+        if (![cover isKindOfClass:UIView.class]) continue;
+        cover.frame=panes[i].bounds;
+        for (UIView *snap in cover.subviews) {
+            NSValue *taken=objc_getAssociatedObject(snap,&TASnapshotSizeKey); if (!taken) continue;
+            CGSize was=taken.CGSizeValue; if (was.width<1 || was.height<1) continue;
+            snap.transform=CGAffineTransformIdentity;
+            snap.frame=(CGRect){CGPointZero,was};
+            snap.transform=CGAffineTransformMakeScale(now.width/was.width,now.height/was.height);
+            snap.center=CGPointMake(now.width/2,now.height/2);
+        }
+    }
+}
+static UIView *TAMakeCover(NSInteger i, BOOL *pictured) {
+    UIView *cover=[[UIView alloc] initWithFrame:panes[i].bounds];
+    cover.backgroundColor=[UIColor colorWithWhite:0.07 alpha:1]; cover.userInteractionEnabled=NO; cover.clipsToBounds=YES;
+    UIView *snap=TASnapshotOf(i);
+    if (snap) { [cover addSubview:snap]; if (pictured) *pictured=YES; return cover; }
+    if (pictured) *pictured=NO;
+    UIImageView *icon=[[UIImageView alloc] initWithImage:TAAppIcon(slots[i].bundle)];
+    icon.frame=CGRectMake(0,0,52,52); icon.layer.cornerRadius=12; icon.clipsToBounds=YES;
+    icon.center=CGPointMake(CGRectGetMidX(cover.bounds),CGRectGetMidY(cover.bounds));
+    icon.autoresizingMask=UIViewAutoresizingFlexibleLeftMargin|UIViewAutoresizingFlexibleRightMargin|UIViewAutoresizingFlexibleTopMargin|UIViewAutoresizingFlexibleBottomMargin;
+    [cover addSubview:icon];
+    return cover;
+}
 static void TAShowCovers(BOOL show) {
     for (NSInteger i=0;i<2;i++) {
         if (show) {
             if (!slots[i].presentation || !panes[i]) continue;
             if (!dragCovers[i]) {
-                UIView *cover=[[UIView alloc] initWithFrame:panes[i].bounds];
-                cover.backgroundColor=[UIColor colorWithWhite:0.07 alpha:1]; cover.userInteractionEnabled=NO; cover.alpha=0;
-                UIImageView *icon=[[UIImageView alloc] initWithImage:TAAppIcon(slots[i].bundle)];
-                icon.frame=CGRectMake(0,0,52,52); icon.layer.cornerRadius=12; icon.clipsToBounds=YES;
-                icon.center=CGPointMake(CGRectGetMidX(cover.bounds),CGRectGetMidY(cover.bounds));
-                icon.autoresizingMask=UIViewAutoresizingFlexibleLeftMargin|UIViewAutoresizingFlexibleRightMargin|UIViewAutoresizingFlexibleTopMargin|UIViewAutoresizingFlexibleBottomMargin;
-                [cover addSubview:icon]; [panes[i] addSubview:cover]; dragCovers[i]=cover;
+                BOOL pictured=NO;
+                UIView *cover=TAMakeCover(i,&pictured);
+                // A picture replaces the app seamlessly: no fade, no flash.
+                cover.alpha=pictured ? 1 : 0;
+                [panes[i] addSubview:cover]; dragCovers[i]=cover;
             }
             [panes[i] bringSubviewToFront:dragCovers[i]];
-            [UIView animateWithDuration:0.12 animations:^{ dragCovers[i].alpha=1; }];
+            if (dragCovers[i].alpha<1) [UIView animateWithDuration:0.12 animations:^{ dragCovers[i].alpha=1; }];
         } else if (dragCovers[i]) {
             UIView *cover=dragCovers[i]; dragCovers[i]=nil;
             [UIView animateWithDuration:0.2 animations:^{ cover.alpha=0; } completion:^(__unused BOOL f){ [cover removeFromSuperview]; }];
         }
     }
 }
-
+// Launch in pane: CarPlay opens the new app full screen behind the split and
+// briefly stops drawing the other pane's app (black flash, then PANE
+// REFRESH). Hold a still picture of that pane over it until the new app is
+// attached and the other pane has redrawn.
+static void TAFreezePane(NSInteger i) {
+    if (i<0 || i>1 || freezeCovers[i] || !slots[i].presentation || !panes[i]) return;
+    BOOL pictured=NO; UIView *cover=TAMakeCover(i,&pictured);
+    if (!pictured) return;   // a dark tile would be a flash of its own
+    [panes[i] addSubview:cover]; freezeCovers[i]=cover;
+    [panes[i] bringSubviewToFront:choose[i]];
+    TALog(@"FREEZE pane side=%ld bundle=%@",(long)i,slots[i].bundle);
+}
+static void TAUnfreezePane(NSInteger i, NSTimeInterval delay) {
+    if (i<0 || i>1 || !freezeCovers[i]) return;
+    UIView *cover=freezeCovers[i];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        if (freezeCovers[i]!=cover) return;
+        freezeCovers[i]=nil;
+        [UIView animateWithDuration:0.2 animations:^{ cover.alpha=0; } completion:^(__unused BOOL f){ [cover removeFromSuperview]; }];
+        TALog(@"FREEZE released side=%ld",(long)i);
+    });
+}
 static void TAClearSlot(NSInteger slot, NSString *reason) {
     ++slotRequests[slot]; retryTargets[slot]=nil;
     TARecord *r=slots[slot]; r.attaching=NO; slots[slot]=nil;
@@ -980,7 +1047,7 @@ static void TAStop(NSString *reason) {
     BOOL previous = ownCall; ownCall = YES;
     for (NSInteger i = 0; i < 2; i++) { TACleanup(slots[i]); slots[i] = nil; panes[i] = nil; choose[i] = nil; }
     ownCall = previous;
-    dividerView = nil; dividerGrip = nil; railIcon = nil; dragCovers[0] = dragCovers[1] = nil;
+    dividerView = nil; dividerGrip = nil; railIcon = nil; dragCovers[0] = dragCovers[1] = nil; freezeCovers[0] = freezeCovers[1] = nil;
     staged = NO; pullFromLeft = NO; pullCurrent = nil; pullCompanion = nil;
     lockVisual = nil; swapVisual = nil; chromeHold = NO; ++chromeToken; changeOverlays[0] = changeOverlays[1] = nil;
     lockTaps = 0; ++lockTapSerial; dragMoved = NO; actionPanel = nil;
@@ -1928,9 +1995,12 @@ static UIButton *TAButton(NSString *title, SEL action) {
     choose[slot].enabled=NO; choose[slot].adjustsImageWhenDisabled=NO; choose[slot].hidden=NO;
     NSUInteger token=generation;
     lastNativeTransition=NSProcessInfo.processInfo.systemUptime;
+    TAFreezePane(1-slot);
     allowLaunchInSplit=YES; BOOL ok=TANativeLaunch(bundle); allowLaunchInSplit=NO;
     TALog(@"LAUNCH IN PANE bundle=%@ side=%ld requested=%d",bundle,(long)slot,ok);
-    if (!ok) { launchBundle=nil; launchGuardUntil=0; [self failAttach:slot bundle:bundle reason:@"launch request failed"]; return; }
+    if (!ok) { TAUnfreezePane(1-slot,0); launchBundle=nil; launchGuardUntil=0; [self failAttach:slot bundle:bundle reason:@"launch request failed"]; return; }
+    // Never hold a picture longer than the launch can take.
+    TAUnfreezePane(1-slot,18);
     [self waitLaunch:0 generation:token];
 }
 // A pane showing only the wallpaper still has a hosted layer, but it points
@@ -2006,10 +2076,12 @@ static UIButton *TAButton(NSString *title, SEL action) {
         launchBundle=nil;
         TALog(@"LAUNCH IN PANE ready %@ attempt=%lu",bundle,(unsigned long)attempt);
         [self attach:bundle slot:slot];
+        TAUnfreezePane(1-slot,1.5);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ launchGuardUntil=0; });
         return;
     }
     if (attempt>=64) {
+        TAUnfreezePane(1-slot,0);
         launchBundle=nil; launchGuardUntil=0;
         [self failAttach:slot bundle:bundle reason:@"app did not start within 16s"]; return;
     }

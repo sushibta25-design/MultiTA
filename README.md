@@ -1,6 +1,11 @@
-# MultiTA Beta 0.50.6
+# MultiTA Beta 0.51.0
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.51.0 — ảnh chụp thay nền tối khi kéo, che nháy đen khi mở app
+
+- Kéo thanh chia: thay lớp tối có icon bằng ảnh chụp (snapshot của render server, app không phải vẽ lại) của từng ô, giãn/co theo ô khi kéo. App vẫn chỉ đổi kích thước MỘT lần lúc thả tay như trước. Không chụp được thì quay về lớp tối có icon.
+- Mở app mới vào một ô: CarPlay mở app đó toàn màn phía sau lớp chia màn và ô bên kia ngừng vẽ một nhịp (nháy đen, rồi `PANE REFRESH`). Giờ ngay trước khi mở, ô bên kia được phủ ảnh chụp của chính nó (`FREEZE pane`), gỡ 1.5 s sau khi app mới vào ô (`FREEZE released`); tối đa 18 s, và gỡ ngay nếu mở thất bại.
 
 ## 0.50.6 — vùng vuốt Dock nhường bảng CleanTA
 
