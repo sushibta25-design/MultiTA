@@ -67,14 +67,14 @@ static void TALog(NSString *format, ...) {
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.2] [%@] %@",time,bundle,s]); return; }
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.3] [%@] %@",time,bundle,s]); return; }
             NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.2] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.3] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -262,7 +262,7 @@ static void TAObserve(TARecord *r, NSUInteger token, NSUInteger serial, NSString
 // (the 0.49.6 in-app window transform made Netflix draw shifted right).
 static CGFloat TAPaneZoom(NSString *bundle) {
     static NSDictionary<NSString *,NSNumber *> *zoom;
-    static dispatch_once_t once; dispatch_once(&once, ^{ zoom=@{@"com.netflix.Netflix":@0.72}; });
+    static dispatch_once_t once; dispatch_once(&once, ^{ zoom=@{}; // 0.50.1 photos: scenes taller than the display are shrunk again by the system (black side bars); off });
     NSNumber *z=bundle ? zoom[bundle] : nil;
     return z ? z.doubleValue : 1;
 }
@@ -3162,6 +3162,50 @@ static void TAStartVideoZoom(void) {
     dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,0),250*NSEC_PER_MSEC,50*NSEC_PER_MSEC);
     dispatch_source_set_event_handler(timer,^{ TAZoomCarWindows(); }); dispatch_resume(timer);
 }
+// Netflix content zoom (0.50.3). Scaling the whole window (0.49.6) drew
+// Netflix shifted right; scaling the host presentation with a larger scene
+// (0.50.0-0.50.1) was shrunk a second time by the system because the scene
+// became taller than the display (black bars on both sides). So the window
+// and the scene keep their real size and only the app's own content view,
+// one level below ConnectTA's CTTabletContainer, gets larger bounds and a
+// scale back into the window. Re-applied every 100 ms because the container
+// re-frames its child on layout.
+#define TA_NETFLIX_ZOOM 0.72
+static UIView *TANetflixContentView(UIWindow *w) {
+    UIViewController *root=w.rootViewController; if (!root) return nil;
+    UIViewController *child=root.childViewControllers.firstObject;
+    UIView *v=child.viewIfLoaded;
+    if (v && [v isDescendantOfView:root.view]) return v;
+    return root.viewIfLoaded.subviews.firstObject;
+}
+static void TANetflixZoomContent(void) {
+    UIWindowScene *ws=TAYouTubeScene(YES); if (!ws) return;
+    for (UIWindow *w in ws.windows) {
+        NSString *cls=NSStringFromClass(w.class);
+        if (w.hidden || [cls containsString:@"Keyboard"] || [cls containsString:@"TextEffects"]) continue;
+        UIView *v=TANetflixContentView(w); UIView *parent=v.superview; if (!v || !parent) continue;
+        CGSize size=parent.bounds.size; if (size.width<1 || size.height<1) continue;
+        CGFloat z=TA_NETFLIX_ZOOM;
+        CGAffineTransform t=CGAffineTransformMakeScale(z,z);
+        CGRect want=(CGRect){CGPointZero,CGSizeMake(round(size.width/z),round(size.height/z))};
+        CGPoint center=CGPointMake(size.width/2,size.height/2);
+        if (CGAffineTransformEqualToTransform(v.transform,t) && CGRectEqualToRect(v.bounds,want) &&
+            fabs(v.center.x-center.x)<0.5 && fabs(v.center.y-center.y)<0.5) continue;
+        v.transform=t; v.bounds=want; v.center=center; [v setNeedsLayout];
+        static CGSize logged;
+        if (!CGSizeEqualToSize(logged,want.size)) {
+            logged=want.size;
+            TALog(@"NETFLIX ZOOM content=%@ parent=%@ %@ logical=%@ zoom=%.2f",NSStringFromClass(v.class),NSStringFromClass(parent.class),
+                  NSStringFromCGSize(size),NSStringFromCGSize(want.size),z);
+        }
+    }
+}
+static void TAStartNetflixZoom(void) {
+    static dispatch_source_t timer;
+    timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,0),100*NSEC_PER_MSEC,20*NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer,^{ TANetflixZoomContent(); }); dispatch_resume(timer);
+}
 // Log how a bridged app laid out its CarPlay windows 1.5 s after every
 // scene size change: window frame/bounds/transform/safe area, root view and
 // its first children. Finds offsets such as Netflix's right shift.
@@ -3709,7 +3753,7 @@ static void TAInitPhoneIdiom(void) { %init(TAPhoneIdiom); }
             NSString *owner=TAImplementationImage(UIDevice.class,@selector(userInterfaceIdiom));
             TAInitPhoneIdiom();
             TALog(@"NETFLIX CTOR phone idiom forced idiomImpBefore=%@",owner);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAStartCarLayoutDump(); TAStartNetflixPlayerGuard(); });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAStartCarLayoutDump(); TAStartNetflixPlayerGuard(); TAStartNetflixZoom(); });
             return;
         }
         // Shared keyboard: restore the last proven common-keyboard path.
