@@ -67,14 +67,14 @@ static void TALog(NSString *format, ...) {
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.4] [%@] %@",time,bundle,s]); return; }
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.50.5] [%@] %@",time,bundle,s]); return; }
             NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.4] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.50.5] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -369,6 +369,23 @@ static void TAResize(TARecord *r, CGSize size) {
     TASetLayoutTarget(r.bundle, size);
     NSUInteger token = generation, serial = ++r.resizeSerial;
     TATransact(r, token, serial, 0);
+    // 0.50.4 photos: Netflix panes show a black strip (left when narrow, right
+    // when wide) although Netflix reports it laid out at the pane size. Log
+    // where the host actually draws it once the resize settled.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.6*NSEC_PER_SEC)),dispatch_get_main_queue(), ^{
+        if (!running || generation!=token || r.resizeSerial!=serial || !r.presentation) return;
+        UIView *v=r.presentation; NSMutableArray *kids=[NSMutableArray new];
+        for (UIView *c in v.subviews) {
+            if (kids.count>=4) break;
+            [kids addObject:[NSString stringWithFormat:@"%@%@ layer=%@ bounds=%@",NSStringFromClass(c.class),NSStringFromCGRect(c.frame),
+                             NSStringFromCGRect(c.layer.frame),NSStringFromCGRect(c.bounds)]];
+        }
+        CGRect sceneFrame=CGRectZero; TAReadFrame(r.scene,&sceneFrame);
+        TALog(@"PANE GEOM %@ target=%@ scene=%@ presentation=%@ bounds=%@ transform=%@ superview=%@ inWindow=%@ kids=%@",r.bundle,
+              NSStringFromCGSize(r.targetSize),NSStringFromCGRect(sceneFrame),NSStringFromCGRect(v.frame),NSStringFromCGRect(v.bounds),
+              NSStringFromCGAffineTransform(v.transform),NSStringFromClass(v.superview.class),
+              NSStringFromCGRect([v convertRect:v.bounds toView:nil]),[kids componentsJoinedByString:@" | "]);
+    });
     for (NSNumber *delay in kTADiag ? @[@0.25, @1.0, @3.0] : @[]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             TAObserve(r, token, serial, [NSString stringWithFormat:@"after-%@s", delay]);
