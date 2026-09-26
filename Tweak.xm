@@ -3460,6 +3460,8 @@ static void TAUpdateEdge(void) {
 }
 %end
 %end
+// Logos allows one %init per group; both client branches call this.
+static void TAInitPhoneIdiom(void) { %init(TAPhoneIdiom); }
 %ctor {
     @autoreleasepool {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
@@ -3474,7 +3476,7 @@ static void TAUpdateEdge(void) {
             // (SheetViewController, dim bar with ×). Answer phone like YouTube
             // so Netflix uses its iPhone pages (full detail page, Play button).
             NSString *owner=TAImplementationImage(UIDevice.class,@selector(userInterfaceIdiom));
-            %init(TAPhoneIdiom);
+            TAInitPhoneIdiom();
             TALog(@"NETFLIX CTOR phone idiom forced idiomImpBefore=%@",owner);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAStartCarLayoutDump(); });
             return;
@@ -3495,7 +3497,7 @@ static void TAUpdateEdge(void) {
             BOOL ipad=sw==2 ? NO : (sw==1 ? YES : TA_YOUTUBE_IPAD);
             NSString *owner=TAImplementationImage(UIDevice.class,@selector(userInterfaceIdiom));
             NSString *traitOwner=TAImplementationImage(UITraitCollection.class,@selector(userInterfaceIdiom));
-            if (ipad) { %init(TAYouTubeIPad); } else { %init(TAPhoneIdiom); }
+            if (ipad) { %init(TAYouTubeIPad); } else { TAInitPhoneIdiom(); }
             TALog(@"YOUTUBE CTOR ipad=%d switch=%llu idiomImpBefore=%@ traitImpBefore=%@",ipad,sw,owner,traitOwner);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAYouTubeStartTraitReports(); TAStartVideoZoom(); TAStartCarLayoutDump(); });
             return;
