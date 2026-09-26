@@ -1,6 +1,12 @@
-# MultiTA Beta 0.50.3
+# MultiTA Beta 0.50.4
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.50.4 — tắt thu nhỏ Netflix
+
+Log 0.50.3: `CTTabletContainer` của ConnectTA đặt lại khung view nội dung bằng đúng cửa sổ mỗi lần layout, nên transform 0.72 chỉ làm nội dung nhỏ lại giữa ô (viền đen 4 cạnh). Tắt thu nhỏ Netflix (Netflix về kích thước gốc, không viền). Thu nhỏ đúng cách cần làm trong ConnectTA (chính nó đã thu khung 1024pt của YouTube).
+
+Log 0.50.3 của CleanTA: cả CarPlay.app lẫn app CleanTA đều không đơ (không `MAIN STALL`, CPU 0%); bảng CleanTA không hiện. Sửa ở repo CleanTA 1.0.3.
 
 ## 0.50.3 — Netflix: thu nhỏ phần nội dung bên trong app
 
