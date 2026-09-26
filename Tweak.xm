@@ -64,14 +64,14 @@ static void TALog(NSString *format, ...) {
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.49.7] [%@] %@",time,bundle,s]); return; }
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.49.8] [%@] %@",time,bundle,s]); return; }
             NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.7] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.8] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -3027,7 +3027,7 @@ static CGFloat TAYouTubeCarWidth; // cached on the main thread by the trait time
 // (a YouTube tweak's "iPad layout") or YouTube's own cache forces the iPad
 // idiom. With the switch off, answer phone explicitly; the ctor logs which
 // image implemented userInterfaceIdiom before MultiTA touched it.
-%group TAYouTubePhone
+%group TAPhoneIdiom
 %hook UIDevice
 - (UIUserInterfaceIdiom)userInterfaceIdiom { UIUserInterfaceIdiom i=%orig; return i==UIUserInterfaceIdiomPad ? UIUserInterfaceIdiomPhone : i; }
 %end
@@ -3469,6 +3469,13 @@ static void TAUpdateEdge(void) {
         if ([process isEqual:@"com.netflix.Netflix"]) {
             // 0.49.6 photos: zoomed Netflix drew shifted right and clipped in
             // both panes. Zoom is off for Netflix until the layout dump shows why.
+            // 0.49.7 log: ConnectTA.dylib answers the iPad idiom, so Netflix
+            // wraps in CTTabletContainer and shows titles as an iPad sheet
+            // (SheetViewController, dim bar with ×). Answer phone like YouTube
+            // so Netflix uses its iPhone pages (full detail page, Play button).
+            NSString *owner=TAImplementationImage(UIDevice.class,@selector(userInterfaceIdiom));
+            %init(TAPhoneIdiom);
+            TALog(@"NETFLIX CTOR phone idiom forced idiomImpBefore=%@",owner);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAStartCarLayoutDump(); });
             return;
         }
@@ -3488,7 +3495,7 @@ static void TAUpdateEdge(void) {
             BOOL ipad=sw==2 ? NO : (sw==1 ? YES : TA_YOUTUBE_IPAD);
             NSString *owner=TAImplementationImage(UIDevice.class,@selector(userInterfaceIdiom));
             NSString *traitOwner=TAImplementationImage(UITraitCollection.class,@selector(userInterfaceIdiom));
-            if (ipad) { %init(TAYouTubeIPad); } else { %init(TAYouTubePhone); }
+            if (ipad) { %init(TAYouTubeIPad); } else { %init(TAPhoneIdiom); }
             TALog(@"YOUTUBE CTOR ipad=%d switch=%llu idiomImpBefore=%@ traitImpBefore=%@",ipad,sw,owner,traitOwner);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAYouTubeStartTraitReports(); TAStartVideoZoom(); TAStartCarLayoutDump(); });
             return;

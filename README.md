@@ -1,6 +1,12 @@
-# MultiTA Beta 0.49.7
+# MultiTA Beta 0.49.8
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.49.8 — Netflix dùng giao diện iPhone
+
+Log 0.49.7: chính `ConnectTA.dylib` (tweak đưa app iPhone lên CarPlay) trả lời idiom iPad cho YouTube và Netflix, và bọc app trong `CTTabletContainer` (khung 1024pt thu nhỏ). Với YouTube, MultiTA ép lại `phone` từ 0.49.7 (đã được xác nhận ổn). Netflix giờ cũng được ép `phone`: trang phim mở toàn trang như trên điện thoại (nút Phát, Tải xuống) thay vì sheet iPad có thanh mờ và dấu ×. Thu nhỏ vẫn tắt cho Netflix. Log: `NETFLIX CTOR phone idiom forced …`.
+
+"Không thể phát video — Màn hình đã kết nối không được hỗ trợ" là Netflix chặn phát lên màn hình ngoài (bảo vệ bản quyền), không liên quan MultiTA.
 
 ## 0.49.7 — ép YouTube về giao diện điện thoại, tạm tắt thu nhỏ Netflix
 
