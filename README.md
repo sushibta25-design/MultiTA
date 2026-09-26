@@ -1,6 +1,14 @@
-# MultiTA Beta 0.49.5
+# MultiTA Beta 0.49.6
 
 Gói `com.sushibta.multita.beta` (tên hiển thị MultiTA Beta), phát triển từ nhánh TAduo. Khai báo xung đột với `com.sushibta.multita` (0.10.24.x), `com.sushibta.taduo` và `com.sushibta.duophone`: Sileo sẽ yêu cầu gỡ các gói đó trước khi cài để không có hai tweak cùng hook CarPlay. Bàn phím tiếng Việt dùng chung của MultiTA 0.10.24.x CHƯA có trong bản này. Log: `/var/mobile/MultiTA-beta.log`.
+
+## 0.49.6 — thu nhỏ giao diện YouTube/Netflix trong CarPlay, tắt giao diện iPad
+
+Ảnh thực tế: Netflix (và YouTube giao diện điện thoại) vẽ theo đúng số pt của màn xe (cao 240pt) nên header và thanh tab chiếm gần hết ô, nút toàn màn của trình phát bị đẩy ra ngoài. Giờ trong YouTube và Netflix, cửa sổ CarPlay được cho khung logic lớn hơn (chia cho 0.72) rồi thu nhỏ lại vừa ô bằng transform — giống thu nhỏ trang web: nhiều nội dung hơn, chữ nhỏ hơn, chạm vẫn đúng chỗ. Áp dụng lại mỗi 250 ms vì UIKit đặt lại khung cửa sổ mỗi lần đổi kích thước. Cửa sổ bàn phím không bị đụng. Hệ số: `TA_VIDEO_ZOOM`. Log: `VIDEO ZOOM …`.
+
+Netflix được nạp như YouTube: không hook, chỉ bàn phím chung + thu nhỏ cửa sổ.
+
+Log 0.49.5 cho thấy giao diện iPad của YouTube dựng lưới trên khung cố định 1024pt rồi thu cả khung vào ô (luôn 3 cột tí hon), nên giờ TẮT mặc định. Bật lại: tạo file `/var/mobile/MultiTA-youtube-ipad`, tắt hẳn YouTube rồi mở lại.
 
 ## 0.49.5 — log app client đi qua notify
 

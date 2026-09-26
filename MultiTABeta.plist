@@ -1,1 +1,1 @@
-{ Filter = { Bundles = ("com.apple.CarPlayApp", "com.apple.CarPlayTemplateUIHost", "com.google.ios.youtube"); }; }
+{ Filter = { Bundles = ("com.apple.CarPlayApp", "com.apple.CarPlayTemplateUIHost", "com.google.ios.youtube", "com.netflix.Netflix"); }; }

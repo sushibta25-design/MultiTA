@@ -64,14 +64,14 @@ static void TALog(NSString *format, ...) {
         @autoreleasepool {
             NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
             BOOL client=![bundle isEqual:@"com.apple.CarPlayApp"] && ![bundle isEqual:@"com.apple.CarPlayTemplateUIHost"];
-            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.49.5] [%@] %@",time,bundle,s]); return; }
+            if (client) { TAClientLogSend(bundle,[NSString stringWithFormat:@"%@ [MultiTA 0.49.6] [%@] %@",time,bundle,s]); return; }
             NSString *path=[bundle isEqual:@"com.apple.CarPlayTemplateUIHost"] ? @"/var/mobile/MultiTA-beta-template.log" : @"/var/mobile/MultiTA-beta.log";
             static NSUInteger writes;
             if ((writes++ % 64)==0 && [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize]>1024*1024) {
                 [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".1"] error:nil];
                 [NSFileManager.defaultManager moveItemAtPath:path toPath:[path stringByAppendingString:@".1"] error:nil];
             }
-            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.5] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data=[[NSString stringWithFormat:@"%@ [MultiTA 0.49.6] %@\n",time,s] dataUsingEncoding:NSUTF8StringEncoding];
             int fd=open(path.fileSystemRepresentation,O_WRONLY|O_CREAT|O_APPEND,0644);
             if (fd>=0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -2405,7 +2405,7 @@ static NSString *TAChannel(NSString *bundle, NSString *kind) {
     return [NSString stringWithFormat:@"com.sushibta.multita.beta.geometry.%@.%@", bundle, kind];
 }
 static NSArray<NSString *> *TAClientBundles(void) {
-    return @[@"com.apple.Maps", @"com.google.Maps", @"com.google.ios.youtube", @"com.google.ios.youtubemusic", @"vn.vietmap.live"];
+    return @[@"com.apple.Maps", @"com.google.Maps", @"com.google.ios.youtube", @"com.google.ios.youtubemusic", @"vn.vietmap.live", @"com.netflix.Netflix"];
 }
 // The layout experiment is enabled only for the exact scene dimensions
 // currently owned by TAduo. No global narrow-screen heuristics.
@@ -2998,9 +2998,12 @@ static void TATraceClientTouch(UIWindow *window, UIEvent *event) {
 // a CarPlay scene is connected: compact below TA_YOUTUBE_REGULAR_WIDTH pt
 // (1 column), regular at or above it (grid). Process-wide: YouTube on the
 // phone screen also gets the iPad UI. Set TA_YOUTUBE_IPAD to 0 to turn off.
-#define TA_YOUTUBE_IPAD 1
-// Runtime switch without a rebuild: CarPlay.app publishes 2 (off) when the
-// file /var/mobile/MultiTA-youtube-phone exists, else 1 (on); YouTube reads
+// 0.49.5 log: the iPad UI lays its feed out on a fixed 1024pt canvas and
+// scales the whole canvas into the pane (3 tiny columns at any width), so it
+// is off by default since 0.49.6.
+#define TA_YOUTUBE_IPAD 0
+// Runtime switch without a rebuild: CarPlay.app publishes 1 (on) when the
+// file /var/mobile/MultiTA-youtube-ipad exists, else 2 (off); YouTube reads
 // it in its ctor (Darwin notify state is reachable from the sandbox). 0 =
 // CarPlay.app has not run yet: keep the compiled default. Restart YouTube
 // after creating or deleting the file.
@@ -3013,9 +3016,9 @@ static uint64_t TAYouTubeSwitchState(void) {
 static void TAPublishYouTubeSwitch(void) {
     int token=-1;
     if (notify_register_check(kTAYouTubeIPadSwitch.UTF8String,&token)!=NOTIFY_STATUS_OK) return;
-    BOOL off=[NSFileManager.defaultManager fileExistsAtPath:@"/var/mobile/MultiTA-youtube-phone"];
-    notify_set_state(token,off ? 2 : 1);
-    TALog(@"YOUTUBE IPAD switch=%@",off ? @"off (file MultiTA-youtube-phone present)" : @"on");
+    BOOL on=[NSFileManager.defaultManager fileExistsAtPath:@"/var/mobile/MultiTA-youtube-ipad"];
+    notify_set_state(token,on ? 1 : 2);
+    TALog(@"YOUTUBE IPAD switch=%@",on ? @"on (file MultiTA-youtube-ipad present)" : @"off");
 }
 #define TA_YOUTUBE_REGULAR_WIDTH 250
 static CGFloat TAYouTubeCarWidth; // cached on the main thread by the trait timer; 0 = no CarPlay scene
@@ -3045,6 +3048,37 @@ static UIWindowScene *TAYouTubeScene(BOOL car) {
         if (isCar==car) return (UIWindowScene *)scene;
     }
     return nil;
+}
+// Bridged iPhone video apps (YouTube, Netflix) lay out in real CarPlay
+// points; at 240pt tall their header and tab bar fill the pane and the
+// player's full-screen button falls off (device photos, 0.49.5). Give their
+// CarPlay windows a larger logical size and scale them down to fit, like
+// page zoom: content, hit testing and first responders stay in UIKit's own
+// coordinate system. Re-applied by a timer because UIKit resets window
+// frames on every scene resize. Keyboard windows are left alone.
+#define TA_VIDEO_ZOOM 0.72
+static void TAZoomCarWindows(void) {
+    UIWindowScene *ws=TAYouTubeScene(YES); if (!ws) return;
+    CGSize size=ws.coordinateSpace.bounds.size; if (size.width<1 || size.height<1) return;
+    CGFloat z=TA_VIDEO_ZOOM;
+    CGAffineTransform t=CGAffineTransformMakeScale(z,z);
+    CGRect want=(CGRect){CGPointZero,CGSizeMake(round(size.width/z),round(size.height/z))};
+    CGPoint center=CGPointMake(size.width/2,size.height/2);
+    for (UIWindow *w in ws.windows) {
+        NSString *cls=NSStringFromClass(w.class);
+        if (w.hidden || [cls containsString:@"Keyboard"] || [cls containsString:@"TextEffects"]) continue;
+        if (CGAffineTransformEqualToTransform(w.transform,t) && CGRectEqualToRect(w.bounds,want) &&
+            fabs(w.center.x-center.x)<0.5 && fabs(w.center.y-center.y)<0.5) continue;
+        w.transform=t; w.bounds=want; w.center=center;
+        [w setNeedsLayout];
+        TALog(@"VIDEO ZOOM %@ scene=%@ logical=%@ zoom=%.2f",cls,NSStringFromCGSize(size),NSStringFromCGSize(want.size),z);
+    }
+}
+static void TAStartVideoZoom(void) {
+    static dispatch_source_t timer;
+    timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+    dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,0),250*NSEC_PER_MSEC,50*NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer,^{ TAZoomCarWindows(); }); dispatch_resume(timer);
 }
 static uint64_t TAYouTubePackTraits(void) {
     UIWindowScene *carScene=TAYouTubeScene(YES);
@@ -3378,6 +3412,12 @@ static void TAUpdateEdge(void) {
     @autoreleasepool {
         NSString *process = NSBundle.mainBundle.bundleIdentifier;
 
+        // Netflix: bridged iPhone app like YouTube. No hooks; keyboard client
+        // and CarPlay window zoom only, after launch settles.
+        if ([process isEqual:@"com.netflix.Netflix"]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAStartVideoZoom(); });
+            return;
+        }
         // Shared keyboard: restore the last proven common-keyboard path.
         if ([TAClientBundles() containsObject:process] &&
             ![process isEqual:@"com.google.ios.youtube"] &&
@@ -3393,7 +3433,7 @@ static void TAUpdateEdge(void) {
             uint64_t sw=TAYouTubeSwitchState();
             if (sw==2 ? NO : (sw==1 ? YES : TA_YOUTUBE_IPAD)) { %init(TAYouTubeIPad); }
             TALog(@"YOUTUBE CTOR ipad=%d switch=%llu",sw==2 ? 0 : (sw==1 ? 1 : TA_YOUTUBE_IPAD),sw);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAYouTubeStartTraitReports(); });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ TAKBInstallClients(); TAYouTubeStartTraitReports(); TAStartVideoZoom(); });
             return;
         }
         // 0.44 stable base: all in-app layout experiments (45pt inset reclaim,
